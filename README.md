@@ -1,0 +1,241 @@
+# diffmrc
+
+An end-to-end differentiable multireference electronic structure stack, spanning
+configuration interaction (CASCI), complete active space self-consistent field
+(CASSCF), state-averaged CASSCF, and second-order N-electron valence perturbation
+theory (NEVPT2). Energies, nuclear gradients, and second derivatives are obtained
+from a single code path by automatic differentiation; no hand-derived derivative
+equation appears at any layer.
+
+Built on [PySCF](https://pyscf.org/) and [pyscfad](https://github.com/fishjojo/pyscfad),
+with [JAX](https://github.com/jax-ml/jax) providing the differentiable array operations.
+All arithmetic is double precision.
+
+> **Project status: early development.** This is a research codebase, released
+> to accompany a methods paper and to make the results reproducible. It is not
+> a finished library. Interfaces may change without notice, the test coverage is
+> partial, and the numerical behaviour of the orbital-optimization and
+> perturbation layers depends on convergence settings that are described in the
+> Known limitations section rather than enforced by the code. Several of the
+> limitations listed there are properties of the method family and are not
+> expected to be removed by further development of this package. Use it for
+> research, check the convergence diagnostics it reports, and do not rely on it
+> as a black box.
+
+---
+
+## What is here
+
+```
+stack/          the method layers
+  casci_pyscfad.py    differentiable CI: cs_casci, cs_casci_blocked
+  casscf_lih.py       orbital rotation parametrization; block_rotation
+  orblib.py           standard definition of the rotation parameter set
+  optim_theta.py      robust orbital optimizer (scipy L-BFGS-B with fallback)
+  grad.py             nuclear gradient (production interface)
+  nevpt2_impl.py      NEVPT2 assembly
+  nevpt2_core.py      core/semi-core/cross classes
+  nevpt2_f3ca.py      fourth-order density contraction
+  nevpt2_rdm.py       active-space RDM machinery
+  nevpt2_m4.py        determinant-basis CI vector and Hamiltonian elements
+
+experiments/    scripts reproducing the results in the paper
+figures/        figure sources
+```
+
+## Requirements
+
+```
+python >= 3.10
+pyscfad >= 0.3.3          # provides jax-based gto, scf
+pyscf >= 2.5              # for reference comparisons
+jax >= 0.4                # jax_enable_x64 must be True
+numpy, scipy, matplotlib
+```
+
+Install into a dedicated environment; `pyscfad` pins a specific JAX version.
+
+```bash
+conda create -n diffmrc python=3.11
+conda activate diffmrc
+pip install pyscf pyscfad jax numpy scipy matplotlib
+```
+
+## Quick start
+
+Compute a CASSCF nuclear gradient for water.
+
+```python
+import os
+os.environ['JAX_PLATFORMS'] = 'cpu'
+for v in ('OMP_NUM_THREADS', 'MKL_NUM_THREADS',
+          'OPENBLAS_NUM_THREADS', 'NUMEXPR_NUM_THREADS',
+          'VECLIB_MAXIMUM_THREADS'):
+    os.environ[v] = '8'
+
+import numpy as np
+import jax
+jax.config.update('jax_enable_x64', True)
+from jax import numpy as jnp
+from pyscfad import gto as pgto, scf as pscf
+from casscf_lih import block_rotation
+from orblib import orbital_pairs
+from optim_theta import optimize_theta
+from grad import make_energy_fn, make_grad_fn, solve_theta_star, nuclear_gradient
+
+mol = pgto.Mole(); mol.atom = 'O 0 0 0; H 0.7557 0 0.5880; H -0.7557 0 0.5880'
+mol.basis = '6-31g'; mol.build()
+nmo, ncore, nact, nele = mol.nao_nr(), 4, 2, 2
+pairs = orbital_pairs(ncore, nact, nmo, include_cv=True)
+
+E_cas = make_energy_fn(ncore, nact, nele)
+mf = pscf.RHF(mol); mf.kernel()
+C_rhf = jnp.asarray(np.asarray(mf.mo_coeff))
+h1e = mol.intor('int1e_kin') + mol.intor('int1e_nuc')
+eri = mol.intor('int2e', aosym='s1')
+
+E_theta = lambda t: E_cas(C_rhf @ block_rotation(t, nmo, pairs), h1e, eri,
+                          mol.energy_nuc())
+th_star, gnorm = solve_theta_star(mol, C_rhf, E_theta, len(pairs),
+                                  optimize_theta, steps=2000, g_conv=1e-12)
+g = nuclear_gradient(mol, make_grad_fn(nmo, pairs, th_star, E_cas, pscf))
+print(g)          # (natm, 3) in Eh/bohr
+```
+
+## The differentiable layers
+
+**Configuration interaction.** The CI matrix is diagonalized in full, so its
+eigenvalues and eigenvectors are differentiable array functions of the matrix
+elements; the Hellmann–Feynman relation supplies the derivative and the
+eigenvector is differentiated through the same operation. Because the
+Hamiltonian is block-diagonal in the spin projection $S_z$, the diagonalization
+is performed blockwise (`cs_casci_blocked`); a single `eigh` over the full
+determinant space encounters degeneracies across blocks and returns NaN in
+reverse mode.
+
+**Orbital relaxation.** Orbitals are parametrized by an exponential map of
+antisymmetric rotation parameters, $C = C_0 R(\theta)$, so the optimization is a
+continuous function of a fixed-size parameter vector and the envelope theorem
+applies to the first derivative. The parameter set must include core–virtual
+rotations; a set restricted to core–active and active–virtual rotations leaves
+the optimization at a non-stationary point.
+
+**State averaging.** A differentiable weighted average over a multi-state
+diagonalization.
+
+**Perturbation correction.** NEVPT2 assembled by differentiable contraction of
+the fourth-order reduced density matrix, with all core, semi-core, and cross
+terms.
+
+## Second derivatives
+
+The orbital-response term enters the second derivative even though it cancels
+from the first. Two independent implementations are provided and agree to
+1.6 × 10⁻¹¹ where both are carried to convergence.
+
+*Unrolled iteration.* Evaluate $N$ Newton steps inside the computational graph
+and back-propagate through them. The self-consistent-field step that supplies
+the reference orbitals must be evaluated outside the loop (it cannot be traced);
+the orbital Hessian requires regularization $\lambda I$; and the iteration
+should start from the converged parameters at the reference geometry.
+
+*Implicit differentiation.* Apply the implicit-function theorem to the
+stationarity condition $g(\theta^*, R) = 0$:
+
+```
+dθ*/dR  = −H_θθ⁻¹ · ∂²E/∂θ∂R
+d²E/dR² = ∂²E/∂R²|_θ + (∂²E/∂R∂θ) · (dθ*/dR)
+```
+
+The orbital Hessian is not positive definite and can be near-singular — a
+redundant active-orbital rotation contributes a near-null direction whose
+gradient component vanishes identically. **Use a pseudo-inverse, not a direct
+solve.**
+
+The implicit route is the faster of the two and scales better in the number of
+rotation parameters; the unrolled route serves as its independent check.
+
+## Verification
+
+Two checks used throughout require no external reference and are exact rather
+than threshold-based:
+
+*Invariance.* Translational invariance requires $\sum_a \partial E/\partial R_a = 0$;
+rotational invariance requires $\sum_a R_a \times \partial E/\partial R_a = 0$.
+Both hold to $10^{-14}$ or better for the systems reported here.
+
+*Variational ordering.* Because the active space contains the starting
+determinant, the orbital-optimized energy cannot lie above the energy of the
+orbitals it started from. A violation means the two calculations described
+different electronic states.
+
+Agreement with a finite difference of the same code path establishes internal
+consistency only: automatic differentiation propagates a numerically correct
+derivative of an incorrectly implemented energy. An independent reference is
+required, and where that reference is itself an iterative calculation its
+convergence must be checked at every point — an unconverged reference enters a
+central difference as an intermediate value, not as a stationary point.
+
+## Known limitations
+
+*Full diagonalization* in the CI step limits the active-space size. Larger
+spaces require a differentiable iterative eigensolver.
+
+*Multiple stationary points.* The CASSCF energy is non-convex in the orbital
+parameters; different starting points can reach different stationary points,
+and the selection is not stable even at fixed settings. Report a stationarity
+certificate and the stationary-point spread alongside any multireference
+number.
+
+*Convergence of the perturbation layer.* NEVPT2 depends on the orbitals more
+sensitively than the CASSCF energy does, so energy-based convergence criteria
+are insufficient when the target quantity is the correction. Use the stability
+of the correction between independent runs together with an orbital-gradient
+threshold.
+
+*Cost of second derivatives.* The implicit route requires the orbital Hessian in
+memory and does not exploit sparsity; the unrolled route scales with the number
+of iterations. Neither is competitive with analytic second derivatives for
+single-reference methods.
+
+## Reproducing the paper
+
+Scripts in `experiments/` correspond to the results section by section:
+
+| Script | Result |
+|---|---|
+| `t157_grad_gold_fix.py` | nuclear gradient validation; invariance conditions |
+| `t155_grad_regression.py` | gradient regression against an analytic reference |
+| `t150_gold_refine.py` | golden-standard Hessian by re-optimizing at each displaced geometry |
+| `t149_mix_AD_vs_FD.py` | why finite differences fail for the mixed derivative |
+| `t151_unrolled_theta.py` | response term by unrolled iteration |
+| `t152_generalize.py` | unrolled route on CO and N₂ |
+| `t154_implicit_hessian.py` | response term by implicit differentiation |
+| `t153_hessian_to_freq.py` | harmonic frequencies from the mass-weighted Hessian |
+| `t159_basis_active_space.py` | frequency dependence on basis set and active space |
+| `t160_collect_freq.py` | frequency summary |
+| `t142_layerA_v2.py`, `t156_eu_scf_convergence.py`, `t158_eu_fix_rerun.py` | lanthanide dissociation energies |
+
+Each script sets the thread environment variables internally and writes
+JSON to a `results/` directory. Run them from a directory containing `stack/`
+on `sys.path`, or adjust the path insert at the top of each script.
+
+## License
+
+[MIT](LICENSE) — see the license file.
+
+## Citing
+
+If you use this code, please cite the repository:
+
+```bibtex
+@software{diffmrc,
+  title  = {diffmrc: a differentiable multireference electronic structure stack},
+  author = {{The diffmrc developers}},
+  year   = {2026},
+  url    = {https://github.com/<owner>/diffmrc},
+  note   = {Version 0.1.0, early development}
+}
+```
+
+A manuscript describing the method is in preparation.

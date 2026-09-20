@@ -1,0 +1,9 @@
+# Core
+numpy>=1.24
+scipy>=1.10
+pyscf>=2.5
+pyscfad>=0.3.3
+jax>=0.4
+
+# Figures
+matplotlib>=3.7
