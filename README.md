@@ -27,38 +27,65 @@ All arithmetic is double precision.
 ## What is here
 
 ```
-stack/          the method layers
-  casci_pyscfad.py    differentiable CI: cs_casci, cs_casci_blocked
-  casscf_lih.py       orbital rotation parametrization; block_rotation
-  orblib.py           standard definition of the rotation parameter set
-  optim_theta.py      robust orbital optimizer (scipy L-BFGS-B with fallback)
-  grad.py             nuclear gradient (production interface)
-  nevpt2_impl.py      NEVPT2 assembly
-  nevpt2_core.py      core/semi-core/cross classes
-  nevpt2_f3ca.py      fourth-order density contraction
-  nevpt2_rdm.py       active-space RDM machinery
-  nevpt2_m4.py        determinant-basis CI vector and Hamiltonian elements
+src/diffmrc/    the package
+  core/             numerical kernel: differentiable CI, CASSCF, gradients, NEVPT2
+  analysis/         wavefunction analysis: entropies, diagnostics, composition
 
+tests/          unit and integration tests
 experiments/    scripts reproducing the results in the paper
 figures/        figure sources
+stack/          the original flat layout, kept so the experiments still run
 ```
+
+## Layers
+
+| Layer | Contents | Status |
+|---|---|---|
+| `diffmrc.core` | Differentiable CI, CASSCF, gradients, NEVPT2 | Frozen, validated against reference values |
+| `diffmrc.analysis` | Entropies, plateau detection, diagnostics, composition | Pure functions over numpy arrays |
+
+`diffmrc.core` is frozen: its numerics are validated and must not move. The
+migration into `src/diffmrc/core` changed import paths and removed the
+demonstration blocks only; no algorithm, constant, or convergence threshold was
+touched. `tests/core/test_frozen_reference.py` pins an energy from the
+manuscript so that a future edit to the kernel fails loudly.
+
+`diffmrc.analysis` is independent of the kernel by contract -- it may not
+import `core` or any upper layer. Run `lint-imports` to verify the boundary
+holds. See `docs/analysis_layer.md`.
+
+`stack/` holds the same kernel in its original flat layout. It exists only so
+that the scripts under `experiments/` continue to run as they did when the
+paper's results were produced. New code should use `diffmrc.core`; `stack/`
+will be removed once the experiments have been repointed.
 
 ## Requirements
 
 ```
 python >= 3.10
+numpy, scipy              # required
 pyscfad >= 0.3.3          # provides jax-based gto, scf
 pyscf >= 2.5              # for reference comparisons
 jax >= 0.4                # jax_enable_x64 must be True
-numpy, scipy, matplotlib
+matplotlib                # for the figure sources
 ```
 
-Install into a dedicated environment; `pyscfad` pins a specific JAX version.
+The analysis layer needs only numpy; the numerical kernel needs the rest.
+Install into a dedicated environment, since `pyscfad` pins a specific JAX
+version.
 
 ```bash
 conda create -n diffmrc python=3.11
 conda activate diffmrc
-pip install pyscf pyscfad jax numpy scipy matplotlib
+pip install -e ".[core,dev]"          # kernel plus test and lint tooling
+pip install matplotlib                # only for the figures
+```
+
+For the analysis layer alone, `pip install -e ".[dev]"` is enough.
+
+```bash
+pytest tests/ -v        # unit and integration tests
+lint-imports            # verifies the layer boundary
 ```
 
 ## Quick start
@@ -78,10 +105,11 @@ import jax
 jax.config.update('jax_enable_x64', True)
 from jax import numpy as jnp
 from pyscfad import gto as pgto, scf as pscf
-from casscf_lih import block_rotation
-from orblib import orbital_pairs
-from optim_theta import optimize_theta
-from grad import make_energy_fn, make_grad_fn, solve_theta_star, nuclear_gradient
+from diffmrc.core.rotation import block_rotation
+from diffmrc.core.orblib import orbital_pairs
+from diffmrc.core.optimizer import optimize_theta
+from diffmrc.core.grad import (make_energy_fn, make_grad_fn,
+                               solve_theta_star, nuclear_gradient)
 
 mol = pgto.Mole(); mol.atom = 'O 0 0 0; H 0.7557 0 0.5880; H -0.7557 0 0.5880'
 mol.basis = '6-31g'; mol.build()
@@ -233,7 +261,7 @@ If you use this code, please cite the repository:
   title  = {diffmrc: a differentiable multireference electronic structure stack},
   author = {{The diffmrc developers}},
   year   = {2026},
-  url    = {https://github.com/<owner>/diffmrc},
+  url    = {https://github.com/jqChen1566/diffmrc},
   note   = {Version 0.1.0, early development}
 }
 ```
