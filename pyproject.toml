@@ -1,0 +1,44 @@
+[build-system]
+requires = ["setuptools>=64", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "diffmrc"
+version = "0.1.0"
+description = "End-to-end differentiable multireference electronic structure stack"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+dependencies = [
+    "numpy>=1.24",
+    "scipy>=1.10",
+]
+
+[project.optional-dependencies]
+core = [
+    "pyscfad>=0.3.3",
+    "pyscf>=2.5",
+    "jax>=0.4",
+]
+dev = [
+    "pytest>=7.0",
+    "import-linter>=2.0",
+]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.importlinter]
+root_package = "diffmrc"
+
+[[tool.importlinter.contracts]]
+name = "analysis must not import core or any upper layer"
+type = "forbidden"
+source_modules = ["diffmrc.analysis"]
+forbidden_modules = [
+    "diffmrc.core",
+    "diffmrc.policy",
+    "diffmrc.driver",
+    "diffmrc.report",
+    "diffmrc.cli",
+]

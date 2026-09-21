@@ -1,0 +1,131 @@
+#!/usr/bin/env python
+"""Orbital rotation parametrization and a differentiable CASSCF chain, validated on LiH.
+
+LiH carries a core orbital (the Li 1s), which makes it the transferability test
+of the framework to systems with both core and active spaces:
+
+  - the general CI solver with a fully occupied core and Condon-Slater rules
+    over the active space, where core-active cross terms are handled
+    automatically;
+  - the outer rotation pairs, core<->active for STO-3G and core<->active plus
+    core<->virtual plus active<->virtual for 6-31G;
+  - a quasi-Newton orbital optimizer, and the envelope-theorem nuclear gradient.
+
+Verification: energy against an independent CASSCF implementation, and the
+gradient against both a central difference and the analytic reference.
+
+The `block_rotation` function defined here is the parametrization used
+throughout the package; the production optimizer lives in optim_theta.py.
+
+Usage: python casscf_lih.py [all|sto3g|631g]
+"""
+import os
+os.environ.setdefault("JAX_PLATFORMS", "")
+
+import jax
+jax.config.update("jax_enable_x64", True)
+from jax import numpy as jnp
+
+def block_rotation(theta, nmo, pairs):
+    """Exponential-map orbital rotation, C = R(theta), as a product of Givens rotations.
+
+    Builds an nmo x nmo identity and accumulates one plane rotation per entry of
+    `theta`, in the order given by `pairs`. The result multiplies the reference
+    orbital set on the right, so the orbitals become a differentiable function
+    of a fixed-size parameter vector.
+
+    `pairs` must span every non-redundant inter-block rotation; see
+    orblib.orbital_pairs.
+    """
+    R = jnp.eye(nmo)
+    for t, (i, j) in zip(theta, pairs):
+        c, s = jnp.cos(t), jnp.sin(t)
+        Rt = jnp.eye(nmo).at[i, i].set(c).at[i, j].set(s).at[j, i].set(-s).at[j, j].set(c)
+        R = R @ Rt
+    return R
+
+def optimize_theta(mol, C0, E_of, npar, steps=200, g_conv=1e-9,
+                   log_interval=0, label="", theta0=None):
+    """L-BFGS with two-loop recursion and backtracking line search.
+
+    First-order only, which keeps the JIT compilation cheap, and superlinear
+    convergence, reaching the tolerance in roughly 20 to 50 steps for about ten
+    parameters.
+
+    log_interval > 0 prints energy, gradient norm, and resident memory every N
+    steps, which is how an earlier out-of-memory failure in a state-averaged
+    calculation was diagnosed.
+
+    NOTE: this implementation is retained for the validation case. The
+    production optimizer is optim_theta.optimize_theta, which replaces it with
+    a safeguarded L-BFGS-B; the two defects of the version here are a line-search
+    fallback branch that is unreachable (twenty halvings leave the step at
+    2^-20, above the 1e-8 floor) and an initial Hessian scaling fixed at unity
+    rather than (s.y)/(y.y), which lets the step explode along flat directions.
+
+    theta0 allows a warm start. Without it the optimization begins from the RHF
+    orbitals, which on systems with shallow barriers can settle on a suboptimal
+    CASSCF stationary point; supplying a theta0 closer to the solution of a
+    reference calculation improves the second-order correction substantially.
+    The reported energy and gradient are always computed by this chain.
+    """
+    import resource
+    E_jit = jax.jit(E_of)
+    g_jit = jax.jit(jax.grad(E_of))
+    theta = (jnp.zeros(npar) if theta0 is None
+             else jnp.asarray(theta0))
+    g = g_jit(theta)
+    gnorm = float(jnp.linalg.norm(g))
+    s_list, y_list = [], []
+    m = 8  # memory length
+
+    def lbfgs_dir(g_, ss, ys):
+        q = g_
+        alphas = []
+        for s, y in reversed(list(zip(ss, ys))):
+            rho = 1.0 / (y @ s + 1e-30)
+            alpha = rho * (s @ q)
+            alphas.append(alpha)
+            q = q - alpha * y
+        gamma = (ys[-1] @ ss[-1]) / (ys[-1] @ ys[-1] + 1e-30) if ys else 1.0
+        r = gamma * q
+        for s, y, alpha in zip(ss, ys, reversed(alphas)):
+            rho = 1.0 / (y @ s + 1e-30)
+            beta = rho * (y @ r)
+            r = r + s * (alpha - beta)
+        return -r
+
+    for it in range(steps):
+        if gnorm < g_conv:
+            break
+        if log_interval and it % log_interval == 0:
+            rss = open("/proc/self/status").read().split("VmRSS:")[1].split()[0]
+            print(f"[{label} iter {it}] E = {float(E_jit(theta)):.10f}  "
+                  f"|g| = {gnorm:.2e}  RSS = {int(rss)/1048576:.1f}GB", flush=True)
+        d = lbfgs_dir(g, s_list, y_list)
+        # Backtracking line search (Armijo condition)
+        e = float(E_jit(theta))
+        lr = 1.0
+        for _ in range(20):
+            theta_new = theta + lr * d
+            en = float(E_jit(theta_new))
+            if en < e + 1e-4 * lr * float(g @ d):
+                break
+            lr *= 0.5
+        if lr < 1e-8:  # line search failed; fall back to a gradient step
+            d = -g
+            lr = 1e-3
+            theta_new = theta + lr * d
+        s = theta_new - theta
+        y = g_jit(theta_new) - g
+        if float(s @ y) > 1e-12:  # store only if the curvature condition holds
+            s_list.append(s)
+            y_list.append(y)
+            if len(s_list) > m:
+                s_list.pop(0)
+                y_list.pop(0)
+        theta = theta_new
+        g = g_jit(theta)
+        gnorm = float(jnp.linalg.norm(g))
+    E = float(E_jit(theta))
+    return E, theta, gnorm
