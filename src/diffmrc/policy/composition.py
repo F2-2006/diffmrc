@@ -84,6 +84,15 @@ def element_shell_weights(mol, C, element, angular_momentum):
 def rank_by_weight(candidates, weights, n_take, min_ratio=DEFAULT_MIN_RATIO):
     """Rank candidate orbitals by weight and split off the top `n_take`.
 
+    The ranking is only as good as the set it is given. A weight says
+    how much of a shell an orbital carries; it does not say whether the
+    orbital is occupied, and an antibonding orbital can carry more of a
+    ligand's character than the bonding orbital below it. Ranking the
+    whole orbital space by a ligand weight and taking the top three once
+    put three *empty* orbitals into an active space while dropping every
+    occupied ligand orbital. Partition by occupation first, then rank
+    within the block you actually want.
+
     Parameters
     ----------
     candidates : sequence of int

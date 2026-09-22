@@ -46,6 +46,16 @@ So a rule for the molecular end has to label by dominant composition and
 then accept whatever count comes out, rather than assume a count and
 hunt for orbitals to fill it. The atom-end rules below still work on
 their own terms.
+
+A second failure, measured the same day, has the same shape. Ranking
+*all* orbitals by ligand-p weight and taking the top three puts three
+unoccupied antibonding orbitals into the active space, because the
+weights of those are higher than the weights of the occupied bonding
+pair. On EuF the top three come out as orbitals 175, 58 and 59, all
+empty, while the occupied fluorine 2p orbitals sit at ranks seven and
+eight. **Ranking without a partition by occupation is ranking the wrong
+set.** The molecular-end rule therefore partitions first and ranks only
+within the occupied block.
 """
 from dataclasses import dataclass, field
 
@@ -56,7 +66,12 @@ from .occupation import select_valence, split_by_occupation
 
 __all__ = ['SHELL_RULES', 'Candidate', 'SelectionPlan',
            'candidate_from_elements', 'plan_from_elements',
-           'dominant_shell']
+           'dominant_shell', 'molecular_end_candidate']
+
+# The shells the molecular-end rule inspects, in the order they are
+# offered to the labelling. The order does not affect the result -- the
+# largest weight wins -- but fixing it keeps the evidence reproducible.
+_ANGULAR_MOMENTA = ('s', 'p', 'd', 'f')
 
 def dominant_shell(candidates, weights_by_shell, min_weight=0.5):
     """Label each candidate by the shell it mostly belongs to.
@@ -127,10 +142,21 @@ MAIN_GROUP = (
 
 @dataclass
 class SelectionPlan:
-    """Which rule to apply, decided from the elements present."""
+    """Which rule to apply, decided from the elements present.
+
+    The ``end`` field is the decision that matters most to a caller: the
+    two ends need different rules, and feeding one the other's rule is
+    how the earlier attempts went wrong. A bare lanthanide atom shows
+    seven singly occupied f orbitals; a lanthanide inside a molecule
+    shows six, with its 6s and 5d taking two of the eight open-shell
+    slots. ``center_n`` and ``ligand_n`` are the atom end's counts and
+    are not a prediction for the molecular end -- there the count comes
+    out of ``molecular_end_candidate``'s labelling.
+    """
 
     center: str = ''
     ligand: str = ''
+    end: str = 'atom'
     center_n: int = 7
     ligand_n: int = 3
     evidence: list = field(default_factory=list)
@@ -138,6 +164,10 @@ class SelectionPlan:
     @property
     def has_ligand(self):
         return bool(self.ligand)
+
+    @property
+    def is_molecular(self):
+        return self.end == 'molecular'
 
 
 def plan_from_elements(symbols):
@@ -179,7 +209,7 @@ def plan_from_elements(symbols):
     others = sorted({s for s in symbols if s != center})
     if not others:
         return SelectionPlan(center=center, center_n=7, ligand='',
-                             ligand_n=0,
+                             ligand_n=0, end='atom',
                              evidence=[f'{center}: bare lanthanide atom'])
     if len(others) > 1:
         return None
@@ -188,8 +218,11 @@ def plan_from_elements(symbols):
         return None
 
     return SelectionPlan(
-        center=center, ligand=ligand, center_n=7, ligand_n=3,
-        evidence=[f'centre {center} with ligand {ligand}'],
+        center=center, ligand=ligand, end='molecular',
+        center_n=7, ligand_n=3,
+        evidence=[f'centre {center} with ligand {ligand}: the molecular '
+                  f'end, where the centre shows six f orbitals rather than '
+                  f'the atom\'s seven'],
     )
 
 SHELL_RULES = {
@@ -300,5 +333,131 @@ def candidate_from_elements(mol, C, occ, center, ligand=None,
     return Candidate(
         active=sorted(picked),
         per_element={ligand: dict(n_orbitals=len(picked), n_ao_p=w.n_ao)},
+        evidence=evidence,
+    )
+
+
+def _shell_weight_arrays(mol, C, elements):
+    """Overlap-weighted per-orbital weights for every element and shell.
+
+    Only shells the basis actually contains are included, so an absent
+    shell cannot contribute a zero-weight array that looks like a real
+    measurement of zero.
+    """
+    out = {}
+    for element in elements:
+        for letter in _ANGULAR_MOMENTA:
+            w = element_shell_weights(mol, C, element, letter)
+            if w.n_ao:
+                out[f'{element}-{letter}'] = w.weights
+    return out
+
+
+def molecular_end_candidate(mol, C, occ, center, ligand, min_weight=0.5,
+                            ligand_doubly=None):
+    """Propose an active space for a lanthanide centre inside a molecule.
+
+    This is the rule the molecular end needs and the atom-end rules do
+    not provide. Two things separate the two cases, and both were
+    measured on EuF rather than assumed.
+
+    The occupation pattern does not identify the centre's shell. At the
+    molecular end all eight open-shell orbitals of EuF are singly
+    occupied, so counting them gives eight and says nothing about which
+    are f. Only the composition separates them: six are Eu f, one is the
+    Eu 6s, one is the Eu 5d.
+
+    The count is *six* f orbitals, not the seven a free europium atom
+    shows. A rule that assumes seven and then hunts for orbitals to fill
+    the count has to drop one of the eight, and which one it drops is
+    decided by an arbitrary tie-break. The rule here does the opposite:
+    it labels each orbital by its dominant composition and accepts
+    whatever count comes out.
+
+    Parameters
+    ----------
+    mol : pyscf-like
+        Provides ``ao_labels()`` and ``intor('int1e_ovlp')``.
+    C : array_like
+        Molecular orbital coefficients.
+    occ : array_like
+        Occupation numbers.
+    center : str
+        Symbol of the metal centre.
+    ligand : str
+        Symbol of the main-group ligand.
+    min_weight : float
+        Smallest dominant weight that counts as an identification. An
+        orbital whose largest weight falls below it is mixed, and the
+        rule refuses rather than guess.
+    ligand_doubly : int, optional
+        How many of the ligand's doubly occupied valence orbitals to
+        take, strongest ligand character first. ``None`` takes all of
+        them, which is the labelling-driven answer; an integer asks for
+        a smaller space explicitly.
+
+    Returns
+    -------
+    Candidate or None
+        None when the structure does not match: no open shell, no
+        ligand-dominated doubly occupied orbital, more orbitals requested
+        than the labelling found, or a mixed orbital that could not be
+        labelled. A caller must treat None as a refusal.
+    """
+    occ = np.asarray(occ, dtype=float)
+    partition = split_by_occupation(occ)
+    if not partition.singly or not partition.doubly:
+        return None
+
+    shells = _shell_weight_arrays(mol, C, (center, ligand))
+    if not shells:
+        return None
+
+    candidates = partition.singly + partition.doubly
+    labels = dominant_shell(candidates, shells, min_weight=min_weight)
+    unlabelled = sorted(i for i in candidates if labels[i] is None)
+    if unlabelled:
+        # One mixed orbital is enough to make the whole count unreliable,
+        # and the count is the entire point of this rule.
+        return None
+
+    ligand_p = f'{ligand}-p'
+    if ligand_p not in shells:
+        return None
+    found = [i for i in partition.doubly if labels[i] == ligand_p]
+    if not found:
+        return None
+
+    if ligand_doubly is None:
+        donor = found
+    elif ligand_doubly < 0 or ligand_doubly > len(found):
+        return None
+    else:
+        donor = sorted(found,
+                       key=lambda i: -float(shells[ligand_p][i]))[:ligand_doubly]
+
+    counts = {}
+    for i in partition.singly:
+        counts[labels[i]] = counts.get(labels[i], 0) + 1
+    summed = ', '.join(f'{name} x{n}' for name, n in sorted(counts.items()))
+    evidence = [
+        f'{center}: {len(partition.singly)} singly occupied orbitals, '
+        f'labelled by dominant composition as {summed}'
+    ]
+    if len(donor) == len(found):
+        evidence.append(
+            f'{ligand}: all {len(found)} doubly occupied orbitals whose '
+            f'dominant composition is {ligand} p'
+        )
+    else:
+        evidence.append(
+            f'{ligand}: {len(donor)} of {len(found)} doubly occupied '
+            f'{ligand} p orbitals, strongest character first'
+        )
+
+    return Candidate(
+        active=sorted(partition.singly + donor),
+        per_element={center: dict(n_orbitals=len(partition.singly)),
+                     ligand: dict(n_orbitals=len(donor))},
         evidence=evidence,
     )

@@ -6,8 +6,9 @@ from diffmrc.policy.rules import (
     SHELL_RULES,
     Candidate,
     candidate_from_elements,
-    plan_from_elements,
     dominant_shell,
+    molecular_end_candidate,
+    plan_from_elements,
 )
 
 
@@ -263,3 +264,151 @@ def test_dominant_shell_ignores_shells_not_supplied():
     weights = {'Eu-f': _shell_weights()['Eu-f']}
     labels = dominant_shell([36], weights)
     assert labels[36] is None          # nothing dominates in this subset
+
+
+# ---------------------------------------------------------------------
+# Which rule applies, decided from the elements alone.
+# ---------------------------------------------------------------------
+def test_a_bare_lanthanide_is_planned_for_the_atom_end():
+    plan = plan_from_elements(['Eu'])
+    assert plan is not None
+    assert plan.end == 'atom'
+    assert not plan.is_molecular
+    assert plan.center_n == 7
+
+
+def test_a_lanthanide_with_one_ligand_is_planned_for_the_molecular_end():
+    """The molecular end needs a different rule, so the plan says which.
+
+    A caller that reads only `center_n` would apply the atom rule -- seven
+    singly occupied f orbitals -- to a molecule that has six, which is
+    the mistake this field exists to prevent.
+    """
+    plan = plan_from_elements(['Eu', 'F'])
+    assert plan is not None
+    assert plan.end == 'molecular'
+    assert plan.is_molecular
+    assert plan.center == 'Eu'
+    assert plan.ligand == 'F'
+
+
+def test_the_plan_reads_element_sets_not_atom_counts():
+    """Repeats carry no information, because the symbols are deduplicated.
+
+    The plan decides which *rule* to use. A second fluorine changes the
+    orbital count, and the rule itself discovers that from the occupation
+    and composition rather than from the element list.
+    """
+    assert plan_from_elements(['Eu', 'F', 'F']).end == 'molecular'
+    assert plan_from_elements(['Eu', 'Eu']).end == 'atom'
+
+
+def test_the_plan_refuses_what_it_has_no_rule_for():
+    assert plan_from_elements(['C', 'H', 'H', 'H']) is None   # no centre
+    assert plan_from_elements(['Eu', 'F', 'O']) is None       # two ligands
+    assert plan_from_elements(['Eu', 'Pd']) is None           # ligand it
+    assert plan_from_elements([]) is None                     # nothing
+
+
+# ---------------------------------------------------------------------
+# The molecular end: labelling decides the count.
+#
+# The structure below is EuF's, reduced to one atomic orbital per orbital.
+# The measured numbers are three doubly occupied fluorine p orbitals and
+# eight singly occupied orbitals -- six Eu f, one Eu s, one Eu d -- with
+# the 2pz orbital mixed into the bond and the two pi orbitals clean.
+# ---------------------------------------------------------------------
+EU_F_LABELS = [
+    '0 Eu 1s',                                       # a core orbital
+    '1 F 2px', '2 F 2py', '3 F 2pz',
+    '4 Eu 4f-3', '5 Eu 4f-2', '6 Eu 4f-1',
+    '7 Eu 4f+1', '8 Eu 4f+2', '9 Eu 4f+3',
+    '10 Eu 6s', '11 Eu 5d+0',
+]
+EU_F_OCC = np.array([2.0] * 4 + [1.0] * 8)
+
+
+def _eu_f_mol(C=None):
+    """A Mole over the labels above, with an identity overlap."""
+    mol = _FakeMol(EU_F_LABELS)
+    return mol, (np.eye(len(EU_F_LABELS)) if C is None else C)
+
+
+def test_molecular_end_labels_the_singly_occupied_orbitals():
+    """The centre's share comes out as six f, one s, one d."""
+    mol, C = _eu_f_mol()
+    c = molecular_end_candidate(mol, C, EU_F_OCC, center='Eu', ligand='F')
+    assert c.per_element['Eu']['n_orbitals'] == 8
+    joined = ' '.join(c.evidence)
+    assert 'Eu-f x6' in joined
+    assert 'Eu-s x1' in joined
+    assert 'Eu-d x1' in joined
+    assert 'Eu-f x7' not in joined
+
+
+def test_molecular_end_takes_every_ligand_dominated_doubly_occupied():
+    """Three fluorine p orbitals, all doubly occupied, all taken."""
+    mol, C = _eu_f_mol()
+    c = molecular_end_candidate(mol, C, EU_F_OCC, center='Eu', ligand='F')
+    assert c.active == list(range(1, 12))
+    assert c.per_element['F']['n_orbitals'] == 3
+
+
+def test_molecular_end_can_be_asked_for_fewer_ligand_orbitals():
+    """Strongest ligand character first.
+
+    The 2pz orbital is sigma bonding and mixes with the centre, so its
+    fluorine weight is lower than the two pi orbitals'. A caller asking
+    for two gets the pi pair, not an arbitrary two.
+    """
+    C = np.eye(len(EU_F_LABELS))
+    C[3, 3] = 0.8          # 2pz keeps only 0.64 fluorine character
+    C[11, 3] = 0.6         # the rest goes to the centre's 5d
+    mol, _ = _eu_f_mol(C)
+    c = molecular_end_candidate(mol, C, EU_F_OCC, center='Eu', ligand='F',
+                                ligand_doubly=2)
+    assert c.active == [1, 2] + list(range(4, 12))
+    assert c.per_element['F']['n_orbitals'] == 2
+    assert '2 of 3' in ' '.join(c.evidence)
+
+
+def test_molecular_end_refuses_a_mixed_orbital():
+    """A candidate with no dominant shell would make the count arbitrary."""
+    C = np.eye(len(EU_F_LABELS))
+    C[4, 4] = 0.6          # Eu f down to 0.36, below the 0.5 floor
+    C[1, 4] = 0.6          # fluorine p up to 0.36 -- no shell dominates
+    mol, _ = _eu_f_mol(C)
+    assert molecular_end_candidate(mol, C, EU_F_OCC,
+                                   center='Eu', ligand='F') is None
+
+
+def test_molecular_end_refuses_a_closed_shell():
+    mol, C = _eu_f_mol()
+    assert molecular_end_candidate(mol, C, np.full(12, 2.0), center='Eu',
+                                   ligand='F') is None
+
+
+def test_molecular_end_refuses_when_no_ligand_p_orbital_is_doubly_occupied():
+    """A ligand whose p shell is empty is not a match.
+
+    The core orbital stays doubly occupied, so the refusal comes from the
+    missing ligand, not from an empty doubly occupied block.
+    """
+    occ = np.array([2.0, 0.0, 0.0, 0.0] + [1.0] * 8)
+    mol, C = _eu_f_mol()
+    assert molecular_end_candidate(mol, C, occ, center='Eu',
+                                   ligand='F') is None
+
+
+def test_molecular_end_refuses_more_ligand_orbitals_than_found():
+    mol, C = _eu_f_mol()
+    assert molecular_end_candidate(mol, C, EU_F_OCC, center='Eu', ligand='F',
+                                   ligand_doubly=4) is None
+
+
+def test_molecular_end_refuses_a_ligand_without_p_functions():
+    labels = ['0 F 1s', '1 Eu 4f-3', '2 Eu 6s']
+    mol = _FakeMol(labels)
+    occ = np.array([2.0, 1.0, 1.0])
+    assert molecular_end_candidate(mol, np.eye(3), occ, center='Eu',
+                                   ligand='F') is None
