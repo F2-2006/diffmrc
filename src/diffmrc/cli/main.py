@@ -50,9 +50,10 @@ def build_parser():
     p.add_argument('--spin', type=int, default=0,
                    help='2S = Nalpha - Nbeta, NOT the multiplicity 2S+1 '
                         '(default: 0)')
-    p.add_argument('--level', choices=_LEVELS, default='robust',
-                   help='fast skips the entanglement verification '
-                        '(default: robust)')
+    p.add_argument('--level', choices=_LEVELS, default='fast',
+                   help='fast runs a single orbital optimization from the '
+                        'reference orbitals; robust also retries from '
+                        'several starting points (default: fast)')
     p.add_argument('--active-space', default=None,
                    help='manual active space, e.g. 2-4 or 2,3,4; bypasses '
                         'automatic selection')

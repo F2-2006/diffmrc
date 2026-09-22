@@ -129,3 +129,17 @@ def test_a_malformed_active_space_is_rejected(tmp_path, capsys):
     rc = main([str(p), '--active-space', 'not-a-range'])
     assert rc == 2
     assert 'active' in capsys.readouterr().err.lower()
+
+
+def test_the_default_level_is_the_one_that_can_run():
+    """The robust level refuses until the verification exists.
+
+    Defaulting to it would make every run end in a refusal whose reason
+    is a missing feature rather than a property of the system. The
+    escalation path stays: a fast run whose checks fail reports that it
+    should be re-run at the robust level.
+    """
+    from diffmrc.cli.main import build_parser
+
+    args = build_parser().parse_args(['mol.xyz'])
+    assert args.level == 'fast'
