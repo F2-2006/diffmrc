@@ -143,3 +143,35 @@ def test_the_default_level_is_the_one_that_can_run():
 
     args = build_parser().parse_args(['mol.xyz'])
     assert args.level == 'fast'
+
+
+def test_a_failed_self_check_is_not_reported_as_success(tmp_path):
+    """Exit 0 means success; a run whose checks failed is not one.
+
+    Surfaced by the server validation on 2026-09-22: a fast run that
+    landed on a saddle (three negative eigenvalues) printed its energy
+    and exited 0, which a script would read as a quotable result.
+    """
+    import diffmrc.cli.main as main_mod
+    from diffmrc.driver.state import Decision, Level, SelfCheck
+
+    p = _write(tmp_path)
+
+    class _Result:
+        energy = -75.0
+        frequencies = None
+        algorithm_data = {'geometry': 'x'}
+        decision = Decision(
+            level=Level.ROBUST,
+            checks=[SelfCheck('orbital_gradient', True, 'ok'),
+                    SelfCheck('hessian_curvature', False, '3 negatives')],
+            reasons=['hessian_curvature: 3 negatives'],
+            suggestions=[])
+
+    original = main_mod._compute
+    main_mod._compute = lambda *a, **k: _Result()
+    try:
+        rc = main_mod.main([str(p), '--outdir', str(tmp_path)])
+    finally:
+        main_mod._compute = original
+    assert rc != 0

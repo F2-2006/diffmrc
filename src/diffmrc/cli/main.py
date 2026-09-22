@@ -318,7 +318,14 @@ def _run(args):
         fh.write(render_json(data))
 
     sys.stdout.write(render_text(data))
-    return EXIT_OK if not data.is_refusal() else EXIT_FAILED
+    failed = [c for c in data.checks if not c.get('passed')]
+    if data.is_refusal() or failed:
+        # Exit 0 means success. A run whose checks failed produced a
+        # number this project forbids quoting -- a saddle point, say --
+        # and returning 0 would let a caller quote it. The escalation
+        # still prints; it is just not a success.
+        return EXIT_FAILED
+    return EXIT_OK
 
 
 def _compute(args, params):
