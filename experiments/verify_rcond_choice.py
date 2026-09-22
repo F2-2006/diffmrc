@@ -27,13 +27,28 @@ system, and with what margin.
 
 Usage:
 
-    python verify_rcond_choice.py [H2O|CO|N2] [basis] [nthread] [steps]
+    python verify_rcond_choice.py [H2O|CO|N2] [basis] [nthread] [steps] [start]
 
 The comparison is only meaningful at a stationary point, so the script
 prints |g| at theta* and labels the run *not converged* when it misses
 the target. A run that misses it can still be informative -- but only
 against a second run that reaches it, which is what the `steps`
 argument is for.
+
+``start`` selects the point (2026-09-22):
+
+    zeros   the historical protocol: optimize from theta = 0. On H2O
+            this lands on a stationary *saddle* 13.3 kcal/mol above the
+            lower solution, with three negative Hessian eigenvalues.
+    low     multi-start (zeros plus perturbed starts), keep the
+            variationally lowest point. Lower basin; its chart is flat
+            (softest curvature 1.7e-6), so it settles at |g| ~ 4e-4,
+            not 1e-11 -- the energy is reproducible, the gradient is as
+            far as this chart goes. The run reports that honestly.
+
+The lower basin is the production semantics (a response computed about
+a minimum), so its spectrum is the worst case for the cutoff question:
+the relative spread is an order of magnitude wider there.
 """
 import os
 import sys
@@ -42,6 +57,7 @@ _SYS = sys.argv[1] if len(sys.argv) > 1 else 'H2O'
 _BASIS = sys.argv[2] if len(sys.argv) > 2 else '6-31g'
 _NT = sys.argv[3] if len(sys.argv) > 3 else '4'
 _STEPS = int(sys.argv[4]) if len(sys.argv) > 4 else 2000
+_START = sys.argv[5] if len(sys.argv) > 5 else 'zeros'
 
 for _v in ('OMP_NUM_THREADS', 'MKL_NUM_THREADS', 'OPENBLAS_NUM_THREADS',
            'NUMEXPR_NUM_THREADS', 'VECLIB_MAXIMUM_THREADS'):
@@ -60,6 +76,7 @@ from diffmrc.core.rotation import block_rotation
 from diffmrc.core.orblib import orbital_pairs
 from diffmrc.core.casci import cs_casci_blocked
 from diffmrc.core.optimizer import optimize_theta
+from diffmrc.core.stationary import refine_stationary_point
 
 RELATIVE_RCOND = 1e-9
 ABSOLUTE_CUTOFF = 1e-3
@@ -107,23 +124,56 @@ def main():
                                 nele_act=nele)[0] + enuc
 
     E_theta = lambda t: E_cas(C0 @ block_rotation(t, nmo, pairs))
-    _, th_star, gnorm = optimize_theta(None, None, E_theta, npar,
-                                       steps=_STEPS, g_conv=1e-12,
-                                       theta0=np.zeros(npar))
-    th_star = jnp.asarray(np.asarray(th_star))
     target = 1e-12
-    converged = bool(float(gnorm) < target)
-    print(f'  theta*:  |g| = {gnorm:.3e}   npar = {npar}   nR = {nR}   '
+    print(f'  start: {_START}   npar = {npar}   nR = {nR}   '
           f'steps = {_STEPS}')
+    if _START == 'low':
+        # Multi-start, keep the variationally lowest point. The
+        # perturbations are seeded, so a rerun reproduces the point.
+        best = None
+        for k in range(4):
+            rng = np.random.default_rng(1000 + k)
+            t0 = (np.zeros(npar) if k == 0
+                  else 0.3 * rng.standard_normal(npar))
+            _, th_k, _ = optimize_theta(None, None, E_theta, npar,
+                                        steps=_STEPS, g_conv=1e-6,
+                                        theta0=t0)
+            sp_k = refine_stationary_point(E_theta, th_k, max_iter=200,
+                                           target=1e-11)
+            E_k = float(E_theta(sp_k.theta))
+            print(f'    start {k}: E = {E_k:.12f}  '
+                  f'|g| = {sp_k.grad_norm:.3e}  {sp_k.stop_reason.name}',
+                  flush=True)
+            if best is None or E_k < best[0]:
+                best = (E_k, sp_k)
+        E_best, sp_best = best
+        th_star = jnp.asarray(np.asarray(sp_best.theta))
+        gnorm = float(sp_best.grad_norm)
+        print(f'    variational lowest: E = {E_best:.12f}')
+    else:
+        _, th_star, gnorm = optimize_theta(None, None, E_theta, npar,
+                                           steps=_STEPS, g_conv=1e-12,
+                                           theta0=np.zeros(npar))
+        th_star = jnp.asarray(np.asarray(th_star))
+        gnorm = float(gnorm)
+    converged = bool(gnorm < target)
+    print(f'  theta*:  |g| = {gnorm:.3e}')
     print(f'  stationary point: {"yes" if converged else "NO"} '
           f'(target {target:g})')
     if not converged:
         # The response is an expansion about a stationary point. Away from
         # one the measured difference between the two cutoffs is partly
         # just the residual gradient, so the verdict below is provisional.
-        print('  WARNING: theta* is not stationary. The comparison below '
-              'may be measuring the residual gradient as much as the '
-              'cutoff; re-run with more steps before quoting it.')
+        if _START == 'low':
+            print('  WARNING: theta* is not stationary. The low basin\'s '
+                  'chart is flat (softest curvature ~1.7e-6): the '
+                  'refinement cannot go past this and more steps do not '
+                  'help. The spectrum below is still this point\'s '
+                  'spectrum; the response stays provisional.')
+        else:
+            print('  WARNING: theta* is not stationary. The comparison below '
+                  'may be measuring the residual gradient as much as the '
+                  'cutoff; re-run with more steps before quoting it.')
 
     def E_joint(m_, th_):
         mf_ = pscf.RHF(m_)
