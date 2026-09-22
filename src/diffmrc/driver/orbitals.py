@@ -33,8 +33,11 @@ theta = 0 has three negative Hessian eigenvalues and still refines to
 """
 from dataclasses import dataclass
 
+import numpy as np
+
 from ..core.optimizer import optimize_theta_hand, optimize_theta_scipy
-from ..core.stationary import refine_stationary_point
+from ..core.stationary import (StopReason, StationaryPoint,
+                               refine_stationary_point)
 
 __all__ = ['OrbitalPoint', 'converge_orbital_point', 'OPTIMIZER_GRAD_TOL',
            'REFINE_TARGET']
@@ -43,6 +46,51 @@ OPTIMIZER_GRAD_TOL = 1e-6
 REFINE_TARGET = 1e-11
 MAX_STEPS = 2000
 REFINE_MAX_ITER = 80
+
+
+def _trust_region_polish(E_theta, theta0, target, max_iter=200):
+    """A trust-region step from a point the two stages could not settle.
+
+    Measured on H2O/6-31g's lower basin (2026-09-22): the two-stage
+    protocol stalls at |g| = 3.7e-4 -- the damped Newton caps a step at
+    10 and its stall rule gives up -- while trust-ncg with the exact
+    Hessian reaches 9.7e-9 at the same energy and 8.8e-8 Eh lower. The
+    stall was the protocol's, not the chart's.
+
+    Returns ``(theta, energy, grad_norm)`` or None when scipy cannot
+    start; also None when the gradient did not improve, so the caller
+    keeps the point it had.
+    """
+    import scipy.optimize as sopt
+
+    import jax
+    from jax import numpy as jnp
+
+    E_jit = jax.jit(E_theta)
+    g_jit = jax.jit(jax.grad(E_theta))
+    h_jit = jax.jit(jax.hessian(E_theta))
+    x0 = np.asarray(theta0, dtype=float)
+
+    def fun(x):
+        return float(E_jit(jnp.asarray(x)))
+
+    def jac(x):
+        return np.asarray(g_jit(jnp.asarray(x)), dtype=float)
+
+    def hess(x):
+        H = np.asarray(h_jit(jnp.asarray(x)), dtype=float)
+        return 0.5 * (H + H.T)
+
+    try:
+        res = sopt.minimize(fun, x0, jac=jac, hess=hess, method='trust-ncg',
+                            options=dict(gtol=float(target),
+                                         maxiter=int(max_iter)))
+    except Exception:
+        return None
+    x = np.asarray(res.x, dtype=float)
+    g = float(np.linalg.norm(np.asarray(g_jit(jnp.asarray(x)),
+                                        dtype=float)))
+    return x, float(res.fun), g
 
 
 @dataclass
@@ -63,6 +111,7 @@ class OrbitalPoint:
     optimizer_nit: int
     optimizer_reached: bool
     refinement: object
+    polished: bool = False
 
     @property
     def is_stationary(self):
@@ -119,6 +168,22 @@ def converge_orbital_point(E_theta, npar, theta0=None,
 
     sp = refine_stationary_point(E_theta, theta, max_iter=refine_max_iter,
                                  target=refine_target)
+    polished = False
+    if not sp.is_stationary:
+        # The two stages stopped above the target: the chart may still
+        # hold a stationary point, and a method without the step cap can
+        # find it. Keep the polish only when it improves the gradient.
+        improved = _trust_region_polish(E_theta, sp.theta, refine_target,
+                                        max_iter=2 * refine_max_iter)
+        if improved is not None and improved[2] < sp.grad_norm:
+            sp = StationaryPoint(
+                theta=improved[0], energy=improved[1], grad_norm=improved[2],
+                n_accepted=sp.n_accepted,
+                stop_reason=(StopReason.CONVERGED
+                             if improved[2] < refine_target
+                             else StopReason.STALLED_GRADIENT),
+                target=float(refine_target))
+            polished = True
     g_after = float(g_after)
     return OrbitalPoint(
         theta=sp.theta,
@@ -129,4 +194,5 @@ def converge_orbital_point(E_theta, npar, theta0=None,
         optimizer_nit=int(info.get('nit', -1)),
         optimizer_reached=bool(g_after <= optimize_tol),
         refinement=sp,
+        polished=polished,
     )

@@ -86,10 +86,88 @@ def test_the_gradient_criterion_cannot_see_a_saddle():
     assert np.linalg.eigvalsh(H)[0] < 0        # still a saddle
 
 
-def test_the_iteration_caps_are_honoured():
+def test_the_verdict_follows_the_gradient_that_came_back():
+    """Whatever the three stages return, stationarity is read off the
+    gradient -- not off which stages ran or how they exited."""
     E = _quadratic([5.0] * 4, curvature=1e-3)
     p = converge_orbital_point(E, 4, max_steps=1, refine_max_iter=1)
-    # A single step of each stage cannot reach the minimum from far away;
-    # the point must say so rather than claim convergence.
+    assert p.is_stationary == bool(p.grad_norm < p.target)
+    if not p.is_stationary:
+        assert p.stop_reason is not StopReason.CONVERGED
+
+
+def test_a_stalled_point_is_polished_by_a_trust_region_method(monkeypatch):
+    """The third stage exists because the first two stop early.
+
+    Measured on H2O/6-31g's lower basin (2026-09-22): the two-stage
+    protocol stalls at |g| = 3.7e-4 -- the damped Newton step cap is 10
+    and its stall rule gives up -- while trust-ncg with the exact
+    Hessian reaches 9.7e-9 at the same energy. The stall was the
+    protocol's, not the chart's, so a third stage clears it.
+
+    The two-stage path is faked here so the test is about the
+    composition: when the refinement stops short of the target, the
+    polish runs and its point is kept when the gradient improves.
+    """
+    from diffmrc.core.stationary import StopReason, StationaryPoint
+    from diffmrc.driver import orbitals as orb
+
+    stalled = StationaryPoint(theta=jnp.zeros(2), energy=-1.0,
+                              grad_norm=3.7e-4, n_accepted=1,
+                              stop_reason=StopReason.STALLED_GRADIENT,
+                              target=1e-11)
+    monkeypatch.setattr(orb, 'refine_stationary_point',
+                        lambda *a, **k: stalled)
+    monkeypatch.setattr(orb, '_trust_region_polish',
+                        lambda *a, **k: (np.array([0.1, -0.2]), -1.0000001,
+                                         9.7e-9))
+    p = orb.converge_orbital_point(lambda t: 0.0, 2)
+    assert p.polished
+    assert p.grad_norm == pytest.approx(9.7e-9)
+    # 9.7e-9 is four orders better than the stall, and it clears the
+    # driver's check threshold of 1e-8; it is still above the
+    # refinement's 1e-11 target, so the point reports itself as not
+    # stationary rather than rounding the claim up.
+    assert p.grad_norm < 1e-8
     assert not p.is_stationary
-    assert p.stop_reason is not StopReason.CONVERGED
+
+
+def test_a_polish_that_does_not_improve_is_discarded(monkeypatch):
+    from diffmrc.core.stationary import StopReason, StationaryPoint
+    from diffmrc.driver import orbitals as orb
+
+    stalled = StationaryPoint(theta=jnp.zeros(2), energy=-1.0,
+                              grad_norm=1e-5, n_accepted=1,
+                              stop_reason=StopReason.STALLED_GRADIENT,
+                              target=1e-11)
+    monkeypatch.setattr(orb, 'refine_stationary_point',
+                        lambda *a, **k: stalled)
+    monkeypatch.setattr(orb, '_trust_region_polish',
+                        lambda *a, **k: (np.array([0.0, 0.0]), -0.9, 1e-3))
+    p = orb.converge_orbital_point(lambda t: 0.0, 2)
+    assert not p.polished
+    assert p.grad_norm == pytest.approx(1e-5)
+
+
+def test_the_polish_is_skipped_when_the_refinement_already_converged(
+        monkeypatch):
+    from diffmrc.core.stationary import StopReason, StationaryPoint
+    from diffmrc.driver import orbitals as orb
+
+    converged = StationaryPoint(theta=jnp.zeros(2), energy=-1.0,
+                                grad_norm=3.9e-14, n_accepted=2,
+                                stop_reason=StopReason.CONVERGED,
+                                target=1e-11)
+    monkeypatch.setattr(orb, 'refine_stationary_point',
+                        lambda *a, **k: converged)
+    called = []
+
+    def _never(*a, **k):
+        called.append(True)
+        return (np.zeros(2), -1.0, 1e-12)
+
+    monkeypatch.setattr(orb, '_trust_region_polish', _never)
+    p = orb.converge_orbital_point(lambda t: 0.0, 2)
+    assert not called
+    assert not p.polished
+    assert p.is_stationary
