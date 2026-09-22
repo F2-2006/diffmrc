@@ -2,7 +2,13 @@
 import numpy as np
 import pytest
 
-from diffmrc.policy.rules import SHELL_RULES, Candidate, candidate_from_elements
+from diffmrc.policy.rules import (
+    SHELL_RULES,
+    Candidate,
+    candidate_from_elements,
+    plan_from_elements,
+    split_by_composition,
+)
 
 
 class _FakeMol:
@@ -166,3 +172,73 @@ def test_candidate_ligand_refuses_when_the_shell_is_too_large():
                                 np.eye(len(occ)), occ,
                                 center='F', center_n=3)
     assert c is None
+
+
+# ---------------------------------------------------------------------
+# Separating orbitals by composition.
+#
+# The weights below are the measured Eu-f and F-p values on the eight
+# singly occupied orbitals of EuF's molecular end (t176, 2026-09-22).
+# Seven of them are the europium f shell and one carries the fluorine,
+# and the occupation pattern alone cannot tell them apart: all eight are
+# singly occupied.
+# ---------------------------------------------------------------------
+EUF_MOL_SINGLY = [32, 33, 34, 35, 36, 37, 38, 39]
+EUF_MOL_F_WEIGHT = {32: 0.9984, 33: 0.9984, 34: 0.9972, 35: 0.9999,
+                    36: 0.0001, 37: 0.9999, 38: 0.9999, 39: 0.0039}
+EUF_MOL_P_WEIGHT = {32: 0.0011, 33: 0.0011, 34: 0.0000, 35: 0.0000,
+                    36: 0.0092, 37: 0.0000, 38: 0.0000, 39: 0.0000}
+
+
+def _weights(mapping, n=40):
+    w = np.zeros(n)
+    for k, v in mapping.items():
+        w[k] = v
+    return w
+
+
+def test_composition_separates_the_f_shell_from_the_ligand():
+    """The measured EuF case: seven f orbitals and one ligand orbital.
+
+    Both groups are singly occupied, so nothing about the occupations
+    distinguishes them. The composition does, and by a wide margin.
+    """
+    s = split_by_composition(EUF_MOL_SINGLY,
+                             _weights(EUF_MOL_F_WEIGHT),
+                             _weights(EUF_MOL_P_WEIGHT))
+    assert s is not None
+    assert s.first == [32, 33, 34, 35, 37, 38, 39]
+    assert s.second == [36]
+    assert s.ratio > 10.0
+
+
+def test_composition_refuses_a_uniform_set():
+    """All-equal scores carry no information about a split."""
+    n = 6
+    cands = list(range(n))
+    uniform = np.ones(12)
+    assert split_by_composition(cands, uniform, uniform) is None
+
+
+def test_composition_refuses_when_the_gap_is_small():
+    """A continuum of scores is not two groups."""
+    cands = list(range(5))
+    a = np.array([0.50, 0.48, 0.46, 0.44, 0.42] + [0.0] * 5)
+    b = np.array([0.50, 0.52, 0.54, 0.56, 0.58] + [0.0] * 5)
+    assert split_by_composition(cands, a, b) is None
+
+
+def test_composition_needs_at_least_two_candidates():
+    assert split_by_composition([3], _weights({3: 1.0}),
+                                _weights({3: 0.0})) is None
+
+
+def test_composition_records_the_score_of_every_candidate():
+    s = split_by_composition(EUF_MOL_SINGLY,
+                             _weights(EUF_MOL_F_WEIGHT),
+                             _weights(EUF_MOL_P_WEIGHT))
+    assert s is not None
+    for i in EUF_MOL_SINGLY:
+        assert i in s.scores
+    assert s.scores[35] > 0.99
+    assert s.scores[36] < 0.05
