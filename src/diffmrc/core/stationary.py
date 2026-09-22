@@ -32,7 +32,20 @@ import jax
 __all__ = ['StationaryPoint', 'CurvatureReport', 'refine_stationary_point',
            'curvature_report']
 
-_ENERGY_TOL = 1e-14
+# The energy test is a guard against divergence, not a measure of
+# progress, so it allows a step that leaves the energy unchanged to
+# within floating-point noise. Requiring a *significant* decrease would
+# contradict the gradient target, and the two are quantitatively linked:
+# near convergence a Newton step lowers the energy by about
+# |g|^2 / (2 kappa), so reaching |g| < 1e-11 means accepting energy
+# changes of order 1e-22. A decrease requirement of 1e-14 -- the value
+# the experiment scripts used -- rejects every step in that regime and
+# strands the refinement at |g| ~ 1e-8.
+#
+# Measured on a well-conditioned quadratic: with the 1e-14 decrease
+# requirement the run stopped after one step at |g| = 2.4e-8; allowing
+# a noise-sized increase reached |g| = 3.5e-16 in two steps.
+_ENERGY_SLACK = 1e-14
 _LAMBDA_INIT = 1e-8
 _LAMBDA_MIN = 1e-12
 _LAMBDA_UP = 10.0
@@ -177,7 +190,7 @@ def refine_stationary_point(E_theta, theta0, max_iter=80, target=1e-11):
                 continue
             candidate = theta - jnp.asarray(step)
             e_new = float(E_theta(candidate))
-            if e_new < energy - _ENERGY_TOL:
+            if e_new <= energy + _ENERGY_SLACK:
                 theta, energy = candidate, e_new
                 lam = max(lam * _LAMBDA_DOWN, _LAMBDA_MIN)
                 accepted = True

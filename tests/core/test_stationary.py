@@ -119,6 +119,52 @@ def test_refinement_is_deterministic():
     assert a.n_accepted == b.n_accepted
 
 
+def test_refinement_reaches_a_tight_gradient_target():
+    """The energy slack must not block convergence to the target.
+
+    Near a minimum a Newton step lowers the energy by roughly
+    |g|^2 / (2 kappa). Reaching |g| < 1e-11 therefore means accepting
+    energy changes around 1e-22, so a step-acceptance rule that demands a
+    decrease of 1e-14 -- the value the experiment scripts used -- rejects
+    every step in that regime.
+
+    Measured before the fix: this well-conditioned quadratic stopped
+    after one step at |g| = 2.4e-8, because the second step's energy
+    change fell below the threshold. The guard exists to catch
+    divergence, not to demand visible progress.
+    """
+    rng = np.random.default_rng(7)
+    n = 12
+    A = rng.normal(size=(n, n))
+    A = A @ A.T + 0.5 * np.eye(n)
+    c = rng.normal(size=n)
+
+    def E(theta):
+        d = jnp.asarray(theta) - jnp.asarray(c)
+        return 0.5 * d @ jnp.asarray(A) @ d
+
+    p = refine_stationary_point(E, np.zeros(n))
+    assert p.grad_norm < 1e-11
+    assert np.abs(np.asarray(p.theta) - c).max() < 1e-12
+
+
+def test_a_well_conditioned_quadratic_converges_in_a_few_steps():
+    """Newton is exact on a quadratic; it should not need many steps."""
+    rng = np.random.default_rng(11)
+    n = 8
+    A = rng.normal(size=(n, n))
+    A = A @ A.T + np.eye(n)
+    c = rng.normal(size=n)
+
+    def E(theta):
+        d = jnp.asarray(theta) - jnp.asarray(c)
+        return 0.5 * d @ jnp.asarray(A) @ d
+
+    p = refine_stationary_point(E, np.zeros(n))
+    assert p.n_accepted <= 4
+    assert p.grad_norm < 1e-11
+
+
 def test_curvature_report_counts_negative_eigenvalues():
     r = curvature_report(np.diag([-2.0, -1.0, 1.0, 3.0]))
     assert r.n_negative == 2
