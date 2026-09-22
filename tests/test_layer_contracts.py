@@ -53,3 +53,15 @@ def test_policy_never_references_the_driver():
         if 'diffmrc.driver' in text or 'from ..driver' in text:
             offenders.append(path.name)
     assert not offenders, f'policy reaches into driver: {offenders}'
+
+
+def test_report_never_references_the_layers_below_or_above():
+    """Report takes data classes only, so it is tested on hand-built input."""
+    offenders = []
+    for path in _package_sources('report'):
+        text = path.read_text(encoding='utf-8')
+        for word in ('core', 'policy', 'driver', 'cli'):
+            if f'diffmrc.{word}' in text or f'from ..{word}' in text \
+                    or f'from .{word}' in text:
+                offenders.append(f'{path.name}: {word}')
+    assert not offenders, f'report reaches into other layers: {offenders}'

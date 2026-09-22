@@ -63,3 +63,14 @@ forbidden_modules = [
     "diffmrc.report",
     "diffmrc.cli",
 ]
+
+[[tool.importlinter.contracts]]
+name = "report must not import core, policy, driver, or cli"
+type = "forbidden"
+source_modules = ["diffmrc.report"]
+forbidden_modules = [
+    "diffmrc.core",
+    "diffmrc.policy",
+    "diffmrc.driver",
+    "diffmrc.cli",
+]
