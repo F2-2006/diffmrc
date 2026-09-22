@@ -201,3 +201,50 @@ def test_multistart_is_reproducible_for_a_given_seed(monkeypatch):
     assert len(first) == len(starts) == 3
     for a, b in zip(first, starts):
         assert np.allclose(a, b)
+
+
+def test_select_active_space_honours_a_manual_choice():
+    from diffmrc.driver.kernel import select_active_space
+
+    mol = _FakeMol()
+    occ = np.array([2.0, 0.0, 0.0])
+    C = np.eye(3)
+    active, evidence = select_active_space(mol, C, occ, ['H', 'H'],
+                                           manual=[0])
+    assert active == [0]
+    assert any('manual' in e for e in evidence)
+
+
+def test_select_active_space_uses_the_rules_when_not_given_manually():
+    from diffmrc.driver.kernel import select_active_space
+
+    mol = _FakeMol()
+    occ = np.array([2.0, 0.0, 0.0])
+    C = np.eye(3)
+    active, evidence = select_active_space(mol, C, occ, ['H', 'H'])
+    # Either the rules propose something and say why, or they refuse and
+    # say why; both are answers. A silent empty result is the failure.
+    assert evidence
+    if active is not None:
+        assert all(isinstance(i, int) for i in active)
+
+
+def test_scf_reference_refuses_without_the_numerical_kernel():
+    """Without pyscfad the call must refuse, not crash obscurely.
+
+    Where pyscfad *is* installed the same call returns a molecule and a
+    converged mean field, which is what the server validation exercises;
+    both outcomes are asserted here so the test runs in either
+    environment.
+    """
+    from diffmrc.driver.kernel import scf_reference
+
+    try:
+        import pyscfad  # noqa: F401
+    except ImportError:
+        with pytest.raises(ImportError):
+            scf_reference('H 0 0 0; H 0 0 0.74', 0, 0, '6-31g')
+    else:
+        mol, mf = scf_reference('H 0 0 0; H 0 0 0.74', 0, 0, '6-31g')
+        assert mol.nao_nr() > 0
+        assert bool(mf.converged)

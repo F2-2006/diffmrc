@@ -195,3 +195,75 @@ def search_point(E_theta, npar, tries=1, seed=0, **kwargs):
         if best is None or point.energy < best.energy:
             best = point
     return best
+
+
+def scf_reference(atoms, charge, spin, basis):
+    """Run the SCF that supplies the reference orbitals.
+
+    pyscfad is imported here, not at module import: the rest of the
+    driver must be usable -- ``--check``, ``--show-defaults`` -- on a
+    machine where the numerical kernel is not installed, which is what
+    the command line's ImportError branch is for.
+
+    Parameters
+    ----------
+    atoms : str
+        Geometry in the ``'Eu 0 0 0; F 0 0 2.06'`` form.
+    charge, spin : int
+        Charge and ``2S``.
+
+    Returns
+    -------
+    (mol, mf)
+        The molecule and the converged mean-field object.
+    """
+    try:
+        from pyscfad import gto, scf
+    except ImportError as exc:
+        raise ImportError('pyscfad is not installed') from exc
+
+    mol = gto.Mole()
+    mol.atom = atoms
+    mol.basis = basis
+    mol.charge = charge
+    mol.spin = spin
+    mol.build()
+    mf = (scf.ROHF(mol) if spin != 0 else scf.RHF(mol))
+    mf.kernel()
+    if not getattr(mf, 'converged', True):
+        raise RuntimeError(
+            'the SCF did not converge; every number below would rest on '
+            'an unconverged reference')
+    return mol, mf
+
+
+def select_active_space(mol, C, occ, symbols, manual=None, params=None):
+    """Pick the active orbitals: the user's list, or the element rules.
+
+    Returns the indices and the evidence behind them. The evidence is
+    carried into the report because a selection nobody can read is a
+    selection nobody can check.
+    """
+    from ..policy.rules import (candidate_from_elements,
+                                molecular_end_candidate, plan_from_elements)
+
+    if manual is not None:
+        active = sorted({int(i) for i in manual})
+        return active, [f'active space given manually: {active}']
+
+    plan = plan_from_elements(symbols)
+    if plan is None:
+        return None, ['no rule covers this element combination']
+    if plan.is_molecular:
+        cand = molecular_end_candidate(mol, np.asarray(C), np.asarray(occ),
+                                       center=plan.center,
+                                       ligand=plan.ligand)
+    else:
+        cand = candidate_from_elements(mol, np.asarray(C), np.asarray(occ),
+                                       center=plan.center,
+                                       ligand=plan.ligand or None,
+                                       center_n=plan.center_n,
+                                       ligand_n=plan.ligand_n)
+    if cand is None:
+        return None, ['the rules refused to propose an active space']
+    return [int(i) for i in cand.active], list(cand.evidence)
