@@ -248,3 +248,57 @@ def test_scf_reference_refuses_without_the_numerical_kernel():
         mol, mf = scf_reference('H 0 0 0; H 0 0 0.74', 0, 0, '6-31g')
         assert mol.nao_nr() > 0
         assert bool(mf.converged)
+
+
+def test_compute_ground_state_refuses_when_the_reference_fails(monkeypatch):
+    """A refusal carries its reason; it is not a bare exception."""
+    from diffmrc.driver import kernel
+
+    def _no_reference(*a, **k):
+        raise RuntimeError('the SCF did not converge')
+
+    from diffmrc.driver.run import ElectronicStructureFailure
+
+    monkeypatch.setattr(kernel, 'scf_reference', _no_reference)
+    with pytest.raises(ElectronicStructureFailure):
+        kernel.compute_ground_state('H 0 0 0; F 0 0 0.9', 0, 0, None, {})
+
+
+def test_compute_ground_state_refuses_an_unparseable_active_space(monkeypatch):
+    from diffmrc.driver import kernel
+
+    mol = _FakeMol()
+
+    class _MF:
+        mo_coeff = np.eye(3)
+        mo_occ = np.array([2.0, 0.0, 0.0])
+        e_tot = -1.0
+
+    from diffmrc.driver.run import ElectronicStructureFailure
+
+    monkeypatch.setattr(kernel, 'scf_reference', lambda *a, **k: (mol, _MF()))
+    with pytest.raises(ElectronicStructureFailure):
+        kernel.compute_ground_state('H 0 0 0; F 0 0 0.9', 0, 0,
+                                    'not-a-range', {})
+
+
+def test_compute_ground_state_reads_parameters_like_the_driver_does(
+        monkeypatch):
+    """`EffectiveParams` has no `.get`; the kernel reads through
+    `in` + `[]`, the same way driver/run.py reads gradient_tol."""
+    from diffmrc.driver import kernel
+
+    mol = _FakeMol()
+
+    class _MF:
+        mo_coeff = np.eye(3)
+        mo_occ = np.array([2.0, 0.0, 0.0])
+        e_tot = -1.0
+
+    monkeypatch.setattr(kernel, 'scf_reference', lambda *a, **k: (mol, _MF()))
+    monkeypatch.setattr(kernel, 'select_active_space',
+                        lambda *a, **k: ([0, 1], ['faked']))
+    pytest.importorskip('pyscfad')
+    out = kernel.compute_ground_state('H 0 0 0; H 0 0 0.74', 0, 0, None,
+                                      {'basis': '6-31g'})
+    assert out['n_elec_active'] == 2

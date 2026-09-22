@@ -267,3 +267,105 @@ def select_active_space(mol, C, occ, symbols, manual=None, params=None):
     if cand is None:
         return None, ['the rules refused to propose an active space']
     return [int(i) for i in cand.active], list(cand.evidence)
+
+
+def compute_ground_state(atoms, charge, spin, active_space, params,
+                         level='fast'):
+    """Everything the self-checks need, from a geometry string.
+
+    The order is a ladder of refusals: the SCF first, then the active
+    space, then the electron count, and only then anything expensive. A
+    step that can refuse does, so a bad input costs a parse rather than
+    a calculation.
+
+    Raises
+    ------
+    ElectronicStructureFailure
+        When a step that can refuse does: an SCF that will not converge,
+        an element no rule covers, a rule that refuses, an unparseable
+        active-space string, or a partition whose electron count cannot
+        make the requested spin.
+    """
+    from ..policy.params import parse_active_space
+    from .run import ElectronicStructureFailure
+
+    def _value(key, default):
+        # EffectiveParams carries __contains__ and __getitem__, not get;
+        # driver/run.py reads parameters the same way.
+        return params[key] if params is not None and key in params else default
+
+    symbols = [part.split()[0] for part in atoms.split(';') if part.strip()]
+
+    try:
+        mol, mf = scf_reference(atoms, charge, spin,
+                                _value('basis', '6-31g'))
+    except ImportError:
+        raise
+    except Exception as exc:
+        raise ElectronicStructureFailure(
+            f'the reference SCF failed: {type(exc).__name__}: {exc}'
+        ) from exc
+
+    C = np.asarray(mf.mo_coeff)
+    occ = np.asarray(mf.mo_occ)
+
+    manual = None
+    if active_space is not None:
+        manual = parse_active_space(str(active_space))
+        if manual is None:
+            raise ElectronicStructureFailure(
+                f'active-space {active_space!r} is not a range like 2-4 or '
+                f'a list like 2,3,4'
+            )
+    active, evidence = select_active_space(mol, C, occ, symbols,
+                                           manual=manual, params=params)
+    if not active:
+        raise ElectronicStructureFailure(
+            'no active space was selected: ' + '; '.join(evidence))
+
+    space = partition_from_occupations(occ, active)
+    if space.n_elec < abs(spin) or (space.n_elec - abs(spin)) % 2 != 0:
+        raise ElectronicStructureFailure(
+            f'the active space holds {space.n_elec} electrons, which '
+            f'cannot make spin {spin}'
+        )
+
+    import jax
+    jax.config.update('jax_enable_x64', True)
+    from ..core.stationary import curvature_report
+
+    E_theta, npar = energy_function(mol, C, space)
+    tries = 1 if level == 'fast' else int(_value('multistart_tries', 1))
+    point = search_point(
+        E_theta, npar, tries=tries,
+        optimize_tol=float(_value('optimizer_grad_tol', 1e-6)),
+        refine_target=float(_value('refine_target', 1e-11)))
+
+    curvature = curvature_report(np.asarray(jax.hessian(E_theta)(point.theta)))
+    n_doubly = sum(1 for i in space.active if occ[i] > 1.5)
+    return dict(
+        energy=float(point.energy),
+        grad_norm=float(point.grad_norm),
+        n_negative=int(curvature.n_negative),
+        e_reference=float(mf.e_tot),
+        n_elec_active=int(space.n_elec),
+        n_elec_expected=int(space.n_elec),
+        algorithm_data=dict(
+            geometry=atoms,
+            charge=charge,
+            spin=spin,
+            active_space=dict(active=list(space.active),
+                              n_elec_active=int(space.n_elec),
+                              core=list(space.core),
+                              n_virtual=len(space.virtual)),
+            evidence=list(evidence),
+            optimizer=dict(gradient=float(point.optimizer_grad_norm),
+                           reached=bool(point.optimizer_reached),
+                           message=point.optimizer_message),
+            stop_reason=getattr(point.stop_reason, 'value',
+                                str(point.stop_reason)),
+            level=level,
+            multistart_tries=int(tries),
+            n_doubly_active=int(n_doubly),
+        ),
+    )
