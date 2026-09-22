@@ -25,12 +25,13 @@ normal outcome, which is why ``guard_stopped`` is reported as data rather
 than raised as an error.
 """
 from dataclasses import dataclass
+from enum import Enum
 
 import numpy as np
 import jax
 
-__all__ = ['StationaryPoint', 'CurvatureReport', 'refine_stationary_point',
-           'curvature_report']
+__all__ = ['StationaryPoint', 'StopReason', 'CurvatureReport',
+           'refine_stationary_point', 'curvature_report']
 
 # The energy test is a guard against divergence, not a measure of
 # progress, so it allows a step that leaves the energy unchanged to
@@ -63,23 +64,56 @@ _INNER_TRIES = 14
 _MAX_STEP_NORM = 10.0
 
 
+class StopReason(Enum):
+    """Why the refinement loop ended.
+
+    These are mutually exclusive outcomes, and they call for different
+    follow-up. In particular ``CONVERGED`` and ``ITERATION_CAP`` are both
+    "the loop finished"; only the first means the point is stationary.
+    Reporting them as two booleans let a run exhaust its budget with a
+    gradient of order 1e3 and set neither flag -- measured on an
+    ill-conditioned quadratic started far from the solution, where 80
+    accepted steps still left |g| = 4.0e3.
+
+    This is the same shape as treating an optimizer's status code as a
+    convergence signal, which this project has already been bitten by
+    once.
+    """
+
+    CONVERGED = 'converged'
+    GUARD_STOPPED = 'guard_stopped'
+    STALLED_GRADIENT = 'stalled_gradient'
+    ITERATION_CAP = 'iteration_cap'
+
+
 @dataclass
 class StationaryPoint:
     """A refined point, with the evidence that it is stationary.
 
-    ``guard_stopped`` says the loop ended because it could not make
-    progress. Read it together with ``grad_norm``: a guard stop with a
-    gradient still above ``target`` means the point is **not** a
-    stationary point, and the caller must not treat the energy as
-    belonging to one.
+    ``is_stationary`` is the only thing a caller should gate on. It is
+    true when the gradient actually reached the target, not merely when
+    the loop finished.
     """
 
     theta: object
     energy: float
     grad_norm: float
     n_accepted: int = 0
-    guard_stopped: bool = False
-    stalled_gradient: bool = False
+    stop_reason: StopReason = StopReason.ITERATION_CAP
+    target: float = 1e-11
+
+    @property
+    def is_stationary(self):
+        """True only when the gradient reached the target."""
+        return bool(self.grad_norm < self.target)
+
+    @property
+    def guard_stopped(self):
+        return self.stop_reason is StopReason.GUARD_STOPPED
+
+    @property
+    def stalled_gradient(self):
+        return self.stop_reason is StopReason.STALLED_GRADIENT
 
 
 @dataclass
@@ -166,12 +200,13 @@ def refine_stationary_point(E_theta, theta0, max_iter=80, target=1e-11):
     energy = float(E_theta(theta))
     lam = _LAMBDA_INIT
     n_accepted = 0
-    guard_stopped = False
-    stalled_gradient = False
     gnorm = float(jnp.linalg.norm(grad(theta)))
+    # Default to the cap: it is the reason that needs no break to reach.
+    reason = StopReason.ITERATION_CAP
 
     for _ in range(max_iter):
         if gnorm < target:
+            reason = StopReason.CONVERGED
             break
         H = np.asarray(hess(theta))
         H = 0.5 * (H + H.T)
@@ -199,7 +234,7 @@ def refine_stationary_point(E_theta, theta0, max_iter=80, target=1e-11):
             # The step was rejected; damp harder and try again.
             lam *= _LAMBDA_UP
         if not accepted:
-            guard_stopped = True
+            reason = StopReason.GUARD_STOPPED
             break
 
         g_new = float(jnp.linalg.norm(grad(theta)))
@@ -213,10 +248,16 @@ def refine_stationary_point(E_theta, theta0, max_iter=80, target=1e-11):
         # stationary point.
         if g_new >= gnorm * (1.0 - 1e-12):
             theta, energy, gnorm = theta, energy, g_new
-            stalled_gradient = True
+            reason = StopReason.STALLED_GRADIENT
             break
         gnorm = g_new
+    else:
+        # The loop ran to exhaustion without any break. Whether that left
+        # us at a stationary point is decided by the gradient, not by the
+        # absence of a break, so re-check before reporting CONVERGED.
+        if gnorm < target:
+            reason = StopReason.CONVERGED
 
     return StationaryPoint(theta=theta, energy=energy, grad_norm=gnorm,
-                           n_accepted=n_accepted, guard_stopped=guard_stopped,
-                           stalled_gradient=stalled_gradient)
+                           n_accepted=n_accepted, stop_reason=reason,
+                           target=float(target))

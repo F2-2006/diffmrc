@@ -7,6 +7,7 @@ jax.config.update("jax_enable_x64", True)
 import jax.numpy as jnp  # noqa: E402
 
 from diffmrc.core.stationary import (  # noqa: E402
+    StopReason,
     curvature_report,
     refine_stationary_point,
 )
@@ -117,6 +118,66 @@ def test_refinement_is_deterministic():
     b = refine_stationary_point(E, np.zeros(3))
     assert np.array_equal(np.asarray(a.theta), np.asarray(b.theta))
     assert a.n_accepted == b.n_accepted
+
+
+def test_exhausting_the_iteration_budget_is_its_own_outcome():
+    """Running out of iterations is not the same as converging.
+
+    An ill-conditioned problem started far from the solution can accept
+    every step it is given, lower the energy monotonically, and still
+    finish with a gradient of order 1e3. With only two boolean flags
+    there was no name for that outcome: both read False, and the caller
+    had to infer it from the gradient.
+
+    This is the same shape as treating an optimizer's status code as a
+    convergence signal, which this project has been bitten by once
+    already.
+    """
+    rng = np.random.default_rng(3)
+    n = 10
+    B = rng.normal(size=(n, n))
+    w = np.logspace(0, -6, n)
+    A = (B * w) @ B.T
+    A = 0.5 * (A + A.T) + 1e-9 * np.eye(n)
+    c = rng.normal(size=n)
+
+    def E(theta):
+        d = jnp.asarray(theta) - jnp.asarray(c)
+        return 0.5 * d @ jnp.asarray(A) @ d
+
+    p = refine_stationary_point(E, -1000.0 * c, max_iter=80)
+    assert p.stop_reason is StopReason.ITERATION_CAP
+    assert not p.is_stationary
+    assert p.grad_norm > 1e-8
+    assert p.n_accepted == 80
+
+
+def test_is_stationary_is_the_field_to_gate_on():
+    """The single predicate a caller should branch on."""
+    E = _quadratic([1.0, -2.0], curvature=2.0)
+    good = refine_stationary_point(E, np.zeros(2))
+    assert good.is_stationary
+
+    def E_lin(theta):
+        return jnp.asarray(theta)[0]
+
+    bad = refine_stationary_point(E_lin, np.zeros(3))
+    assert not bad.is_stationary
+
+
+def test_every_stop_reason_has_the_right_stationarity():
+    """A cross-check that the enum and the predicate stay consistent."""
+    cases = [
+        (_quadratic([0.0, 0.0], 1.0), np.zeros(2), StopReason.CONVERGED, True),
+        (lambda t: jnp.asarray(t)[0], np.zeros(3),
+         StopReason.STALLED_GRADIENT, False),
+        (lambda t: jnp.asarray(0.0), np.zeros(3),
+         StopReason.CONVERGED, True),
+    ]
+    for f, x0, reason, stationary in cases:
+        p = refine_stationary_point(f, x0, max_iter=50)
+        assert p.stop_reason is reason
+        assert p.is_stationary is stationary
 
 
 def test_refinement_reaches_a_tight_gradient_target():
