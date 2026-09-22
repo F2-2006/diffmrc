@@ -42,3 +42,24 @@ forbidden_modules = [
     "diffmrc.report",
     "diffmrc.cli",
 ]
+
+[[tool.importlinter.contracts]]
+name = "core must not import any upper layer"
+type = "forbidden"
+source_modules = ["diffmrc.core"]
+forbidden_modules = [
+    "diffmrc.policy",
+    "diffmrc.driver",
+    "diffmrc.report",
+    "diffmrc.cli",
+]
+
+[[tool.importlinter.contracts]]
+name = "policy must not import the driver or above"
+type = "forbidden"
+source_modules = ["diffmrc.policy"]
+forbidden_modules = [
+    "diffmrc.driver",
+    "diffmrc.report",
+    "diffmrc.cli",
+]
