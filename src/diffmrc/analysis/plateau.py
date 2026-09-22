@@ -23,11 +23,14 @@ rather than invent an active space.
 """
 import numpy as np
 
+from .diagnostics import SINGLE_REFERENCE_THRESHOLD
+
 __all__ = ['detect_plateaus', 'count_above', 'DEFAULT_PLATEAU_VALUES',
-           'DEFAULT_THRESHOLD_STEP']
+           'DEFAULT_THRESHOLD_STEP', 'DEFAULT_MIN_ENTROPY']
 
 DEFAULT_PLATEAU_VALUES = 10
 DEFAULT_THRESHOLD_STEP = 0.01
+DEFAULT_MIN_ENTROPY = SINGLE_REFERENCE_THRESHOLD
 
 
 def count_above(s1, thresholds):
@@ -51,8 +54,18 @@ def count_above(s1, thresholds):
 
 
 def detect_plateaus(s1, plateau_values=DEFAULT_PLATEAU_VALUES,
-                    threshold_step=DEFAULT_THRESHOLD_STEP):
+                    threshold_step=DEFAULT_THRESHOLD_STEP,
+                    min_entropy=DEFAULT_MIN_ENTROPY):
     """Find plateaus in the normalized entropy spectrum.
+
+    The spectrum is normalized by its largest value before the sweep, so a
+    spectrum that is pure numerical noise acquires a relative structure
+    that is not chemical. A system whose orbitals are all essentially
+    unentangled would otherwise be reported as having a well-defined
+    plateau, and an active space would be selected from noise. The
+    ``min_entropy`` guard prevents that: the protocol only applies once at
+    least one orbital is entangled enough to make the system genuinely
+    multireference.
 
     Parameters
     ----------
@@ -63,15 +76,22 @@ def detect_plateaus(s1, plateau_values=DEFAULT_PLATEAU_VALUES,
         plateau. Must be at least 1.
     threshold_step : float
         Step size of the threshold sweep, in (0, 1].
+    min_entropy : float
+        The sweep is skipped and no plateau is reported unless the largest
+        entropy reaches this value. Defaults to the multireference
+        criterion of the selection protocol: a wavefunction is treated as
+        multiconfigurational only if some single-orbital entropy exceeds
+        0.14. Pass 0.0 to run the sweep on any spectrum, however small.
 
     Returns
     -------
     heights : list[int]
         Distinct plateau heights, in descending order. Empty when the
-        spectrum has no plateau.
+        spectrum has no plateau or falls below `min_entropy`.
     normalized : numpy.ndarray
         The entropies divided by their maximum, sorted in descending order.
-        All zeros when the maximum is zero.
+        All zeros when the maximum is zero. Returned even when the guard
+        suppresses the plateau, so a caller can inspect the spectrum.
 
     Raises
     ------
@@ -94,6 +114,11 @@ def detect_plateaus(s1, plateau_values=DEFAULT_PLATEAU_VALUES,
         return [], np.zeros_like(s1)
 
     normalized = np.sort(s1 / s_max)[::-1]
+    if s_max < min_entropy:
+        # Every orbital is below the multireference criterion. Normalizing
+        # would manufacture structure that the wavefunction does not have.
+        return [], normalized
+
     thresholds = np.arange(0.0, 1.0, threshold_step)
     counts = count_above(normalized, thresholds)
 

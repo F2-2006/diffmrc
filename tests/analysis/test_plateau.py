@@ -1,5 +1,6 @@
 """Plateau detection on the normalized entropy spectrum."""
 import numpy as np
+import pytest
 
 from diffmrc.analysis.plateau import detect_plateaus, count_above
 
@@ -75,3 +76,52 @@ def test_single_orbital_spectrum_plateaus_at_one():
     plateaus, norm = detect_plateaus(np.array([1.3]))
     assert np.allclose(norm, [1.0])
     assert plateaus == [1]
+
+
+def test_numerical_noise_does_not_produce_a_plateau():
+    """The regression that motivates the absolute floor.
+
+    A spectrum of pure round-off has a *relative* structure once it is
+    normalized by its own maximum: in this example three orbitals carry
+    2e-06 and seven carry 1e-06, so the staircase holds at ten over a
+    wide threshold range and the sweep reports a plateau of height ten.
+    Every one of those entropies is five orders of magnitude below the
+    0.14 that the selection protocol requires before a wavefunction is
+    called multiconfigurational, so the plateau is an artefact of the
+    normalization and no active space should be selected from it.
+    """
+    s1 = np.array([2e-06, 2e-06, 2e-06] + [1e-06] * 7 + [0.0])
+    plateaus, normalized = detect_plateaus(s1)
+    assert plateaus == []
+    # The spectrum is still returned for inspection.
+    assert normalized[0] == pytest.approx(1.0)
+
+
+def test_guard_yields_to_a_genuine_multireference_spectrum():
+    """The floor must not suppress a real plateau."""
+    s1 = np.array([1.30, 1.28, 1.27, 1.25, 1.24, 1.22, 1.20,
+                   0.30, 0.25, 0.20])
+    plateaus, _ = detect_plateaus(s1, plateau_values=10, threshold_step=0.01)
+    assert 7 in plateaus
+
+
+def test_min_entropy_can_be_disabled():
+    """Passing zero restores the unguarded sweep, for callers that want it."""
+    s1 = np.array([2e-06, 2e-06, 2e-06] + [1e-06] * 7 + [0.0])
+    plateaus, _ = detect_plateaus(s1, min_entropy=0.0)
+    assert 10 in plateaus
+
+
+def test_guard_uses_the_single_reference_threshold_by_default():
+    """The default floor is the protocol's 0.14, imported not duplicated."""
+    from diffmrc.analysis.diagnostics import SINGLE_REFERENCE_THRESHOLD
+    from diffmrc.analysis.plateau import DEFAULT_MIN_ENTROPY
+    assert DEFAULT_MIN_ENTROPY == SINGLE_REFERENCE_THRESHOLD
+
+
+def test_spectrum_just_below_the_floor_is_suppressed():
+    """A boundary check: 0.13 is below the criterion, 0.15 is above."""
+    below = np.array([0.13, 0.12, 0.11, 0.10])
+    above = np.array([0.15, 0.12, 0.11, 0.10])
+    assert detect_plateaus(below)[0] == []
+    assert detect_plateaus(above)[0] != []

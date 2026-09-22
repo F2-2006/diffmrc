@@ -48,6 +48,28 @@ Note that the one-particle matrices are the opposite case: they must be
 separately. A calculation that returns a spin-resolved one-particle matrix
 and a spin-summed two-particle matrix is the normal situation.
 
+## The absolute floor before the plateau sweep
+
+`detect_plateaus` normalizes the spectrum by its largest value before
+sweeping the threshold. The normalization is what makes the staircase
+comparable between systems, but it has a failure mode: a spectrum of pure
+numerical noise acquires a relative structure once divided by its own
+maximum. Ten orbitals at 1e-06 with three at 2e-06 normalize to a
+staircase that holds flat over a wide range and reports a plateau,
+inviting an active space to be selected from round-off.
+
+The guard is the protocol's own criterion. Stein and Reiher assign
+multiconfigurational character only if at least one single-orbital entropy
+exceeds 0.14, so `detect_plateaus` returns no plateau when the largest
+entropy falls below that value. Callers that want the unguarded sweep can
+pass `min_entropy=0.0`; the normalized spectrum is returned either way, so
+a caller can inspect what the guard suppressed.
+
+Related, from the same protocol: when a spectrum shows *no* plateau, the
+prescribed fallback is to exclude orbitals whose entropy is below one to
+two percent of the maximum, rather than to report a plateau height anyway.
+That fallback belongs to the selection policy, not to this function.
+
 ## A single determinant is a free regression test
 
 Any single determinant -- closed shell, open shell, any filling -- has zero
