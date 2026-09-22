@@ -9,6 +9,31 @@ next run. This project has already been bitten by that.
 Every rule can refuse. A refusal is a result, not an error: it says the
 structure does not match what the rule knows how to handle, and the
 caller is expected to escalate or to report that it cannot decide.
+
+Known limitation: the rules cover a free lanthanide atom and a free
+main-group atom, and they do not yet describe a molecule.
+--------------------------------------------------------------------
+
+The atom cases are implemented and measured: a bare europium atom has
+seven singly occupied orbitals, which is its half-filled f shell, and a
+free fluorine or oxygen atom has a valence shell of a few singly
+occupied orbitals plus the highest doubly occupied ones.
+
+The molecular case is not implemented, and the measurements say why. In
+EuF, the molecular end shows *eight* singly occupied orbitals -- seven
+from the europium f shell and one carrying the fluorine -- and no
+doubly-occupied pair that belongs to the ligand. A rule that looks for
+the ligand shell as "some singly occupied plus some doubly occupied
+orbitals" therefore finds nothing, and returns None.
+
+That refusal is correct: the function does not know how to identify the
+ligand's share in that situation, and guessing would put the wrong
+orbitals in the active space. What is needed is a rule that identifies
+the shell by orbital composition -- the p weight of the ligand, say --
+rather than by the occupation pattern, which is what the project's own
+t176 script does with its separate element-weight path. That is future
+work, and until it exists a molecular run will refuse rather than
+produce a space nobody checked.
 """
 from dataclasses import dataclass, field
 
@@ -17,7 +42,93 @@ import numpy as np
 from .composition import element_shell_weights
 from .occupation import select_valence, split_by_occupation
 
-__all__ = ['SHELL_RULES', 'Candidate', 'candidate_from_elements']
+__all__ = ['SHELL_RULES', 'Candidate', 'SelectionPlan',
+           'candidate_from_elements', 'plan_from_elements']
+
+# The lanthanides, whose half-filled f shell is what the f_shell rule
+# looks for. Promethium is included: it is radioactive and rarely used,
+# but a user who supplies it deserves a rule rather than a silent miss.
+LANTHANIDES = (
+    'La', 'Ce', 'Pr', 'Nd', 'Pm', 'Sm', 'Eu', 'Gd', 'Tb', 'Dy', 'Ho',
+    'Er', 'Tm', 'Yb', 'Lu',
+)
+
+# Elements the main-group valence rule can handle: the p block plus the
+# light main-group elements whose valence shell is an s shell.
+MAIN_GROUP = (
+    'H', 'He', 'Li', 'Be', 'B', 'C', 'N', 'O', 'F', 'Ne',
+    'Na', 'Mg', 'Al', 'Si', 'P', 'S', 'Cl', 'Ar',
+    'K', 'Ca', 'Ga', 'Ge', 'As', 'Se', 'Br', 'Kr',
+    'In', 'Sn', 'Sb', 'Te', 'I', 'Xe',
+)
+
+
+@dataclass
+class SelectionPlan:
+    """Which rule to apply, decided from the elements present."""
+
+    center: str = ''
+    ligand: str = ''
+    center_n: int = 7
+    ligand_n: int = 3
+    evidence: list = field(default_factory=list)
+
+    @property
+    def has_ligand(self):
+        return bool(self.ligand)
+
+
+def plan_from_elements(symbols):
+    """Decide which selection rule the element list calls for.
+
+    The command line receives an xyz file and nothing else, so the
+    decision of *which* chemical rule applies has to be made from the
+    elements present. Doing it here keeps the decision testable on a
+    plain list of symbols.
+
+    The rule is deliberately narrow: one lanthanide centre, optionally
+    with one main-group ligand. Anything else returns None, because a
+    rule that guesses at a system it was not written for is worse than
+    no rule at all.
+
+    Parameters
+    ----------
+    symbols : sequence of str
+        Element symbols, one per atom.
+
+    Returns
+    -------
+    SelectionPlan or None
+        None when the composition does not match a rule this package
+        knows. A caller must treat None as a refusal.
+    """
+    symbols = [str(s).capitalize() for s in symbols]
+    if not symbols:
+        return None
+
+    centres = sorted({s for s in symbols if s in LANTHANIDES})
+    if len(centres) != 1:
+        # Zero centres is an ordinary main-group molecule, which this
+        # package has no rule for; two centres is a different problem
+        # again, and the single-centre rule does not describe it.
+        return None
+    center = centres[0]
+
+    others = sorted({s for s in symbols if s != center})
+    if not others:
+        return SelectionPlan(center=center, center_n=7, ligand='',
+                             ligand_n=0,
+                             evidence=[f'{center}: bare lanthanide atom'])
+    if len(others) > 1:
+        return None
+    ligand = others[0]
+    if ligand not in MAIN_GROUP:
+        return None
+
+    return SelectionPlan(
+        center=center, ligand=ligand, center_n=7, ligand_n=3,
+        evidence=[f'centre {center} with ligand {ligand}'],
+    )
 
 SHELL_RULES = {
     'lanthanide_f': dict(

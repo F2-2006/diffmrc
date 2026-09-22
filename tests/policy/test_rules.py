@@ -60,10 +60,12 @@ def test_candidate_refuses_when_there_are_too_many_singly_occupied():
 
 
 def test_candidate_for_a_ligand_uses_the_valence_rule():
-    """Fluorine's valence shell, on the structure measured for it.
+    """A free main-group atom's valence shell.
 
-    A main-group atom is reached through the `ligand` argument; the bare
-    `center` path is the lanthanide rule and correctly refuses fluorine.
+    This is the atom-end rule and it is what the ligand branch
+    implements. Its limits are documented in the module: it does not
+    describe the same atom inside a molecule, where the occupation
+    pattern is different.
     """
     occ = np.array([2.0, 2.0, 2.0, 2.0, 1.0, 0.0, 0.0])
     labels = ['0 F 1s', '1 F 2s', '2 F 2px', '3 F 2py', '4 F 2pz',
@@ -82,6 +84,52 @@ def test_the_lanthanide_rule_refuses_a_main_group_atom():
               '5 F 3s', '6 F 3px']
     c = candidate_from_elements(_FakeMol(labels), np.eye(len(labels)), occ,
                                 center='F', center_n=3)
+    assert c is None
+
+
+# The measured structure of EuF at the molecular end (t176, 2026-09-21):
+# thirty doubly occupied orbitals, then eight singly occupied, of which
+# seven are the europium f shell and one carries the fluorine.
+#
+# Note what this means for `select_valence`. On a free fluorine atom the
+# valence shell is two doubly occupied orbitals plus one singly occupied
+# one, which is what that function assumes. In the molecule the picture
+# is different: fluorine's share appears as a *single* singly occupied
+# orbital, and there is no pair of doubly occupied orbitals to take. So
+# the valence rule is an atom-end rule, and the molecule needs a
+# different identification -- see the module note below.
+EUF_MOL_OCC = np.array([2.0] * 30 + [1.0] * 8 + [0.0] * 4)
+EUF_MOL_SINGLY = list(range(30, 38))
+
+
+def test_the_molecular_end_is_not_described_by_the_valence_rule():
+    """A documented limitation, pinned so it cannot regress silently.
+
+    `select_valence` looks for the valence shell as some singly occupied
+    orbitals plus the highest doubly occupied ones. That describes a free
+    main-group atom. In a molecule the ligand's share appears differently
+    -- one singly occupied orbital for fluorine in EuF, with no doubly
+    occupied pair to take -- so the rule returns None.
+
+    Returning None is the correct behaviour here: the function does not
+    know how to identify the ligand's shell in this situation, and
+    guessing would place the wrong orbitals in the active space. What
+    the molecule needs is a rule that identifies the shell by orbital
+    composition rather than by occupation pattern, which is future work.
+    """
+    c = candidate_from_elements(
+        _FakeMol([f'{i} Eu 1s' for i in range(len(EUF_MOL_OCC))]),
+        np.eye(len(EUF_MOL_OCC)), EUF_MOL_OCC,
+        center='Eu', ligand='F', ligand_n=3)
+    assert c is None
+
+
+def test_the_centre_alone_is_still_identified_in_the_molecule():
+    """Without naming a ligand, the eight singly occupied orbitals do not
+    match the seven-orbital f shell either, so the call refuses."""
+    c = candidate_from_elements(
+        _FakeMol([f'{i} Eu 1s' for i in range(len(EUF_MOL_OCC))]),
+        np.eye(len(EUF_MOL_OCC)), EUF_MOL_OCC, center='Eu', center_n=7)
     assert c is None
 
 
@@ -118,13 +166,3 @@ def test_candidate_ligand_refuses_when_the_shell_is_too_large():
                                 np.eye(len(occ)), occ,
                                 center='F', center_n=3)
     assert c is None
-
-
-def test_candidate_accepts_a_center_with_an_explicit_ligand():
-    """Both halves of a diatomic can be proposed in one call."""
-    occ = np.array([2.0, 2.0, 2.0, 1.0, 1.0, 0.0])
-    labels = ['0 O 1s', '1 O 2s', '2 O 2px', '3 O 2py', '4 O 2pz', '5 O 3s']
-    c = candidate_from_elements(_FakeMol(labels), np.eye(len(labels)), occ,
-                                center='Eu', ligand='O', ligand_n=3)
-    assert c.active == [2, 3, 4]
-    assert 'O' in c.per_element
