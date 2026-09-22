@@ -27,7 +27,13 @@ system, and with what margin.
 
 Usage:
 
-    python verify_rcond_choice.py [H2O|CO|N2] [basis] [nthread]
+    python verify_rcond_choice.py [H2O|CO|N2] [basis] [nthread] [steps]
+
+The comparison is only meaningful at a stationary point, so the script
+prints |g| at theta* and labels the run *not converged* when it misses
+the target. A run that misses it can still be informative -- but only
+against a second run that reaches it, which is what the `steps`
+argument is for.
 """
 import os
 import sys
@@ -35,6 +41,7 @@ import sys
 _SYS = sys.argv[1] if len(sys.argv) > 1 else 'H2O'
 _BASIS = sys.argv[2] if len(sys.argv) > 2 else '6-31g'
 _NT = sys.argv[3] if len(sys.argv) > 3 else '4'
+_STEPS = int(sys.argv[4]) if len(sys.argv) > 4 else 2000
 
 for _v in ('OMP_NUM_THREADS', 'MKL_NUM_THREADS', 'OPENBLAS_NUM_THREADS',
            'NUMEXPR_NUM_THREADS', 'VECLIB_MAXIMUM_THREADS'):
@@ -100,11 +107,23 @@ def main():
                                 nele_act=nele)[0] + enuc
 
     E_theta = lambda t: E_cas(C0 @ block_rotation(t, nmo, pairs))
-    _, th_star, gnorm = optimize_theta(None, None, E_theta, npar, steps=2000,
-                                       g_conv=1e-12,
+    _, th_star, gnorm = optimize_theta(None, None, E_theta, npar,
+                                       steps=_STEPS, g_conv=1e-12,
                                        theta0=np.zeros(npar))
     th_star = jnp.asarray(np.asarray(th_star))
-    print(f'  theta*:  |g| = {gnorm:.3e}   npar = {npar}   nR = {nR}')
+    target = 1e-12
+    converged = bool(float(gnorm) < target)
+    print(f'  theta*:  |g| = {gnorm:.3e}   npar = {npar}   nR = {nR}   '
+          f'steps = {_STEPS}')
+    print(f'  stationary point: {"yes" if converged else "NO"} '
+          f'(target {target:g})')
+    if not converged:
+        # The response is an expansion about a stationary point. Away from
+        # one the measured difference between the two cutoffs is partly
+        # just the residual gradient, so the verdict below is provisional.
+        print('  WARNING: theta* is not stationary. The comparison below '
+              'may be measuring the residual gradient as much as the '
+              'cutoff; re-run with more steps before quoting it.')
 
     def E_joint(m_, th_):
         mf_ = pscf.RHF(m_)
@@ -177,6 +196,94 @@ def main():
     rel_diff = float(np.abs(D_rel - D_abs).max() / denom)
     print(f'    relative difference          = {rel_diff:.3e}')
 
+    # ---- is the response stable in the cutoff at all? ----
+    # Two conventions differing says the choice is visible. It does not
+    # say the quantity is trustworthy: a response that swings over the
+    # whole plausible range of cutoffs is being set by the near-null
+    # directions of H_tt, not by the physics. Sweeping the cutoff and
+    # looking for a plateau is the same test this project applies to
+    # finite-difference steps.
+    # ---- is the response stable in the cutoff at all? ----
+    # Two conventions differing says the choice is visible. It does not
+    # say the quantity is trustworthy: a response that swings over the
+    # whole plausible range of cutoffs is being set by the near-null
+    # directions of H_tt, not by the physics. Sweeping the cutoff and
+    # looking for a plateau is the same test this project applies to
+    # finite-difference steps.
+    #
+    # The deviation from the production answer is printed alongside the
+    # maximum, because a cutoff can leave the largest element untouched
+    # while moving the others -- which is exactly what happened here.
+    print()
+    print('  cutoff sweep: is there a plateau, or does the response drift?')
+    sweep = [0.0, 1e-12, 1e-10, 1e-9, 1e-8, 1e-7, 1e-6, 1e-5, 1e-4, 1e-3]
+    rows = []                       # (rcond, kept, |dtheta*/dR|_max, D or None)
+    for rc in sweep:
+        keep = (np.ones(s.size, dtype=bool) if rc == 0.0
+                else s > rc * s[0])
+        if not keep.any():
+            rows.append((rc, 0, float('nan'), None))
+            continue
+        D = -pinv(keep) @ M
+        rows.append((rc, int(keep.sum()), float(np.abs(D).max()), D))
+    ref = next(D for rc, _, _, D in rows if rc == 1e-9 and D is not None)
+    ref_scale = max(float(np.abs(ref).max()), 1e-300)
+
+    print(f'    {"rcond":>10} {"kept":>5} {"|dtheta*/dR|_max":>17} '
+          f'{"max change vs 1e-9":>20}')
+    stable, changes = [], []
+    for rc, kept, v, D in rows:
+        label = f'{rc:.0e}' if rc else '0 (all)'
+        if D is None:
+            print(f'    {label:>10} {kept:>5}  (nothing retained)')
+            continue
+        change = float(np.abs(D - ref).max()) / ref_scale
+        changes.append(change)
+        if change < 1e-3:
+            stable.append(rc)
+        print(f'    {label:>10} {kept:>5} {v:>17.4e} {change:>20.3e}')
+
+    finite = [v for _, k, v, _ in rows if k and v == v]
+    if finite:
+        spread = max(finite) / max(min(finite), 1e-300)
+        print(f'    spread of the maximum over the whole sweep = '
+              f'{spread:.3f}x')
+
+    # The whole-sweep spread is the wrong headline: an over-aggressive
+    # cutoff will always eventually break the answer, and counting those
+    # points makes a sound choice look fragile. The question is whether
+    # the *production* cutoff sits inside a plateau, and how much room
+    # that plateau leaves on each side.
+    if stable:
+        lo, hi = min(stable), max(stable)
+        print(f'    plateau (change < 0.1%) spans rcond = {lo:.0e} to '
+              f'{hi:.0e}  ({len(stable)} of {len(rows)} points swept)')
+        inside = lo <= RELATIVE_RCOND <= hi
+        if inside:
+            above = hi / RELATIVE_RCOND
+            print(f'    the production cutoff {RELATIVE_RCOND:.0e} is inside '
+                  f'it, with room to loosen by {above:.0e}x')
+            print('    => the response is set by the well-conditioned '
+                  'directions; the choice is robust for this system')
+        else:
+            print(f'    the production cutoff {RELATIVE_RCOND:.0e} is OUTSIDE '
+                  'the plateau')
+            print('    => the near-null directions set the answer here and '
+                  'the quantity is not robust')
+    else:
+        print('    no plateau: every cutoff moves the answer')
+        print('    => the near-null directions set the answer and the '
+              'quantity is not robust')
+
+    # Where does the absolute convention land, in relative terms?
+    rel_equiv = ABSOLUTE_CUTOFF / float(s[0])
+    print(f'    the absolute cutoff {ABSOLUTE_CUTOFF:g} is equivalent to '
+          f'rcond = {rel_equiv:.2e}')
+    if stable and rel_equiv > max(stable):
+        print(f'    => it lies beyond the plateau edge {max(stable):.0e}, '
+              'so it removes directions the answer depends on, not just '
+              'the null space')
+
     print()
     print('=' * 76)
     if not dropped.any():
@@ -188,10 +295,20 @@ def main():
                    'couple to'
                    '\n  => physically equivalent for this system; the '
                    'relative cutoff is the safer default')
+    elif stable and min(stable) <= RELATIVE_RCOND <= max(stable):
+        verdict = ('the response is invariant over a wide range of '
+                   'cutoffs, and the production cutoff sits inside it'
+                   '\n  => keep the relative convention; the difference '
+                   'from the absolute one is that convention cutting into '
+                   'the real spectrum, not a sensitivity of the physics')
     else:
         verdict = ('the conventions give materially different responses'
                    '\n  => the choice must be recorded with every result, '
                    'and the two must not be compared across conventions')
+    if not converged:
+        verdict += ('\n  PROVISIONAL: theta* is not stationary '
+                    f'(|g| = {float(gnorm):.3e}), so part of the difference '
+                    'above is the residual gradient')
     print(f'VERDICT: {verdict}')
     print('=' * 76)
     return 0
