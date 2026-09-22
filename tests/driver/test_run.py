@@ -139,3 +139,34 @@ def test_a_fast_result_has_no_active_space_check():
         'orbital_gradient', 'hessian_curvature', 'variational',
         'active_electrons',
     }
+
+
+def test_an_electronic_structure_failure_refuses_rather_than_escalating(
+        tmp_path):
+    """The level controls how many starts are tried, and none of them
+    can revive a reference SCF that did not converge.
+
+    Surfaced by the server validation on 2026-09-22: a failing SCF at
+    the fast level was reported as an escalation to the robust level,
+    which reads as "try harder" for a failure that trying harder cannot
+    fix -- and exited 0.
+    """
+    from diffmrc.driver import run as run_mod
+    from diffmrc.driver.run import ElectronicStructureFailure
+    from diffmrc.driver.state import Level
+
+    geom = tmp_path / 'mol.xyz'
+    geom.write_text('2\nh2\nH 0 0 0\nH 0 0 0.74\n', encoding='utf-8')
+
+    def _boom(*a, **k):
+        raise ElectronicStructureFailure('the reference SCF failed: boom')
+
+    original = run_mod._compute
+    run_mod._compute = _boom
+    try:
+        result = run_mod.run_from_geometry(str(geom), level='fast')
+    finally:
+        run_mod._compute = original
+    assert result.decision.level is Level.REFUSED
+    assert not result.trustworthy
+    assert any('boom' in r for r in result.decision.reasons)

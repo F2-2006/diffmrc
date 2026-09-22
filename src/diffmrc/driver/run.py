@@ -216,9 +216,18 @@ def run_from_geometry(geometry_file, charge=0, spin=0, level='robust',
         computed = _compute(atoms, charge, spin, active_space, params,
                             level=level)
     except ElectronicStructureFailure as exc:
-        result.decision = next_level(
-            start,
-            [SelfCheck('electronic_structure', False, str(exc))])
+        # This one stops the run rather than escalating. The level only
+        # controls how many orbital starts are tried, so no escalation
+        # can repair a reference that does not exist -- and a number
+        # built on an unconverged reference is exactly what the refusal
+        # exists to prevent.
+        result.decision = Decision(
+            level=Level.REFUSED,
+            checks=[SelfCheck('electronic_structure', False, str(exc))],
+            reasons=[f'electronic_structure: {exc}'],
+            suggestions=['check the geometry, charge, spin and basis, and '
+                         'whether the SCF converges at all'],
+        )
         return result
 
     result.energy = float(computed['energy'])
