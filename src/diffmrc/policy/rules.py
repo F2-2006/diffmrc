@@ -13,31 +13,39 @@ caller is expected to escalate or to report that it cannot decide.
 What the composition weights can and cannot do
 ---------------------------------------------
 
-The weights are useful *within a set of candidates*, for ranking them
-against each other. They are not useful as an absolute test, and the
-measurements show why: europium's ANO basis carries 49 f-type functions
-across seven contractions, so an overlap-weighted sum over "europium f"
-is nonzero for 48 of the 76 orbitals of EuF. Taken as a threshold that
-is meaningless.
+The weights are useful *within a set of candidates*, for labelling them,
+and only if the right quantity is compared. Both simpler tests fail on
+the measured data, and the way they fail is worth recording.
 
-Ranked inside the eight singly occupied orbitals of EuF, the same
-quantity separates cleanly. Measured on the molecular end (t176,
-2026-09-22), the fraction f/(f + p) is
+An *absolute* weight cannot be a threshold: europium's ANO basis spreads
+f character over seven contractions, so an overlap-weighted "europium f"
+sum exceeds 0.5 for 48 of the 76 orbitals of EuF.
 
-    orbitals 32, 33, 34, 35, 37, 38, 39 :  1.0000, 1.0000, ... 0.9989
-    orbital  36                        :  0.0124
+A *ratio* between two shells fails differently. One orbital of EuF has f
+weight 0.0039 and p weight 0.0000, giving an f fraction of exactly 1.0
+-- a confident label computed from two near-zero numbers.
 
-Seven orbitals at 0.999 or above and one at 0.012 -- an eightyfold gap,
-and exactly the seven the f shell should have. So the rule is: rank the
-candidates by composition and take the ones that stand apart, refusing
-when they do not.
+Taking the shell with the largest weight avoids both. The eight singly
+occupied orbitals of EuF's molecular end (measured 2026-09-22) come out
+as
 
-This matters because the occupation pattern is not reliable here. The
-molecular end of EuF has eight singly occupied orbitals, not the seven
-the free atom shows, and the valence rule that works on a free main
-group atom finds no doubly-occupied pair to take. The extra singly
-occupied orbital is the ligand's, and only the composition tells them
-apart.
+    orbitals 32, 33, 34, 35, 37, 38 :  Eu f, 0.997 to 1.000
+    orbital  36                     :  Eu s, 0.866
+    orbital  39                     :  Eu d, 0.997
+
+which is the chemistry: six f orbitals, the 6s, and the 5d.
+
+Two consequences follow, and both contradict what this project assumed
+before the measurement. First, the molecular end has *six* f orbitals
+rather than the seven a free europium atom shows -- the seventh f
+electron is elsewhere, and the molecular orbital list simply does not
+have seven orbitals that are mostly f. Second, the occupation pattern
+cannot identify any of this: all eight orbitals are singly occupied.
+
+So a rule for the molecular end has to label by dominant composition and
+then accept whatever count comes out, rather than assume a count and
+hunt for orbitals to fill it. The atom-end rules below still work on
+their own terms.
 """
 from dataclasses import dataclass, field
 
@@ -46,84 +54,58 @@ import numpy as np
 from .composition import element_shell_weights
 from .occupation import select_valence, split_by_occupation
 
-__all__ = ['SHELL_RULES', 'Candidate', 'SelectionPlan', 'SplitByComposition',
+__all__ = ['SHELL_RULES', 'Candidate', 'SelectionPlan',
            'candidate_from_elements', 'plan_from_elements',
-           'split_by_composition']
+           'dominant_shell']
 
-# How far apart the two groups must sit for a composition split to be
-# trusted. Measured on EuF's molecular end the ratio is 0.9989 / 0.0124,
-# about 80; the threshold below leaves ample room without accepting a
-# split that is really a continuum.
-COMPOSITION_MIN_RATIO = 4.0
+def dominant_shell(candidates, weights_by_shell, min_weight=0.5):
+    """Label each candidate by the shell it mostly belongs to.
 
+    Two simpler tests both fail on real data, and the way they fail is
+    worth recording.
 
-@dataclass
-class SplitByComposition:
-    """Candidates separated into two groups by their composition."""
+    An *absolute* weight cannot be a threshold: a lanthanide's ANO basis
+    spreads f character over seven contractions, so an overlap-weighted
+    "europium f" sum exceeds 0.5 for most orbitals of EuF.
 
-    first: list = field(default_factory=list)
-    second: list = field(default_factory=list)
-    ratio: float = 0.0
-    scores: dict = field(default_factory=dict)
+    A *ratio* between two shells fails differently. On EuF's molecular
+    end one orbital has f weight 0.0039 and p weight 0.0000, giving an
+    f fraction of exactly 1.0 and a confident but meaningless label --
+    the ratio of two near-zero numbers.
 
-
-def split_by_composition(candidates, weights_a, weights_b,
-                         min_ratio=COMPOSITION_MIN_RATIO):
-    """Separate candidates by which of two shells they belong to.
-
-    The fraction ``a / (a + b)`` is computed for each candidate and the
-    list is cut where the largest gap falls, provided that gap is wide
-    enough to mean something. Comparing the two shells against each
-    other is what makes this work where an absolute weight does not: a
-    lanthanide's f functions spread over many contractions give every
-    orbital a nonzero f weight, but the *ratio* still separates the
-    orbitals that are mostly f from those that are mostly something
-    else.
+    Taking the shell with the largest weight avoids both. The same eight
+    orbitals come out as six with f at 0.997 or above, one with s at
+    0.866, and one with d at 0.997: clean, and matching what the
+    chemistry says they are.
 
     Parameters
     ----------
     candidates : sequence of int
-        Orbital indices to separate.
-    weights_a, weights_b : array_like
-        Per-orbital weights on the two shells, indexed over the full
-        orbital set.
-    min_ratio : float
-        Smallest acceptable ratio between the lowest score in the first
-        group and the highest in the second. Below it the split is
-        treated as arbitrary and None is returned.
+        Orbital indices to label.
+    weights_by_shell : mapping
+        Shell name to per-orbital weight array.
+    min_weight : float
+        A candidate whose largest weight falls below this is labelled
+        None -- it is mixed, and calling it one thing or another would
+        be arbitrary.
 
     Returns
     -------
-    SplitByComposition or None
-        None when the candidates cannot be separated: fewer than two of
-        them, or no gap wide enough to trust. A caller must treat None
-        as a refusal.
+    dict
+        Candidate index to shell name, or to None when no shell
+        dominates. A caller must handle the None entries rather than
+        assuming every candidate found a home.
     """
     candidates = [int(i) for i in candidates]
-    if len(candidates) < 2:
-        return None
-    wa = np.asarray(weights_a, dtype=float)
-    wb = np.asarray(weights_b, dtype=float)
-    scores = {i: float(wa[i]) / max(float(wa[i]) + float(wb[i]), 1e-30)
-              for i in candidates}
-
-    # Cut at the largest gap in the sorted scores.
-    order = sorted(candidates, key=lambda i: -scores[i])
-    if any(scores[order[k]] == scores[order[k + 1]]
-           for k in range(len(order) - 1)):
-        pass                      # ties are handled by the ratio test below
-    gaps = [(scores[order[k]] - scores[order[k + 1]], k + 1)
-            for k in range(len(order) - 1)]
-    gap, cut = max(gaps)
-    first, second = order[:cut], order[cut:]
-
-    if not first or not second:
-        return None
-    ratio = scores[first[-1]] / max(scores[second[0]], 1e-30)
-    if ratio < min_ratio:
-        return None
-    return SplitByComposition(first=sorted(first), second=sorted(second),
-                              ratio=float(ratio), scores=scores)
+    out = {}
+    for i in candidates:
+        best_shell, best = None, 0.0
+        for name, weights in weights_by_shell.items():
+            w = float(np.asarray(weights, dtype=float)[i])
+            if w > best:
+                best_shell, best = name, w
+        out[i] = best_shell if best >= min_weight else None
+    return out
 
 # The lanthanides, whose half-filled f shell is what the f_shell rule
 # looks for. Promethium is included: it is radioactive and rarely used,

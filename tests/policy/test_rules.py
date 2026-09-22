@@ -7,7 +7,7 @@ from diffmrc.policy.rules import (
     Candidate,
     candidate_from_elements,
     plan_from_elements,
-    split_by_composition,
+    dominant_shell,
 )
 
 
@@ -114,14 +114,10 @@ def test_the_molecular_end_is_not_described_by_the_valence_rule():
     `select_valence` looks for the valence shell as some singly occupied
     orbitals plus the highest doubly occupied ones. That describes a free
     main-group atom. In a molecule the ligand's share appears differently
-    -- one singly occupied orbital for fluorine in EuF, with no doubly
-    occupied pair to take -- so the rule returns None.
-
-    Returning None is the correct behaviour here: the function does not
-    know how to identify the ligand's shell in this situation, and
-    guessing would place the wrong orbitals in the active space. What
-    the molecule needs is a rule that identifies the shell by orbital
-    composition rather than by occupation pattern, which is future work.
+    -- for fluorine in EuF it is one singly occupied orbital, with no
+    doubly occupied pair to take -- so the rule returns None. The
+    molecular case is handled by `dominant_shell` instead, which labels
+    orbitals by composition.
     """
     c = candidate_from_elements(
         _FakeMol([f'{i} Eu 1s' for i in range(len(EUF_MOL_OCC))]),
@@ -174,71 +170,96 @@ def test_candidate_ligand_refuses_when_the_shell_is_too_large():
     assert c is None
 
 
+
+
 # ---------------------------------------------------------------------
-# Separating orbitals by composition.
+# Labelling orbitals by their dominant composition.
 #
-# The weights below are the measured Eu-f and F-p values on the eight
-# singly occupied orbitals of EuF's molecular end (t176, 2026-09-22).
-# Seven of them are the europium f shell and one carries the fluorine,
-# and the occupation pattern alone cannot tell them apart: all eight are
-# singly occupied.
+# The weights below were measured on EuF's molecular end (t176,
+# 2026-09-22) over eight singly occupied orbitals. All eight are singly
+# occupied, so nothing about the occupations separates them; the
+# composition does.
 # ---------------------------------------------------------------------
-EUF_MOL_SINGLY = [32, 33, 34, 35, 36, 37, 38, 39]
-EUF_MOL_F_WEIGHT = {32: 0.9984, 33: 0.9984, 34: 0.9972, 35: 0.9999,
-                    36: 0.0001, 37: 0.9999, 38: 0.9999, 39: 0.0039}
-EUF_MOL_P_WEIGHT = {32: 0.0011, 33: 0.0011, 34: 0.0000, 35: 0.0000,
-                    36: 0.0092, 37: 0.0000, 38: 0.0000, 39: 0.0000}
+EUF_SINGLY = [32, 33, 34, 35, 36, 37, 38, 39]
+EUF_WEIGHTS = {
+    'Eu-s': {32: 0.0000, 33: 0.0000, 34: 0.0000, 35: 0.0000,
+             36: 0.8661, 37: 0.0000, 38: 0.0000, 39: 0.0000},
+    'Eu-d': {32: 0.0005, 33: 0.0005, 34: 0.0028, 35: 0.0000,
+             36: 0.0418, 37: 0.0000, 38: 0.0000, 39: 0.9966},
+    'Eu-f': {32: 0.9984, 33: 0.9984, 34: 0.9972, 35: 0.9999,
+             36: 0.0001, 37: 0.9999, 38: 0.9999, 39: 0.0039},
+    'F-p': {32: 0.0011, 33: 0.0011, 34: 0.0000, 35: 0.0000,
+            36: 0.0092, 37: 0.0000, 38: 0.0000, 39: 0.0000},
+}
 
 
-def _weights(mapping, n=40):
-    w = np.zeros(n)
-    for k, v in mapping.items():
-        w[k] = v
-    return w
+def _shell_weights(overrides=None, n=40):
+    out = {}
+    for name, mapping in EUF_WEIGHTS.items():
+        w = np.zeros(n)
+        for k, v in mapping.items():
+            w[k] = v
+        if overrides and name in overrides:
+            for k, v in overrides[name].items():
+                w[k] = v
+        out[name] = w
+    return out
 
 
-def test_composition_separates_the_f_shell_from_the_ligand():
-    """The measured EuF case: seven f orbitals and one ligand orbital.
+def test_dominant_shell_labels_the_measured_orbitals():
+    """Six f, one s, one d -- which is what the chemistry says.
 
-    Both groups are singly occupied, so nothing about the occupations
-    distinguishes them. The composition does, and by a wide margin.
+    This is the labelling that both a plain threshold and a two-shell
+    ratio get wrong. A threshold of 0.5 on the f weight accepts 48 of
+    EuF's 76 orbitals; the ratio f/(f+p) labels orbital 39 as f because
+    both its weights are near zero and the ratio is 0.0039/0.0039.
     """
-    s = split_by_composition(EUF_MOL_SINGLY,
-                             _weights(EUF_MOL_F_WEIGHT),
-                             _weights(EUF_MOL_P_WEIGHT))
-    assert s is not None
-    assert s.first == [32, 33, 34, 35, 37, 38, 39]
-    assert s.second == [36]
-    assert s.ratio > 10.0
+    labels = dominant_shell(EUF_SINGLY, _shell_weights())
+    assert labels[32] == 'Eu-f'
+    assert labels[33] == 'Eu-f'
+    assert labels[34] == 'Eu-f'
+    assert labels[35] == 'Eu-f'
+    assert labels[37] == 'Eu-f'
+    assert labels[38] == 'Eu-f'
+    assert labels[36] == 'Eu-s'
+    assert labels[39] == 'Eu-d'
 
 
-def test_composition_refuses_a_uniform_set():
-    """All-equal scores carry no information about a split."""
-    n = 6
-    cands = list(range(n))
-    uniform = np.ones(12)
-    assert split_by_composition(cands, uniform, uniform) is None
+def test_dominant_shell_counts_six_f_orbitals_not_seven():
+    """The measured count contradicts the atom-end assumption.
+
+    A free europium atom shows seven singly occupied f orbitals. Its
+    molecular end shows six, with the 6s and 5d taking two of the eight
+    singly occupied slots. A rule that assumes seven and hunts for
+    orbitals to fill the count is what made the earlier attempts place
+    the wrong orbitals.
+    """
+    labels = dominant_shell(EUF_SINGLY, _shell_weights())
+    n_f = sum(1 for v in labels.values() if v == 'Eu-f')
+    assert n_f == 6
 
 
-def test_composition_refuses_when_the_gap_is_small():
-    """A continuum of scores is not two groups."""
-    cands = list(range(5))
-    a = np.array([0.50, 0.48, 0.46, 0.44, 0.42] + [0.0] * 5)
-    b = np.array([0.50, 0.52, 0.54, 0.56, 0.58] + [0.0] * 5)
-    assert split_by_composition(cands, a, b) is None
+def test_dominant_shell_refuses_a_mixed_orbital():
+    """No shell above the threshold means the label would be arbitrary."""
+    weights = _shell_weights(overrides={'Eu-f': {32: 0.3}})
+    labels = dominant_shell([32], weights, min_weight=0.5)
+    assert labels[32] is None
 
 
-def test_composition_needs_at_least_two_candidates():
-    assert split_by_composition([3], _weights({3: 1.0}),
-                                _weights({3: 0.0})) is None
+def test_dominant_shell_respects_the_threshold():
+    weights = _shell_weights()
+    strict = dominant_shell([36], weights, min_weight=0.9)
+    loose = dominant_shell([36], weights, min_weight=0.5)
+    assert strict[36] is None          # 0.866 is below 0.9
+    assert loose[36] == 'Eu-s'
 
 
-def test_composition_records_the_score_of_every_candidate():
-    s = split_by_composition(EUF_MOL_SINGLY,
-                             _weights(EUF_MOL_F_WEIGHT),
-                             _weights(EUF_MOL_P_WEIGHT))
-    assert s is not None
-    for i in EUF_MOL_SINGLY:
-        assert i in s.scores
-    assert s.scores[35] > 0.99
-    assert s.scores[36] < 0.05
+def test_dominant_shell_handles_an_empty_candidate_list():
+    assert dominant_shell([], _shell_weights()) == {}
+
+
+def test_dominant_shell_ignores_shells_not_supplied():
+    """Only the shells given are considered."""
+    weights = {'Eu-f': _shell_weights()['Eu-f']}
+    labels = dominant_shell([36], weights)
+    assert labels[36] is None          # nothing dominates in this subset
