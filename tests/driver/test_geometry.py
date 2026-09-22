@@ -2,7 +2,11 @@
 import numpy as np
 import pytest
 
-from diffmrc.driver.geometry import GeometryResult, optimize_geometry
+from diffmrc.driver.geometry import (
+    ElectronicStructureFailure,
+    GeometryResult,
+    optimize_geometry,
+)
 
 
 def _harmonic(centre):
@@ -92,3 +96,53 @@ def test_tightening_the_tolerance_can_leave_a_run_unconverged():
     loose = optimize_geometry(_harmonic(centre), np.ones(3), grad_tol=1e-5)
     assert not strict.converged
     assert loose.converged
+
+
+def test_a_converged_run_reports_no_failure():
+    r = optimize_geometry(_harmonic(np.zeros(3)), np.ones(3))
+    assert r.converged
+    assert r.failure == ''
+
+
+def test_a_non_converged_run_says_which_failure_it_was():
+    def energy_and_gradient(flat):
+        flat = np.asarray(flat, dtype=float)
+        return float(np.sum(flat)), np.ones_like(flat)
+
+    r = optimize_geometry(energy_and_gradient, np.zeros(3), max_steps=5)
+    assert not r.converged
+    assert r.failure == 'not_converged'
+
+
+def test_an_electronic_structure_failure_stops_the_run():
+    """A failed energy is a different problem from a wandering geometry.
+
+    An SCF that will not converge, or an active space that turned out
+    wrong, makes the energy untrustworthy. Optimizing through it would
+    take steps based on numbers that mean nothing, so the run stops and
+    reports this separately from a geometry that merely has not
+    converged.
+    """
+    calls = {'n': 0}
+
+    def energy_and_gradient(flat):
+        calls['n'] += 1
+        if calls['n'] > 2:
+            raise ElectronicStructureFailure('SCF did not converge')
+        flat = np.asarray(flat, dtype=float)
+        return float(0.5 * flat @ flat), flat
+
+    r = optimize_geometry(energy_and_gradient, np.ones(3), max_steps=50)
+    assert r.failure == 'electronic_structure'
+    assert not r.converged
+    assert 'SCF did not converge' in r.message
+    assert calls['n'] <= 4
+
+
+def test_other_exceptions_are_not_swallowed():
+    """Only the declared failure is caught; a real bug must still surface."""
+    def energy_and_gradient(flat):
+        raise ValueError('a genuine programming error')
+
+    with pytest.raises(ValueError):
+        optimize_geometry(energy_and_gradient, np.ones(3))
