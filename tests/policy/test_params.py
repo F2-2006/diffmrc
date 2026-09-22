@@ -146,3 +146,30 @@ def test_the_three_gradient_targets_are_ordered():
     assert (PARAMS['refine_target'].default
             < PARAMS['gradient_tol'].default
             < PARAMS['optimizer_grad_tol'].default)
+
+
+def test_the_basis_and_multistart_parameters_exist():
+    """The end-to-end path needs a basis to run and a retry count.
+
+    The basis is a choice, not free text: `validate` only accepts
+    strings that declare their allowed values, so a typo is caught at
+    the command line rather than deep inside a basis-set library.
+    """
+    assert PARAMS['basis'].default == '6-31g'
+    assert 'ano' in PARAMS['basis'].choices
+    assert PARAMS['multistart_tries'].default == 4
+
+
+def test_parse_active_space_accepts_ranges_and_lists():
+    from diffmrc.policy.params import parse_active_space
+
+    assert parse_active_space('2-4') == [2, 3, 4]
+    assert parse_active_space('2,3,4') == [2, 3, 4]
+    assert parse_active_space(' 5 ') == [5]
+
+
+def test_parse_active_space_rejects_nonsense_without_raising():
+    from diffmrc.policy.params import parse_active_space
+
+    for text in ('', '4-2', 'a', '2-', '1,,2'):
+        assert parse_active_space(text) is None

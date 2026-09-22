@@ -64,14 +64,16 @@ def build_parser():
                    help='validate the input without computing anything')
 
     # Every numeric and choice parameter is exposed, generated from the
-    # table so no default is written twice.
+    # table so no default is written twice. Which kind a flag is comes
+    # from the table too: a parameter that declares its allowed values
+    # is a choice, and typing it as a float would reject its own default
+    # at parse time.
     for key, spec in PARAMS.items():
-        if key == 'localization':
-            p.add_argument(f'--{key.replace("_", "-")}',
-                           choices=list(spec.choices), default=spec.default,
-                           help=spec.help)
+        flag = f'--{key.replace("_", "-")}'
+        if spec.choices:
+            p.add_argument(flag, choices=list(spec.choices),
+                           default=spec.default, help=spec.help)
         else:
-            flag = f'--{key.replace("_", "-")}'
             p.add_argument(flag, type=float, default=spec.default,
                            metavar='VALUE', help=spec.help)
     return p
@@ -104,22 +106,11 @@ def _print_defaults(stream):
 
 
 def _parse_active_space(text):
-    """Parse '2-4' or '2,3,4' into a list of indices.
+    """Kept for callers of this module; the parser itself lives in the
+    policy layer, which the driver can also import."""
+    from ..policy.params import parse_active_space
 
-    Returns None when the text does not parse, so the caller can report
-    the offending string rather than raising a bare ValueError.
-    """
-    text = text.strip()
-    try:
-        if '-' in text:
-            lo, hi = text.split('-', 1)
-            lo, hi = int(lo), int(hi)
-            if hi < lo:
-                return None
-            return list(range(lo, hi + 1))
-        return [int(x) for x in text.split(',') if x.strip()]
-    except ValueError:
-        return None
+    return parse_active_space(text)
 
 
 def _validate_input(path, charge, spin, active_space):

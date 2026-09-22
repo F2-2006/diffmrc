@@ -84,6 +84,17 @@ _PARAM_LIST = [
           'false non-convergence. The Newton refinement continues from '
           'where this stage stops',
           'driver', unit='dimensionless', lo=0.0, hi=1e-2),
+    Param('basis', '6-31g',
+          'basis set for the end-to-end path; the released list is what '
+          'this package was validated on, and extending it is a one-line '
+          'change once the new basis has a reference number',
+          'driver', choices=('6-31g', 'cc-pvdz', 'ano')),
+    Param('multistart_tries', 4,
+          'starting points tried at the robust level; the variationally '
+          'lowest point is kept. A single start from the reference '
+          'orbitals lands on a stationary saddle on H2O/6-31g, and SCF '
+          'multi-solution can put the correct solution in another basin',
+          'driver', unit='starts', lo=1.0, hi=32.0),
     Param('refine_max_iter', 80,
           'iteration cap for the Newton refinement',
           'core', unit='steps', lo=1.0, hi=1000.0),
@@ -197,3 +208,30 @@ def effective(overrides=None):
         values[key] = value
         sources[key] = 'user'
     return EffectiveParams(values=values, sources=sources)
+
+
+def parse_active_space(text):
+    """Parse '2-4' or '2,3,4' into a list of orbital indices.
+
+    Returns None when the text does not parse, so callers can report the
+    offending string rather than raising. The parser lives here, not in
+    the command line, because the driver needs it too and the driver may
+    not import the command line -- the import contract runs the other
+    way.
+    """
+    text = text.strip()
+    if not text:
+        return None
+    try:
+        if '-' in text:
+            lo, hi = text.split('-', 1)
+            lo, hi = int(lo), int(hi)
+            if hi < lo:
+                return None
+            return list(range(lo, hi + 1))
+        parts = text.split(',')
+        if any(not part.strip() for part in parts):
+            return None
+        return [int(part) for part in parts]
+    except ValueError:
+        return None
