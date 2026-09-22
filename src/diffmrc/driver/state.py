@@ -62,8 +62,9 @@ _SUGGESTIONS = {
                    'configuration; check the orbital partition',
     'active_electrons': 'the active space and its electron count disagree; '
                         'the selection rule did not match this system',
-    'active_space': 'specify the active space explicitly, or relax the '
-                    'plateau criterion',
+    'active_space': 'pass --active-space to state the space yourself, or '
+                    'run at --level fast; the entanglement verification at '
+                    'the robust level is not implemented yet',
 }
 
 

@@ -108,3 +108,34 @@ def test_the_thresholds_are_function_arguments():
     assert not _by_name(checks_from_result(**args,
                                            gradient_tol=1e-12)
                         )['orbital_gradient'].passed
+
+
+def test_a_robust_result_without_verification_fails_its_check():
+    """The robust level promises a verification this build does not do.
+
+    Refusing is the design: a number that looks reasonable but rests on
+    an unverified active space will be quoted. Until the verification
+    exists, the honest outcome at the robust level is a refusal that
+    names the gap.
+    """
+    from diffmrc.driver.run import checks_from_result
+
+    checks = checks_from_result(
+        grad_norm=1e-10, n_negative=0, e_casscf=-76.0, e_reference=-75.9,
+        n_elec_active=7, n_elec_expected=7,
+        active_space_verified=False)
+    named = {c.name: c for c in checks}
+    assert 'active_space' in named
+    assert not named['active_space'].passed
+
+
+def test_a_fast_result_has_no_active_space_check():
+    from diffmrc.driver.run import checks_from_result
+
+    checks = checks_from_result(
+        grad_norm=1e-10, n_negative=0, e_casscf=-76.0, e_reference=-75.9,
+        n_elec_active=7, n_elec_expected=7)
+    assert {c.name for c in checks} == {
+        'orbital_gradient', 'hessian_curvature', 'variational',
+        'active_electrons',
+    }

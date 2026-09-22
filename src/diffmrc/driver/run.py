@@ -59,7 +59,8 @@ class RunResult:
 def checks_from_result(grad_norm, n_negative, e_casscf, e_reference,
                        n_elec_active, n_elec_expected,
                        gradient_tol=GRADIENT_TOL,
-                       identity_tol=ENERGY_IDENTITY_TOL):
+                       identity_tol=ENERGY_IDENTITY_TOL,
+                       active_space_verified=None):
     """Build the four self-checks from a finished calculation.
 
     Parameters
@@ -77,14 +78,21 @@ def checks_from_result(grad_norm, n_negative, e_casscf, e_reference,
         Electrons in the selected space, and how many the rule called for.
     gradient_tol, identity_tol : float
         Thresholds for the first and third checks.
+    active_space_verified : bool, optional
+        Whether the entanglement verification of the active space ran
+        and agreed. ``None`` -- the fast level -- adds no check at all;
+        ``False`` adds a failing one, because the robust level promises
+        a verification this build does not yet perform and a passing
+        robust result would be a claim it cannot support.
 
     Returns
     -------
     list of SelfCheck
         Always four, always in the same order, so a report can be
-        compared across runs.
+        compared across runs; a fifth when the robust level asked for
+        the verification.
     """
-    return [
+    checks = [
         SelfCheck(
             name='orbital_gradient',
             passed=bool(grad_norm < gradient_tol),
@@ -110,6 +118,17 @@ def checks_from_result(grad_norm, n_negative, e_casscf, e_reference,
                    f'{n_elec_expected}',
         ),
     ]
+    if active_space_verified is not None:
+        checks.append(SelfCheck(
+            name='active_space',
+            passed=bool(active_space_verified),
+            detail=('the entanglement verification ran and agreed'
+                    if active_space_verified else
+                    'the entanglement verification did not run: it is not '
+                    'implemented in this build, so the active space rests '
+                    'on the selection rules alone'),
+        ))
+    return checks
 
 
 def read_xyz(path):
@@ -194,7 +213,8 @@ def run_from_geometry(geometry_file, charge=0, spin=0, level='robust',
     start = Level.FAST if level == 'fast' else Level.ROBUST
 
     try:
-        computed = _compute(atoms, charge, spin, active_space, params)
+        computed = _compute(atoms, charge, spin, active_space, params,
+                            level=level)
     except ElectronicStructureFailure as exc:
         result.decision = next_level(
             start,
@@ -205,6 +225,10 @@ def run_from_geometry(geometry_file, charge=0, spin=0, level='robust',
     result.frequencies = computed.get('frequencies')
     result.algorithm_data.update(computed.get('algorithm_data', {}))
 
+    # The robust level promises the entanglement verification; the value
+    # is None at the fast level, where no such promise is made.
+    verification = computed.get('algorithm_data', {}).get(
+        'active_space_verified')
     checks = checks_from_result(
         grad_norm=computed['grad_norm'],
         n_negative=computed['n_negative'],
@@ -216,12 +240,14 @@ def run_from_geometry(geometry_file, charge=0, spin=0, level='robust',
         if 'gradient_tol' in params else GRADIENT_TOL,
         identity_tol=float(params['energy_identity_tol'])
         if 'energy_identity_tol' in params else ENERGY_IDENTITY_TOL,
+        active_space_verified=(None if start is Level.FAST
+                               else bool(verification)),
     )
     result.decision = next_level(start, checks)
     return result
 
 
-def _compute(atoms, charge, spin, active_space, params):
+def _compute(atoms, charge, spin, active_space, params, level='fast'):
     """Run the numerical kernel.
 
     Raises
@@ -232,12 +258,12 @@ def _compute(atoms, charge, spin, active_space, params):
         If the calculation cannot produce a trustworthy energy.
     """
     try:
+        from .kernel import compute_ground_state
         from ..core import casci  # noqa: F401
         from ..policy import rules  # noqa: F401
     except ImportError as exc:
         raise ImportError('the numerical kernel is not installed') from exc
 
-    raise ElectronicStructureFailure(
-        'the end-to-end kernel path is not wired yet: the individual '
-        'modules are in place, the glue between geometry input and the '
-        'differentiable kernel is the remaining work')
+    atoms_str = '; '.join(f'{s} {x} {y} {z}' for s, x, y, z in atoms)
+    return compute_ground_state(atoms_str, charge, spin, active_space,
+                                params, level=level)
