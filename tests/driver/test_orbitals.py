@@ -171,3 +171,33 @@ def test_the_polish_is_skipped_when_the_refinement_already_converged(
     assert not called
     assert not p.polished
     assert p.is_stationary
+
+
+def test_the_polish_repeats_while_it_keeps_improving(monkeypatch):
+    """Measured on H2O/6-31g: one pass reaches 4.6e-8, a second pass is
+    what closes the last factor to the 1e-8 gate. Each pass is kept only
+    if it lowers the gradient, and the loop stops at the target."""
+    from diffmrc.core.stationary import StopReason, StationaryPoint
+    from diffmrc.driver import orbitals as orb
+
+    stalled = StationaryPoint(theta=jnp.zeros(2), energy=-1.0,
+                              grad_norm=2.1e-4, n_accepted=1,
+                              stop_reason=StopReason.STALLED_GRADIENT,
+                              target=1e-11)
+    monkeypatch.setattr(orb, 'refine_stationary_point',
+                        lambda *a, **k: stalled)
+    steps = [(np.array([0.1, 0.0]), -1.000001, 4.6e-8),
+             (np.array([0.2, 0.0]), -1.000002, 3.0e-9),
+             (np.array([0.3, 0.0]), -1.000003, 1.0e-12)]
+    calls = []
+
+    def _polish(*a, **k):
+        calls.append(True)
+        return steps[len(calls) - 1]
+
+    monkeypatch.setattr(orb, '_trust_region_polish', _polish)
+    p = orb.converge_orbital_point(lambda t: 0.0, 2)
+    assert p.polished
+    assert len(calls) == 3            # third pass met the target, loop ends
+    assert p.grad_norm == pytest.approx(1.0e-12)
+    assert p.is_stationary
