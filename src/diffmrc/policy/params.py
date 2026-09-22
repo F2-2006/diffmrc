@@ -78,6 +78,12 @@ _PARAM_LIST = [
     Param('refine_target', 1e-11,
           'gradient norm the Newton refinement aims for',
           'core', unit='dimensionless', lo=0.0, hi=1e-6),
+    Param('optimizer_grad_tol', 1e-6,
+          'orbital gradient target for the L-BFGS-B stage of the orbital '
+          'point; its measured floor is 1.5e-5, so tighter targets report '
+          'false non-convergence. The Newton refinement continues from '
+          'where this stage stops',
+          'driver', unit='dimensionless', lo=0.0, hi=1e-2),
     Param('refine_max_iter', 80,
           'iteration cap for the Newton refinement',
           'core', unit='steps', lo=1.0, hi=1000.0),

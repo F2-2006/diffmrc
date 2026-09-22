@@ -131,3 +131,18 @@ def test_every_param_names_the_layer_that_consumes_it():
     layers = {p.layer for p in PARAMS.values()}
     assert 'driver' in layers
     assert 'policy' in layers
+
+
+def test_the_three_gradient_targets_are_ordered():
+    """The two-stage design depends on their order.
+
+    The optimizer's target is looser than the check threshold, which is
+    looser than the refinement target. Each stage must be able to go
+    further than the one that gates it: asking the optimizer for the
+    refinement's target is what produced runs that stopped at the
+    L-BFGS-B floor of 1.5e-5 and reported non-convergence that could not
+    be told apart from a real failure.
+    """
+    assert (PARAMS['refine_target'].default
+            < PARAMS['gradient_tol'].default
+            < PARAMS['optimizer_grad_tol'].default)
