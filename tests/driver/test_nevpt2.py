@@ -277,7 +277,11 @@ def test_the_actinide_ecp_route_wires_through():
     # experiments/verify_nevpt2_an.py tho_ecp)
     assert float(mf0.e_tot) == pytest.approx(-481.0313789074, abs=1e-9)
 
-    ncore, nact, nele = 15, 8, 8
+    # CAS(4,4): the CAS(8,8) variant of this chain needs over 2.5 h per
+    # joint evaluation at nao = 96 (the unblocked CI construction at 12870
+    # determinants runs eagerly); the wiring question is answered by the
+    # minimal space, which evaluates in minutes.
+    ncore, nact, nele = 17, 4, 4
     pairs = _pairs(ncore, nact, nmo)
     fn = make_nevpt2_joint_fn(ncore, nact, nele, nmo, pairs, builder,
                               e2_scale=1.0, ci_solver="blocked")
@@ -286,7 +290,11 @@ def test_the_actinide_ecp_route_wires_through():
     assert np.isfinite(float(E_cas))
     assert np.isfinite(float(e2))
     assert float(E_cas) < float(mf0.e_tot)   # CASCI cannot exceed the SCF
-    assert float(e2) < 0.0                   # correlation lowers the energy
+    # The correlation correction this chain returns is negative here; note
+    # that its value at this large-core, small-CAS point disagrees with
+    # PySCF by 1.6 Ha (open, memory `nevpt2-large-core-discrepancy`), so
+    # this asserts the chain's own regression value, not the physics.
+    assert float(e2) < 0.0
 
 
 def test_the_hvp_is_symmetric():
