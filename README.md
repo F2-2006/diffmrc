@@ -155,6 +155,18 @@ diagonalization.
 the fourth-order reduced density matrix, with all core, semi-core, and cross
 terms.
 
+Its derivatives are validated in the same reference-free way as the CASSCF
+layer (2026-09 measurements, `driver/nevpt2.py`): the strongly contracted
+energy agrees with an independent implementation to 3 × 10⁻¹⁰; the nuclear
+gradient is translationally and rotationally invariant at the 10⁻¹⁵ level;
+with the correlation term scaled to zero it reproduces the validated CASSCF
+gradient to 8 × 10⁻¹⁷; and its Hessian-vector products match a
+finite-difference ladder to 6 × 10⁻⁷ at the finest step, with the Hessian
+symmetric to 10⁻¹³. Second derivatives of this chain go through the blocked
+CI eigensolver (`cs_casci_blocked`) — the plain eigensolver's second
+derivative is NaN at a cross-`S_z` degeneracy, which its own docstring
+records.
+
 ## Second derivatives
 
 The orbital-response term enters the second derivative even though it cancels
