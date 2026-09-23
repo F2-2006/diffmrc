@@ -128,28 +128,27 @@ def main():
     print(f'  start: {_START}   npar = {npar}   nR = {nR}   '
           f'steps = {_STEPS}')
     if _START == 'low':
-        # Multi-start, keep the variationally lowest point. The
-        # perturbations are seeded, so a rerun reproduces the point.
+        # Multi-start with the third stage. The two-stage protocol
+        # stalls at |g| ~ 4e-4 in this basin; the trust-region polish
+        # (driver.orbitals) reaches ~5e-8 (measured 2026-09-22), which
+        # is what makes quoting a response from this point defensible.
+        from diffmrc.driver.orbitals import converge_orbital_point
+
         best = None
         for k in range(4):
             rng = np.random.default_rng(1000 + k)
             t0 = (np.zeros(npar) if k == 0
                   else 0.3 * rng.standard_normal(npar))
-            _, th_k, _ = optimize_theta(None, None, E_theta, npar,
-                                        steps=_STEPS, g_conv=1e-6,
-                                        theta0=t0)
-            sp_k = refine_stationary_point(E_theta, th_k, max_iter=200,
-                                           target=1e-11)
-            E_k = float(E_theta(sp_k.theta))
-            print(f'    start {k}: E = {E_k:.12f}  '
-                  f'|g| = {sp_k.grad_norm:.3e}  {sp_k.stop_reason.name}',
-                  flush=True)
-            if best is None or E_k < best[0]:
-                best = (E_k, sp_k)
-        E_best, sp_best = best
-        th_star = jnp.asarray(np.asarray(sp_best.theta))
-        gnorm = float(sp_best.grad_norm)
-        print(f'    variational lowest: E = {E_best:.12f}')
+            point = converge_orbital_point(E_theta, npar, theta0=t0,
+                                           optimize_tol=1e-6)
+            print(f'    start {k}: E = {point.energy:.12f}  '
+                  f'|g| = {point.grad_norm:.3e}  '
+                  f'polished = {point.polished}', flush=True)
+            if best is None or point.energy < best.energy:
+                best = point
+        th_star = jnp.asarray(np.asarray(best.theta))
+        gnorm = float(best.grad_norm)
+        print(f'    variational lowest: E = {best.energy:.12f}')
     else:
         _, th_star, gnorm = optimize_theta(None, None, E_theta, npar,
                                            steps=_STEPS, g_conv=1e-12,
