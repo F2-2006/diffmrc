@@ -56,6 +56,27 @@ def rhf_tight(m):
     return mf
 
 
+def _keep_best(best, pt, tag):
+    """A runaway is not a candidate.
+
+    The theta optimizer can walk into a NEVPT2 denominator singularity --
+    measured on this system from the zeros start: E = -3.2e7,
+    |g| = 3.6e14. Ranking by energy alone would then select it, which is
+    this project's recorded failure mode ("energy monotonicity is a
+    guard, not a criterion"). A candidate must additionally be finite
+    and stationary to a sane tolerance.
+    """
+    ok = (np.isfinite(pt.energy) and np.isfinite(pt.grad_norm)
+          and pt.grad_norm < 1e-3)
+    if not ok:
+        print('    ({}) rejected: E = {:.6g}  |g| = {:.3e}'.format(
+            tag, pt.energy, pt.grad_norm), flush=True)
+        return best
+    if best is None or pt.energy < best.energy:
+        return pt
+    return best
+
+
 def main():
     mol = pgto.Mole()
     mol.atom = ATOM
@@ -101,27 +122,32 @@ def main():
     rng = np.random.default_rng(0)
     starts = [np.zeros(npar)] + [0.05 * rng.normal(size=npar) for _ in range(2)]
     pt_cas = None
-    for k, t0 in enumerate(starts):
-        t0 = time.time()
-        pt = converge_orbital_point(E_th_cas, npar, theta0=jnp.asarray(t0))
+    for k, t_start in enumerate(starts):
+        t_wall = time.time()
+        pt = converge_orbital_point(E_th_cas, npar, theta0=jnp.asarray(t_start))
         print('  CAS   start {}: E = {:.12f}  |g| = {:.2e}  polished={}  '
               '[{:.0f}s]'.format(k, pt.energy, pt.grad_norm,
                                  getattr(pt, 'polished', None),
-                                 time.time() - t0), flush=True)
-        if pt_cas is None or pt.energy < pt_cas.energy:
-            pt_cas = pt
+                                 time.time() - t_wall), flush=True)
+        pt_cas = _keep_best(pt_cas, pt, 'CAS start {}'.format(k))
 
     # ---- theta* on the NEVPT2 surface (warm start from the CASSCF point) ----
+    # The zeros start is deliberately not among the candidates: on the
+    # NEVPT2 surface it walks into a denominator singularity (measured
+    # 2026-09-23: E = -3.2e7, |g| = 3.6e14 within 275 s). A perturbed warm
+    # start probes the neighbouring basin instead.
     pt_nev = None
-    for k, t0 in enumerate([pt_cas.theta, jnp.zeros(npar)]):
-        t0 = time.time()
-        pt = converge_orbital_point(E_th_nev, npar, theta0=t0)
+    rng2 = np.random.default_rng(1)
+    nev_starts = [pt_cas.theta,
+                  pt_cas.theta + 0.01 * jnp.asarray(rng2.normal(size=npar))]
+    for k, t0 in enumerate(nev_starts):
+        t_start = time.time()
+        pt = converge_orbital_point(E_th_nev, npar, theta0=jnp.asarray(t0))
         print('  NEV   start {}: E = {:.12f}  |g| = {:.2e}  polished={}  '
               '[{:.0f}s]'.format(k, pt.energy, pt.grad_norm,
                                  getattr(pt, 'polished', None),
-                                 time.time() - t0), flush=True)
-        if pt_nev is None or pt.energy < pt_nev.energy:
-            pt_nev = pt
+                                 time.time() - t_start), flush=True)
+        pt_nev = _keep_best(pt_nev, pt, 'NEV start {}'.format(k))
 
     e2_at_cas_theta = float(E_th_nev(pt_cas.theta)) - pt_cas.energy
     print('  E2 (NEVPT2 correlation at the CASSCF point) = '

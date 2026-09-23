@@ -233,6 +233,62 @@ def test_the_hvp_matches_a_finite_difference_of_the_gradient():
     assert errs[3] < 2e-6                            # delta = 3e-4
 
 
+def test_the_actinide_ecp_route_wires_through():
+    """ThO with the Stuttgart ECP on Th and 6-31G on O: nao = 96, 38
+    electrons, spin 0 from parity.
+
+    The light ligand basis is deliberate. The published ``ano`` ligand
+    basis gives nao = 175, whose joint evaluation peaked at 197 GB RSS and
+    was OOM-killed; the 6-31G ligand keeps the full-space integrals at
+    ~5 GB (measured). The joint value is recorded in the Task 8 run log
+    (``experiments/verify_nevpt2_an.py tho_ecp``); the assertions here are
+    the wiring invariants -- the reference SCF converges to the pinned
+    energy, the CASCI energy cannot exceed it, and the correlation
+    correction is finite and negative.
+
+    This test deliberately never differentiates with respect to the
+    geometry: pyscfad's integral-derivative path allocates a dense
+    ``(nctr, nao^4)`` array (51.3 GiB at nao = 96, measured), so the
+    actinide validation lives in theta space (see the Task 8 docstring).
+    """
+    from pyscfad import gto, scf
+
+    from diffmrc.driver.nevpt2 import make_nevpt2_joint_fn
+
+    mol = gto.Mole()
+    mol.atom = "Th 0 0 0; O 0 0 1.85"
+    mol.basis = {"Th": "stuttgart_rsc", "O": "6-31g"}
+    mol.ecp = {"Th": "stuttgart_rsc"}
+    mol.spin = 0
+    mol.build()
+    assert mol.nelectron == 38
+    nmo = mol.nao_nr()
+
+    def builder(m):
+        mf = scf.RHF(m)
+        mf.init_guess = "atom"
+        mf.max_cycle = 200
+        mf.conv_tol = 1e-9
+        return mf
+
+    mf0 = builder(mol)
+    mf0.kernel()
+    # pinned from the 2026-09-23 server run (probe t197 / run
+    # experiments/verify_nevpt2_an.py tho_ecp)
+    assert float(mf0.e_tot) == pytest.approx(-481.0313789074, abs=1e-9)
+
+    ncore, nact, nele = 15, 8, 8
+    pairs = _pairs(ncore, nact, nmo)
+    fn = make_nevpt2_joint_fn(ncore, nact, nele, nmo, pairs, builder,
+                              e2_scale=1.0, ci_solver="blocked")
+    theta = jnp.zeros(len(pairs))
+    E_cas, e2 = fn.components(mol, theta)
+    assert np.isfinite(float(E_cas))
+    assert np.isfinite(float(e2))
+    assert float(E_cas) < float(mf0.e_tot)   # CASCI cannot exceed the SCF
+    assert float(e2) < 0.0                   # correlation lowers the energy
+
+
 def test_the_hvp_is_symmetric():
     """Hv . w == Hw . v for two probe vectors: the Hessian is symmetric.
 

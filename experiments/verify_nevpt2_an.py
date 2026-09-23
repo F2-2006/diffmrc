@@ -1,28 +1,40 @@
 """Actinide validation of the differentiable NEVPT2 chain (Phase 0, Task 8).
 
-Cases (one invocation each; run in parallel as separate jobs):
+    tho_ecp   ThO, Stuttgart ECP on Th + 6-31G on O, RHF, frontier active space
+    uf_ecp    UF,  Stuttgart ECP on U + 6-31G on F, ROHF (spin from parity)
 
-    tho_ecp   ThO, Stuttgart ECP on Th + ano on O, RHF, frontier active space
-    uf_ecp    UF,  Stuttgart ECP on U + ano on F, ROHF (spin from parity)
-    tho_x2c   ThO all-electron, scalar-relativistic X2C builder (heavy; run alone)
+THE BOUNDARY THAT RESHAPED THIS SCRIPT (measured 2026-09-23, guarded probe
+``code/t201_guarded_grad_stage.py``): **nuclear gradients on actinide-sized
+systems are blocked upstream, not here.** Differentiating any energy with
+respect to the geometry needs the geometry derivative of the AO integrals,
+and pyscfad materializes it densely:
 
-What is checked, and one boundary that had to be redrawn:
+    pyscfad/gto/_moleintor_jvp.py:722  _fill_grad0
+    grad = numpy.zeros((comp, len(ctr_coeff), nao, nao, nao, nao))
+    -> MemoryError: 51.3 GiB for (1, 81, 96, 96, 96, 96) at nao = 96
 
-  [1] translational invariance of the gradient (sum of forces = 0)
-  [2] rotational invariance (torque = 0)
-  [3] an energy cross-check against PySCF's own CASCI + SC-NEVPT2 on the
-      same ECP molecule. The Task-3 anchor (our scale-0 gradient against
-      ``core.hessian.make_joint_energy_fn``) is NOT usable on these
-      routes: that frozen function hard-codes
-      ``int1e_kin + int1e_nuc`` and ``pscf.RHF``, so it silently drops
-      the ECP (and would drop an X2C rotation). Comparing against it
-      would compare two different Hamiltonians.
-  [4] one Hessian-vector product against a short finite-difference
-      ladder (two deltas; monotone improvement is the check)
+One array. The unguarded run peaked past 200 GB and took the machine's
+memory with it. Scaling is nctr * nao^4, so no ligand-basis choice fixes
+it; every previously validated gradient in this project was nao <= 30,
+where the same array fits trivially.
 
-Boundary for the record, in the code and in every quotation of these
-numbers: scalar-relativistic only. Spin-orbit coupling is out of scope
-here (roadmap P4) -- for actinides that boundary is not cosmetic.
+What that leaves, and what this script therefore does: theta derivatives
+do NOT need the integral geometry derivative. The chain's automatic
+differentiation is validated here at actinide scale in theta space:
+
+  [1] energy cross-check against PySCF's own CASCI + SC-NEVPT2 on the
+      same ECP molecule (the Task-3 anchor is unusable on ECP routes:
+      ``core.hessian.make_joint_energy_fn`` hard-codes
+      ``int1e_kin + int1e_nuc`` and silently drops the ECP)
+  [2] theta-gradient finiteness at theta = 0
+  [3] a theta-space Hessian-vector product against a finite-difference
+      ladder in theta (two deltas; monotone improvement is the check)
+  [4] the nuclear-gradient attempt itself, recorded as blocked with the
+      verbatim allocation error -- attempted, not skipped silently
+
+Boundary for every quotation of these numbers: scalar-relativistic only;
+SOC out of scope (roadmap P4); and the nuclear-derivative layer of the
+actinide protocol awaits a non-dense integral-derivative path.
 
 Usage:  PYTHONPATH=src python experiments/verify_nevpt2_an.py <case> [NT]
 """
@@ -48,18 +60,15 @@ from pyscfad import gto as pgto, scf as pscf  # noqa: E402
 
 from diffmrc.core.orblib import orbital_pairs  # noqa: E402
 from diffmrc.driver.nevpt2 import (make_nevpt2_joint_fn,  # noqa: E402
-                                   nevpt2_hvp, nevpt2_nuclear_gradient)
+                                   make_nevpt2_theta_fn)
 
 CASES = {
     'tho_ecp': dict(atom='Th 0 0 0; O 0 0 1.85',
-                    basis={'Th': 'stuttgart_rsc', 'O': 'ano'},
-                    ecp={'Th': 'stuttgart_rsc'}, spin=0, x2c=False),
+                    basis={'Th': 'stuttgart_rsc', 'O': '6-31g'},
+                    ecp={'Th': 'stuttgart_rsc'}, spin=0),
     'uf_ecp': dict(atom='U 0 0 0; F 0 0 2.03',
-                   basis={'U': 'stuttgart_rsc', 'F': 'ano'},
-                   ecp={'U': 'stuttgart_rsc'}, spin=None, x2c=False),
-    'tho_x2c': dict(atom='Th 0 0 0; O 0 0 1.85',
-                    basis={'Th': 'ano', 'O': 'ano'},
-                    ecp=None, spin=0, x2c=True),
+                   basis={'U': 'stuttgart_rsc', 'F': '6-31g'},
+                   ecp={'U': 'stuttgart_rsc'}, spin=None),
 }
 
 
@@ -74,9 +83,8 @@ def build(case):
         mol.spin = cfg['spin']
         mol.build()
         return mol, cfg
-    # parity fixes the spin. The count is only known after a build, and a
-    # wrong parity makes build raise -- so try the even build and flip on
-    # the consistency error rather than guessing.
+    # parity fixes the spin; the count is only known after a build, and a
+    # wrong parity makes build raise -- flip on the consistency error.
     mol.spin = 0
     try:
         mol.build()
@@ -88,32 +96,13 @@ def build(case):
     return mol, cfg
 
 
-def make_builder(mol, cfg):
-    if mol.nelectron % 2 == 0:
-        base = pscf.RHF
-    else:
-        base = pscf.ROHF
-
-    def builder(m):
-        mf = base(m)
-        mf.init_guess = 'atom'
-        mf.max_cycle = 200
-        mf.conv_tol = 1e-9
-        if cfg['x2c']:
-            mf = mf.x2c1e()
-        return mf
-    return builder
-
-
 def frontier_space(mf):
     occ = np.asarray(mf.mo_occ)
     nocc = int((occ > 0).sum())
-    # The window keeps the four highest occupied orbitals active. On the
-    # discovered ThO orbital ladder (mo 15/16 exactly degenerate at
-    # -0.484128) a three-orbital window splits that pair across the
-    # core/active boundary -- precisely the inactive degeneracy that
-    # SC-NEVPT2 lacks invariance against. Four orbitals put the pair
-    # safely inside the active space.
+    # keep the four highest occupied active: on the ThO ladder a
+    # three-orbital window splits a degenerate core pair (mo 15/16 at
+    # -0.484128), the exact inactive degeneracy SC-NEVPT2 lacks
+    # invariance against.
     ncore = nocc - 4
     nact = 8
     nele = int(round(occ[:ncore + nact].sum() - 2 * ncore))
@@ -127,12 +116,12 @@ def main():
     print('=' * 86, flush=True)
     print('NEVPT2 actinide validation -- {}  nao={}  nelec={}  spin={}'.format(
         CASE, nmo, mol.nelectron, mol.spin), flush=True)
-    print('  boundary: scalar-relativistic only; SOC out of scope (P4)',
-          flush=True)
     print('=' * 86, flush=True)
 
-    builder = make_builder(mol, cfg)
-    mf0 = builder(mol)
+    mf0 = pscf.RHF(mol) if mol.nelectron % 2 == 0 else pscf.ROHF(mol)
+    mf0.init_guess = 'atom'
+    mf0.max_cycle = 200
+    mf0.conv_tol = 1e-9
     mf0.kernel()
     print('  SCF E = {:.10f}  conv={}  [{:.0f}s]'.format(
         float(mf0.e_tot), bool(mf0.converged), time.time() - t_start),
@@ -143,33 +132,24 @@ def main():
     print('  frontier CAS({},{})  ncore={}  NPAR={}'.format(
         nele, nact, ncore, len(pairs)), flush=True)
 
+    def builder(m):
+        mf = pscf.RHF(m) if m.nelectron % 2 == 0 else pscf.ROHF(m)
+        mf.init_guess = 'atom'
+        mf.max_cycle = 200
+        mf.conv_tol = 1e-9
+        return mf
+
     fn = make_nevpt2_joint_fn(ncore, nact, nele, nmo, pairs, builder,
                               e2_scale=1.0, ci_solver='blocked')
     fn0 = make_nevpt2_joint_fn(ncore, nact, nele, nmo, pairs, builder,
                                e2_scale=0.0, ci_solver='blocked')
     theta = jnp.zeros(len(pairs))
-    E_of = lambda m_: fn(m_, theta)       # noqa: E731
-    E_of0 = lambda m_: fn0(m_, theta)     # noqa: E731
 
     out = dict(case=CASE, nao=nmo, nelec=mol.nelectron, spin=int(mol.spin),
                ncore=ncore, nact=nact, nele=nele, npair=len(pairs),
                scf=float(mf0.e_tot))
 
-    # ---- [1][2] invariance of the gradient ----
-    t0 = time.time()
-    g = np.asarray(nevpt2_nuclear_gradient(mol, E_of))
-    s_trans = float(np.abs(g.sum(axis=0)).max())
-    R = np.asarray(mol.atom_coords())
-    s_rot = float(np.abs(np.cross(R, g).sum(axis=0)).max())
-    ok12 = s_trans < 1e-7 and s_rot < 1e-5
-    print('  [1] translation |sum g| = {:.3e} (thr 1e-7)'.format(s_trans),
-          flush=True)
-    print('  [2] rotation    |torque| = {:.3e} (thr 1e-5)  {}  [{:.0f}s]'.format(
-        s_rot, 'PASS' if ok12 else 'FAIL', time.time() - t0), flush=True)
-    out['invariance'] = dict(sum_g=s_trans, torque=s_rot, ok=ok12)
-    out['gradient'] = g.tolist()
-
-    # ---- [3] energy cross-check vs PySCF CASCI + SC-NEVPT2 (same ECP) ----
+    # ---- [1] energy cross-check vs PySCF CASCI + SC-NEVPT2 (same ECP) ----
     t0 = time.time()
     try:
         from pyscf import gto as gto2, scf as scf2, mcscf, mrpt
@@ -186,44 +166,70 @@ def main():
         E_ours = float(E_ours)
         e2_ours = float(e2_ours)
         dE = abs((E_ours + e2_ours) - (float(mc.e_tot) + e2_ref))
-        ok3 = dE < 1e-6
-        print('  [3] E(ours)  = {:.10f}   e2(ours)  = {:.10f}'.format(
+        ok1 = dE < 1e-6
+        print('  [1] E(ours)  = {:.10f}  e2 = {:.10f}'.format(
             E_ours + e2_ours, e2_ours), flush=True)
-        print('  [3] E(pyscf) = {:.10f}   e2(pyscf) = {:.10f}'.format(
+        print('  [1] E(pyscf) = {:.10f}  e2 = {:.10f}'.format(
             float(mc.e_tot) + e2_ref, e2_ref), flush=True)
-        print('  [3] |dE| = {:.3e} (thr 1e-6)  {}  [{:.0f}s]'.format(
-            dE, 'PASS' if ok3 else 'FAIL', time.time() - t0), flush=True)
+        print('  [1] |dE| = {:.3e} (thr 1e-6)  {}  [{:.0f}s]'.format(
+            dE, 'PASS' if ok1 else 'FAIL', time.time() - t0), flush=True)
         out['crosscheck'] = dict(E_ours=E_ours, e2_ours=e2_ours,
                                  E_pyscf=float(mc.e_tot) + e2_ref,
-                                 e2_pyscf=e2_ref, dE=dE, ok=ok3)
-    except Exception as ex:  # noqa: BLE001 -- record, do not mask [1][2]
-        print('  [3] PySCF 对拍不可用: ' + repr(ex)[:120], flush=True)
+                                 e2_pyscf=e2_ref, dE=dE, ok=bool(ok1))
+    except Exception as ex:  # noqa: BLE001 -- record, keep going
+        print('  [1] EXC {}: {}'.format(type(ex).__name__, str(ex)[:100]),
+              flush=True)
         out['crosscheck'] = dict(error=repr(ex)[:200])
 
-    # ---- [4] one HVP against a short FD ladder ----
+    # ---- [2] theta gradient at theta = 0 (frozen-geometry form) ----
     t0 = time.time()
-    v = np.zeros(mol.natm * 3)
-    v[2] = -1.0
-    v[5] = 1.0
-    hvp = np.asarray(nevpt2_hvp(mol, E_of, v)).reshape(-1)
+    th_fn = make_nevpt2_theta_fn(mol, ncore, nact, nele, nmo, pairs,
+                                 builder, e2_scale=1.0,
+                                 ci_solver='blocked')
+    g_th = np.asarray(jax.grad(th_fn)(theta))
+    ok2 = bool(np.isfinite(g_th).all())
+    print('  [2] theta-gradient finite = {}  |g|max = {:.3e}  [{:.0f}s]'.format(
+        ok2, float(np.abs(g_th).max()), time.time() - t0), flush=True)
+    out['theta_grad'] = dict(ok=ok2, gmax=float(np.abs(g_th).max()),
+                             norm=float(np.linalg.norm(g_th)))
+
+    # ---- [3] theta-space HVP vs FD ladder ----
+    t0 = time.time()
+    npar = g_th.size
+    rng = np.random.default_rng(0)
+    v = rng.normal(size=npar)
+    v = v / np.linalg.norm(v)
+    g_fn = jax.grad(th_fn)
+    _, hv = jax.jvp(g_fn, (theta,), (jnp.asarray(v),))
+    hv = np.asarray(hv)
     errs = {}
     for d in (3e-3, 1e-3):
-        m1 = mol.copy()
-        m1.set_geom_(np.asarray(mol.atom_coords()) + d * v.reshape(-1, 3),
-                     'Bohr')
-        m2 = mol.copy()
-        m2.set_geom_(np.asarray(mol.atom_coords()) - d * v.reshape(-1, 3),
-                     'Bohr')
-        g1 = np.asarray(nevpt2_nuclear_gradient(m1, E_of))
-        g2 = np.asarray(nevpt2_nuclear_gradient(m2, E_of))
-        errs[d] = float(np.abs(((g1 - g2) / (2 * d)).reshape(-1) - hvp).max())
-    ok4 = errs[1e-3] < errs[3e-3]
-    print('  [4] HVP(stretch) = {}'.format(
-        np.array2string(hvp, precision=6, suppress_small=True)), flush=True)
-    print('  [4] |FD-HVP| d=3e-3: {:.3e}   d=1e-3: {:.3e}   单调 {}  [{:.0f}s]'.format(
-        errs[3e-3], errs[1e-3], ok4, time.time() - t0), flush=True)
-    out['hvp'] = dict(values=hvp.tolist(),
-                      err_3e3=errs[3e-3], err_1e3=errs[1e-3], ok=ok4)
+        gp = np.asarray(g_fn(jnp.asarray(d * v)))
+        gm = np.asarray(g_fn(jnp.asarray(-d * v)))
+        errs[d] = float(np.abs((gp - gm) / (2 * d) - hv).max())
+    ok3 = bool(np.isfinite(hv).all()) and errs[1e-3] < errs[3e-3]
+    print('  [3] theta-HVP finite = {}   |FD-HVP| d=3e-3: {:.3e}  '
+          'd=1e-3: {:.3e}  单调 {}  [{:.0f}s]'.format(
+              bool(np.isfinite(hv).all()), errs[3e-3], errs[1e-3], ok3,
+              time.time() - t0), flush=True)
+    out['theta_hvp'] = dict(finite=bool(np.isfinite(hv).all()),
+                            err_3e3=errs[3e-3], err_1e3=errs[1e-3],
+                            ok=ok3)
+
+    # ---- [4] nuclear gradient: attempt, record the upstream block ----
+    from diffmrc.driver.nevpt2 import nevpt2_nuclear_gradient
+    try:
+        g = np.asarray(nevpt2_nuclear_gradient(mol, lambda m_: fn(m_, theta)))
+        out['nuclear_grad'] = dict(ok=True,
+                                   sum_g=float(np.abs(g.sum(axis=0)).max()))
+        print('  [4] nuclear gradient unexpectedly fits: |sum g| = {:.3e}'.format(
+            out['nuclear_grad']['sum_g']), flush=True)
+    except Exception as ex:
+        out['nuclear_grad'] = dict(blocked=True,
+                                   error='{}: {}'.format(
+                                       type(ex).__name__, str(ex)[:180]))
+        print('  [4] nuclear gradient BLOCKED upstream: {}: {}'.format(
+            type(ex).__name__, str(ex)[:110]), flush=True)
 
     outp = 'results/verify_nevpt2_an_{}.json'.format(CASE)
     json.dump(out, open(outp, 'w', encoding='utf-8'), indent=1, default=str)
