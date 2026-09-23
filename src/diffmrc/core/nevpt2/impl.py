@@ -287,6 +287,58 @@ def nevpt2_e2_full2(h1e_mo, eri_mo, c_ci, dets, E0_elec, mo_energy=None,
     return e2_sr + e2_srs, eps
 
 
+@jax.custom_vjp
+def eigh_safe(a):
+    """``jnp.linalg.eigh`` with a degeneracy-safe reverse pass.
+
+    The vector derivative of ``eigh`` carries a factor 1/(w_j - w_i). At a
+    machine-precision degeneracy that factor is 0/0 and returns NaN, which
+    then poisons every downstream derivative through the rotated orbitals.
+    Linear molecules make this the norm rather than the exception: ThO's
+    generalized-Fock core block (17 orbitals) has a minimum eigenvalue gap
+    of 2.7e-15 and its virtual block (75 orbitals) 8.9e-16 -- the pi and
+    delta shells are exactly degenerate by symmetry. Every previous
+    validation ran on H2 and H2O, whose blocks carry no such pairs.
+
+    In a degenerate subspace the eigenbasis is arbitrary, so any choice of
+    its derivative is as good as another; the honest choice is to freeze
+    the rotation there (coupling set to zero), which is exactly what the
+    NEVPT2 invariance under rotations within the core and virtual blocks
+    permits. Away from degeneracy the reverse pass is the standard one.
+
+    Measured on ThO/ECP (CAS(4,4), ncore=17): with the plain eigh the theta
+    gradient of the joint energy is all-NaN; with this one it is finite.
+    """
+    return jnp.linalg.eigh(a)
+
+
+def _eigh_safe_fwd(a):
+    w, u = jnp.linalg.eigh(a)
+    return (w, u), (w, u)
+
+
+def _eigh_safe_bwd(res, g):
+    w, u = res
+    gw, gu = g
+    # Eigenvalue part: dA <- u diag(gw) u^T. Vector part: for the jvp
+    # dU = U C with C_ij = (U^T dA U)_ij / (w_j - w_i) (i != j), the adjoint
+    # is M_ij = (G_ij - G_ji) / (2 (w_j - w_i)) with G = U^T gu, plus the
+    # symmetric completion. The guarded denominator keeps the discarded
+    # branch finite (a raw 1/0 in the untaken branch of where() still turns
+    # into NaN through 0 * inf in the reverse pass).
+    G = u.T @ gu
+    diff = w[None, :] - w[:, None]
+    ok = jnp.abs(diff) > 1e-9
+    inv = 1.0 / jnp.where(ok, diff, 1.0)
+    F = jnp.where(ok, inv, 0.0)
+    M = jnp.diag(gw) + 0.5 * F * (G - G.T)
+    dA = u @ M @ u.T
+    return (0.5 * (dA + dA.T),)
+
+
+eigh_safe.defvjp(_eigh_safe_fwd, _eigh_safe_bwd)
+
+
 def canonicalize_jax(C, h1e, eri, c_ci, ncore=0, nact=2, nele_act=2, occ2_idx=(), occ0_idx=()):
     """Differentiable canonicalization, following mcscf.canonicalize with
     cas_nat=True.
@@ -311,7 +363,7 @@ def canonicalize_jax(C, h1e, eri, c_ci, ncore=0, nact=2, nele_act=2, occ2_idx=()
     eri_mo = jnp.einsum("pi,qj,rk,sl,pqrs->ijkl", C, C, C, C, eri)
     # 1) Active natural orbitals from the one-particle density
     dm1, _, _ = make_dm123_sf(c_ci, cas_dets_for2(ncore, nact, nele_act), nact, ncore)
-    w_nat, U_nat = jnp.linalg.eigh(dm1)
+    w_nat, U_nat = eigh_safe(dm1)
     # The reference orders active natural orbitals by descending occupation
     # number, whereas eigh returns ascending eigenvalues, so the columns are
     # reversed.
@@ -365,7 +417,7 @@ def canonicalize_jax(C, h1e, eri, c_ci, ncore=0, nact=2, nele_act=2, occ2_idx=()
         idx = jnp.asarray(blk, dtype=int)
         if len(blk) > 1:
             f_blk = F[idx][:, idx]
-            w, u = jnp.linalg.eigh(f_blk)
+            w, u = eigh_safe(f_blk)
             C2 = C2.at[:, blk].set(C1[:, blk] @ u)
             for a, i in enumerate(blk):
                 eps_map[i] = w[a]
