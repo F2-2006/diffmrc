@@ -226,9 +226,19 @@ def cs_casci_blocked(h1e_mo, eri_mo, ncore=0, nact=2, nele_act=2):
             # numerical noise (0.34 Ha for H2O).
             better = w[0] < E_min
             E_min = jnp.minimum(E_min, w[0])
-            v_new = jnp.where(better, 1.0, 0.0) * U[:, 0]
-            v_old = jnp.where(better, 0.0, 1.0) * out[jnp.asarray(idx)]
-            out = out.at[jnp.asarray(idx)].set(v_new + v_old)
+            # When a new block wins, the vector of the previously leading
+            # block must be erased over the WHOLE vector: it lives in a
+            # different index set than the current block, so a per-block
+            # update alone leaves it in place. Measured on ThO/ECP
+            # CAS(4,4), ncore = 17: the retained mixture (the true lowest
+            # block plus the leading vector of the two earlier blocks)
+            # gave a 1-RDM differing from the correct one by 3.0 and a
+            # NEVPT2 correction wrong by 1.6 Ha. The per-block rollback
+            # that was here (v_old) only handled the current block's own
+            # previous content, which is always zero, so it never fired.
+            out = jnp.where(better, 0.0, 1.0) * out
+            out = out.at[jnp.asarray(idx)].set(
+                out[jnp.asarray(idx)] + jnp.where(better, 1.0, 0.0) * U[:, 0])
     return E_min, out
 
 def _block_H(h1e_mo, eri_mo, DETS, idx, ncore, nact, nele_act):
