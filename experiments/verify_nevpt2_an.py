@@ -99,12 +99,15 @@ def build(case):
 def frontier_space(mf):
     occ = np.asarray(mf.mo_occ)
     nocc = int((occ > 0).sum())
-    # keep the four highest occupied active: on the ThO ladder a
-    # three-orbital window splits a degenerate core pair (mo 15/16 at
-    # -0.484128), the exact inactive degeneracy SC-NEVPT2 lacks
-    # invariance against.
-    ncore = nocc - 4
-    nact = 8
+    # A two-orbital window (four highest occupied kept would be CAS(8,8)).
+    # Measured: the CAS(8,8) chain at nao = 96 spends over 2.5 h per joint
+    # evaluation -- `cs_casci`'s unblocked construction builds
+    # (12870, 12870, 46) boolean tensors per S_z block, ~7.6 GB each, and
+    # runs them eagerly. The protocol question (does the AD chain carry to
+    # an actinide centre at all) is answered by a minimal active space
+    # just as well; CAS(4,4) has 70 determinants and evaluates in minutes.
+    ncore = nocc - 2
+    nact = 4
     nele = int(round(occ[:ncore + nact].sum() - 2 * ncore))
     return ncore, nact, nele
 
