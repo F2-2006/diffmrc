@@ -42,7 +42,8 @@ Two entry points share the same core (``_components_from``):
 import numpy as np
 
 __all__ = ['make_nevpt2_joint_fn', 'make_nevpt2_theta_fn',
-           'nevpt2_nuclear_gradient', 'nevpt2_hvp']
+           'nevpt2_nuclear_gradient', 'nevpt2_hvp',
+           'nevpt2_relaxed_hessian']
 
 
 def _spin_links(nact, nele):
@@ -296,3 +297,56 @@ def nevpt2_hvp(mol, E_of, v):
     tangent = tree_util.tree_unflatten(treedef, tan_leaves)
     _, hv = jax.jvp(jax.grad(E_of), (mol,), (tangent,))
     return np.asarray(hv.coords)
+
+
+def nevpt2_relaxed_hessian(mol, theta, E_casscf, E_nevpt2, rcond=None):
+    """The NEVPT2 Hessian along the CASSCF-relaxed orbital path.
+
+    The correlation energy is a correction evaluated on the CASSCF
+    reference, so the orbital response entering its second derivative is
+    the *CASSCF* one -- dtheta*/dR comes from the CASSCF Lagrangian --
+    while the frozen curvature and the mixed term come from the NEVPT2
+    energy itself. In Park's Lagrangian this is exactly the split between
+    the CASSCF Z-vector (the response operator) and the NEVPT2 source
+    terms (``文献细读/细读_NEVPT2梯度_BAGEL2019.md``, Eqs. 23-28).
+
+    Optimizing theta on the SC-NEVPT2 surface is not an alternative: that
+    surface is not smooth (the SC energy lacks invariance under inactive
+    rotations, and its denominators cross zero). Measured here: the
+    theta optimizer walks into a singularity from the zeros start
+    (E = -3.2e7, |g| = 3.6e14) *and* from the CASSCF minimum
+    (E = -1.1e6, |g| = 3.4e15).
+
+    Returns the same record shape as ``core.hessian.implicit_hessian``,
+    with ``H_total = H_RR(nevpt2) - M_nevpt2^T H_theta_theta(casscf)^-1
+    M_nevpt2``.
+    """
+    import jax
+
+    from ..core.hessian import (DEFAULT_RCOND, ImplicitHessianResult,
+                                _frozen_hessian, _mixed_derivative)
+    from ..core.stationary import curvature_report
+
+    rcond = DEFAULT_RCOND if rcond is None else float(rcond)
+    theta = jax.numpy.asarray(np.asarray(theta, dtype=float))
+
+    H_tt = np.asarray(jax.hessian(lambda t: E_casscf(mol, t))(theta))
+    H_tt = 0.5 * (H_tt + H_tt.T)
+    M = _mixed_derivative(E_nevpt2, mol, theta)
+    n_r = M.shape[1]
+    H_RR = _frozen_hessian(E_nevpt2, mol, theta, n_r)
+    H_RR = 0.5 * (H_RR + H_RR.T)
+
+    H_tt_inv = np.linalg.pinv(H_tt, rcond=rcond)
+    D = -H_tt_inv @ M
+    H_resp = M.T @ D
+    H_total = H_RR + H_resp
+    H_total = 0.5 * (H_total + H_total.T)
+
+    return ImplicitHessianResult(
+        H_tt=H_tt, H_tt_inverse=H_tt_inv,
+        curvature=curvature_report(H_tt),
+        mixed=M, H_RR=H_RR, H_response=H_resp, H_total=H_total,
+        dtheta_dR_max=float(np.abs(D).max()) if D.size else 0.0,
+        rcond=float(rcond),
+    )

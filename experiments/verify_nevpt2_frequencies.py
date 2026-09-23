@@ -131,51 +131,53 @@ def main():
                                  time.time() - t_wall), flush=True)
         pt_cas = _keep_best(pt_cas, pt, 'CAS start {}'.format(k))
 
-    # ---- theta* on the NEVPT2 surface (warm start from the CASSCF point) ----
-    # The zeros start is deliberately not among the candidates: on the
-    # NEVPT2 surface it walks into a denominator singularity (measured
-    # 2026-09-23: E = -3.2e7, |g| = 3.6e14 within 275 s). A perturbed warm
-    # start probes the neighbouring basin instead.
-    pt_nev = None
-    rng2 = np.random.default_rng(1)
-    nev_starts = [pt_cas.theta,
-                  pt_cas.theta + 0.01 * jnp.asarray(rng2.normal(size=npar))]
-    for k, t0 in enumerate(nev_starts):
-        t_start = time.time()
-        pt = converge_orbital_point(E_th_nev, npar, theta0=jnp.asarray(t0))
-        print('  NEV   start {}: E = {:.12f}  |g| = {:.2e}  polished={}  '
-              '[{:.0f}s]'.format(k, pt.energy, pt.grad_norm,
-                                 getattr(pt, 'polished', None),
-                                 time.time() - t_start), flush=True)
-        pt_nev = _keep_best(pt_nev, pt, 'NEV start {}'.format(k))
-
+    # ---- NEVPT2 column: NO theta optimization on the NEVPT2 surface ----
+    # Measured 2026-09-23: the SC-NEVPT2 theta surface is not smooth (the
+    # SC energy lacks invariance under inactive rotations and its
+    # denominators cross zero), and the optimizer walked into a
+    # singularity from every start tried -- zeros: E = -3.2e7;
+    # CASSCF minimum: E = -1.1e6. The literature convention (and Park
+    # 2019's Lagrangian) instead treats the correlation energy as a
+    # correction on the CASSCF reference: the orbital response is the
+    # CASSCF one, the curvature and mixed term are the NEVPT2 ones.
+    # driver.nevpt2.nevpt2_relaxed_hessian implements exactly that split.
     e2_at_cas_theta = float(E_th_nev(pt_cas.theta)) - pt_cas.energy
     print('  E2 (NEVPT2 correlation at the CASSCF point) = '
           '{:+.10f} Ha'.format(e2_at_cas_theta), flush=True)
+    print('  (NEVPT2 column shares the CASSCF theta*: see the module note '
+          'on the NEVPT2 surface)', flush=True)
 
-    # ---- relaxed Hessians through the validated implicit route ----
+    # ---- relaxed Hessians: CASSCF through the validated implicit route,
+    #      NEVPT2 through the crossed two-surface composition ----
+    from diffmrc.driver.nevpt2 import nevpt2_relaxed_hessian
+
     out = dict(system='H2O', basis=BASIS, ncore=ncore, nact=NACT, nele=NELE,
                npar=npar, natm=natm)
-    for tag, E_of, pt in (('casscf', E_cas, pt_cas),
-                          ('nevpt2', E_nev, pt_nev)):
+    for tag, res in (('casscf', None), ('nevpt2', None)):
         t0 = time.time()
-        res = implicit_hessian(mol, pt.theta, E_of)
+        if tag == 'casscf':
+            res = implicit_hessian(mol, pt_cas.theta, E_cas)
+            g_at = pt_cas.grad_norm
+        else:
+            res = nevpt2_relaxed_hessian(mol, pt_cas.theta, E_cas, E_nev)
+            g_at = float(np.linalg.norm(np.asarray(
+                jax.grad(E_th_nev)(pt_cas.theta))))
         kappa = float(np.linalg.cond(res.H_tt))
         nu = wavenumbers(res.H_total, coords, masses)
         freqs = [float(x) for x in nu.freqs_cm]
         zeros = [float(z) for z in nu.zero_mode_magnitudes]
         print('  [{}] relaxed Hessian: |g_theta| = {:.2e}  kappa(H_tt) = '
               '{:.2e}  dtheta_dR_max = {:.2e}  [{:.0f}s]'.format(
-                  tag, pt.grad_norm, kappa, res.dtheta_dR_max,
+                  tag, g_at, kappa, res.dtheta_dR_max,
                   time.time() - t0), flush=True)
         print('  [{}] zero modes |lambda| = {}'.format(
             tag, ['{:.1e}'.format(z) for z in zeros]), flush=True)
         print('  [{}] frequencies [cm^-1] = {}'.format(
             tag, ['{:.1f}'.format(x) for x in freqs]), flush=True)
-        out[tag] = dict(theta=[float(x) for x in np.asarray(pt.theta)],
-                        grad_norm=float(pt.grad_norm), kappa_Htt=kappa,
+        out[tag] = dict(theta=[float(x) for x in np.asarray(pt_cas.theta)],
+                        grad_norm=g_at, kappa_Htt=kappa,
                         freqs_cm=freqs, zero_modes=zeros,
-                        E=float(pt.energy))
+                        E=float(pt_cas.energy))
         gc.collect()
 
     f_cas = np.asarray(out['casscf']['freqs_cm'])
