@@ -27,6 +27,8 @@ from pyscfad import scf as pscf
 
 from itertools import combinations
 
+from .eigh import eigh_safe
+
 def cs_casci(h1e_mo, eri_mo, ncore=0, nact=2, nele_act=2, nroots=1, return_ci=False):
     """CASCI over a Slater-determinant basis built by the Condon-Slater rules.
 
@@ -179,8 +181,22 @@ def cs_casci_blocked(h1e_mo, eri_mo, ncore=0, nact=2, nele_act=2):
                       smallest in-block gap = 2.545e-02
             Sz = +10: 1 determinant
 
-        so the global minimum lies in a block that contains no degeneracy, and
-        the vjp of a single-block eigh is well defined.
+        so the global minimum lies in a block that contains no degeneracy.
+
+        A non-degenerate ground state is necessary but NOT sufficient for the
+        raw rule: the reverse pass forms the 1/(w_j - w_i) factor for every
+        pair in the block whether or not the pair carries cotangent, so one
+        bit-exact degenerate pair anywhere in any block turns the untouched
+        entries into 0 * inf = NaN. Measured on CO/6-31G CAS(6,6) (t237):
+        five of the seven blocks carry bit-exact pairs -- 24 of them in the
+        400-determinant winning block, whose own ground state is simple --
+        and the raw-eigh theta gradient is all-NaN while the energy is finite
+        (t232r). The block eigenproblem therefore goes through
+        ``core.eigh.eigh_safe``, whose Lorentzian-softened rule freezes the
+        rotation inside a degenerate subspace. It is first-order safe by
+        measurement (micro-tests, 2026-09-24) and leaves every well-separated
+        block identical to the raw rule; second derivatives remain outside
+        its scope (see the module docstring in core/eigh.py).
 
     WHEN TO USE IT
         Only where a second derivative is required. The unblocked cs_casci is
@@ -215,7 +231,7 @@ def cs_casci_blocked(h1e_mo, eri_mo, ncore=0, nact=2, nele_act=2):
     for s in sorted(set(sz)):
         idx = [i for i, x in enumerate(sz) if x == s]
         H_blk = _block_H(h1e_mo, eri_mo, DETS, idx, ncore, nact, nele_act)
-        w, U = jnp.linalg.eigh(H_blk)
+        w, U = eigh_safe(H_blk)
         if E_min is None:
             E_min = w[0]
             out = out.at[jnp.asarray(idx)].set(U[:, 0])

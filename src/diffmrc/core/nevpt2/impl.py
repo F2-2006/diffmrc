@@ -27,6 +27,7 @@ from jax import numpy as jnp
 
 from .rdm import make_dm123_sf
 from .f3ca import fdm2fdm3_jax
+from ..eigh import eigh_safe
 
 
 def make_gfock_mo_energy(h1e_mo, eri_mo, dm1_sf, ncore=0, nact=2):
@@ -292,65 +293,6 @@ def nevpt2_e2_full2(h1e_mo, eri_mo, c_ci, dets, E0_elec, mo_energy=None,
         e2_sr = sr_e2(h2e_v3, h1e_v, h1e_act, eri_act, dm1, dm2, dm3, eps, nocc)
     e2_srs, norm, h = srs_e2(h1e_act, eri_act, h2e_v, dm1, dm2, dm3, eps, nocc)
     return e2_sr + e2_srs, eps
-
-
-@jax.custom_jvp
-def eigh_safe(a):
-    """``jnp.linalg.eigh`` with a degeneracy-safe first-order propagation.
-
-    The vector derivative of ``eigh`` carries a factor 1/(w_j - w_i). At a
-    machine-precision degeneracy that factor is 0/0 and returns NaN, which
-    then poisons every derivative through the rotated orbitals. Linear
-    molecules make this the norm rather than the exception: ThO's
-    generalized-Fock core block (17 orbitals) has a minimum eigenvalue gap
-    of 2.7e-15 and its virtual block (75 orbitals) 8.9e-16 -- the pi and
-    delta shells are exactly degenerate by symmetry. Every previous
-    validation ran on H2 and H2O, whose blocks carry no such pairs.
-
-    In a degenerate subspace the eigenbasis is arbitrary, so any choice of
-    its derivative is as good as another; the honest choice is to freeze
-    the rotation there, which is exactly what the NEVPT2 invariance under
-    rotations within the core and virtual blocks permits.
-
-    The softening lives in the JVP rule (and the reverse pass, which jax
-    builds by transposing it), not in a hand-written VJP. That matters:
-    with a custom_vjp the forward tangent of ``u`` still comes from the
-    standard ``eigh`` JVP, so forward-over-reverse (jvp of grad) keeps the
-    raw 1/diff = 1e15 and overflows to NaN as soon as something consumes
-    the eigenVECTORS -- while segments that only consume the eigenvalues
-    look fine because the offending tangent is dead code. Measured: with
-    the custom_vjp version, the eigenvalue-only HVP segment was finite and
-    the segment that feeds the rotated orbitals into a second CASCI was
-    NaN (t219).
-
-    The coupling is Lorentzian-softened, C_ij = L_ij * diff/(diff^2 + tau^2)
-    with L = U^T dA U. For |diff| >> tau it is 1/diff to relative order
-    (tau/diff)^2 -- below 1e-8 for every gap above 1e-2, which covers all
-    validation systems; near zero it goes linearly to zero (the freeze).
-    A hard cutoff would leave 1/diff^3 spikes just outside its threshold
-    whose second derivative overflows.
-
-    Measured on ThO/ECP (CAS(4,4), ncore=17): with the plain eigh the theta
-    gradient of the joint energy is all-NaN; with a custom_vjp version the
-    first order is finite but the HVP stays NaN; with this JVP version both
-    are finite.
-    """
-    return jnp.linalg.eigh(a)
-
-
-@eigh_safe.defjvp
-def _eigh_safe_jvp(primals, tangents):
-    (a,), (da,) = primals, tangents
-    w, u = jnp.linalg.eigh(a)
-    L = u.T @ (0.5 * (da + da.T)) @ u
-    diff = w[None, :] - w[:, None]
-    tau = 1e-4
-    F = diff / (diff ** 2 + tau ** 2)
-    n = w.shape[0]
-    C = L * F * (1.0 - jnp.eye(n))       # diagonal stays zero (normalization)
-    dw = jnp.diag(L)
-    du = u @ C
-    return (w, u), (dw, du)
 
 
 def canonicalize_jax(C, h1e, eri, c_ci, ncore=0, nact=2, nele_act=2, occ2_idx=(), occ0_idx=()):
