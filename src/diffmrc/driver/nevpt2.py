@@ -97,8 +97,22 @@ def _components_from(C0_, h_, e_, enuc, th_, *, ncore, nact, nele, nmo,
     C2 = jnp.asarray(C0_) @ block_rotation(th_, nmo, pairs)
 
     def mo_ints(Cx):
+        # The four-operand einsum must be split into four sequential
+        # contractions. XLA lowers the one-shot form on a 96^4 array with
+        # only ~1e-6 absolute accuracy (measured: max|delta| = 1.28e-6
+        # against the stepwise transform, activity block 8.9e-16), and that
+        # perturbation is amplified by the ~1e-15 gaps of the generalized
+        # Fock's degenerate pairs -- linear molecules have exact pi/delta
+        # degeneracies -- so the eigenvector basis inside the degenerate
+        # subspace comes out completely different (perturbation/gap ~ 1e9).
+        # The energy is insensitive to it, but the theta gradient differed
+        # by 8% between the two contraction orders and the HVP was NaN for
+        # the one-shot form and finite for the stepwise one (t222/t224).
         h1 = jnp.einsum('ai,ab,bj->ij', Cx, h_, Cx)
-        eri = jnp.einsum('pi,qj,rk,sl,pqrs->ijkl', Cx, Cx, Cx, Cx, e_)
+        z = jnp.einsum('pi,pqrs->iqrs', Cx, e_)
+        z = jnp.einsum('qj,iqrs->ijrs', Cx, z)
+        z = jnp.einsum('rk,ijrs->ijks', Cx, z)
+        eri = jnp.einsum('sl,ijks->ijkl', Cx, z)
         return h1, eri
 
     h1_, eri_ = mo_ints(C2)

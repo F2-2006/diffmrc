@@ -35,6 +35,14 @@ def _scalar(fn, n):
 
 
 def test_the_safe_reverse_pass_agrees_with_the_plain_one_without_degeneracy():
+    """Away from degeneracy the two agree to the softening's own order.
+
+    The coupling is diff/(diff^2 + tau^2), i.e. 1/diff with a relative
+    deviation of order (tau/diff)^2 -- below 1e-8 for every gap above
+    1e-2, which is why the tolerance here is 1e-7 rather than machine
+    precision. Bit-for-bit agreement would require the hard 1/diff, whose
+    unbounded second derivative is the bug this function exists to avoid.
+    """
     from diffmrc.core.nevpt2.impl import eigh_safe
 
     rng = np.random.default_rng(0)
@@ -42,7 +50,7 @@ def test_the_safe_reverse_pass_agrees_with_the_plain_one_without_degeneracy():
     A = jnp.asarray(B + B.T + np.diag([0.0, 2.0, 5.0, 9.0, 14.0]))
     g_std = np.asarray(jax.grad(_scalar(jnp.linalg.eigh, 5))(A))
     g_safe = np.asarray(jax.grad(_scalar(eigh_safe, 5))(A))
-    assert np.abs(g_std - g_safe).max() < 1e-12
+    assert np.abs(g_std - g_safe).max() < 1e-7
 
 
 def test_the_safe_reverse_pass_survives_an_exact_degeneracy():
