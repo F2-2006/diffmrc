@@ -60,7 +60,7 @@ def _spin_links(nact, nele):
 
 def _components_from(C0_, h_, e_, enuc, th_, *, ncore, nact, nele, nmo,
                      pairs, dets, links_a, links_b, ci_solver='plain',
-                     want_e2=True):
+                     eig_solver='default', want_e2=True):
     """``(E_casscf, E2)`` from reference quantities already in hand.
 
     Contains no SCF call and no Mole access -- theta and the precomputed
@@ -85,13 +85,22 @@ def _components_from(C0_, h_, e_, enuc, th_, *, ncore, nact, nele, nmo,
     from ..core.rotation import block_rotation
 
     nm = ncore + nact
+    # ``eig_solver`` selects the eigen-kernel inside the CI solvers and the
+    # canonicalization. 'default' keeps each solver's validated choice
+    # (eigh_safe inside the blocked solver, plain eigh elsewhere);
+    # 'lanczos' routes every kernel through core.lanczos, which is the
+    # only setting whose second derivatives are finite on matrices with
+    # bit-exact degenerate pairs (CO/N2 and every linear molecule).
+    blk_eig = 'eigh_safe' if eig_solver == 'default' else eig_solver
+    pln_eig = 'eigh' if eig_solver == 'default' else eig_solver
 
     def ci_solve(h1, eri):
         if ci_solver == 'blocked':
             return cs_casci_blocked(h1[:nm, :nm], eri[:nm, :nm, :nm, :nm],
-                                    ncore=ncore, nact=nact, nele_act=nele)
+                                    ncore=ncore, nact=nact, nele_act=nele,
+                                    eig_solver=blk_eig)
         if ci_solver == 'plain':
-            return _casci_ci(h1, eri, ncore, nact, nele)
+            return _casci_ci(h1, eri, ncore, nact, nele, eig_solver=pln_eig)
         raise ValueError('unknown ci_solver: {!r}'.format(ci_solver))
 
     C2 = jnp.asarray(C0_) @ block_rotation(th_, nmo, pairs)
@@ -118,7 +127,8 @@ def _components_from(C0_, h_, e_, enuc, th_, *, ncore, nact, nele, nmo,
     h1_, eri_ = mo_ints(C2)
     _, ci = ci_solve(h1_, eri_)
     C_can, _, eps = canonicalize_jax(C2, h_, e_, ci, ncore=ncore,
-                                     nact=nact, nele_act=nele)
+                                     nact=nact, nele_act=nele,
+                                     eig_solver=pln_eig)
     h1c, eric = mo_ints(C_can)
     E0c, ci2 = ci_solve(h1c, eric)
     if not want_e2:
@@ -135,7 +145,8 @@ def _components_from(C0_, h_, e_, enuc, th_, *, ncore, nact, nele, nmo,
 
 
 def make_nevpt2_joint_fn(ncore, nact, nele, nmo, pairs, scf_builder,
-                         e2_scale=1.0, ci_solver='plain'):
+                         e2_scale=1.0, ci_solver='plain',
+                         eig_solver='default'):
     """Build ``E(mol, theta) = E_casscf + e2_scale * E2_nevpt2``.
 
     Parameters
@@ -172,7 +183,7 @@ def make_nevpt2_joint_fn(ncore, nact, nele, nmo, pairs, scf_builder,
     links_a, links_b = _spin_links(nact, nele)
     kw = dict(ncore=ncore, nact=nact, nele=nele, nmo=nmo, pairs=pairs,
               dets=dets, links_a=links_a, links_b=links_b,
-              ci_solver=ci_solver)
+              ci_solver=ci_solver, eig_solver=eig_solver)
 
     def components(m_, th_, want_e2=True):
         """CASSCF energy and NEVPT2 correction, both differentiable."""
@@ -193,7 +204,8 @@ def make_nevpt2_joint_fn(ncore, nact, nele, nmo, pairs, scf_builder,
 
 
 def make_nevpt2_theta_fn(mol, ncore, nact, nele, nmo, pairs, scf_builder,
-                         e2_scale=1.0, ci_solver='plain'):
+                         e2_scale=1.0, ci_solver='plain',
+                         eig_solver='default'):
     """Theta-only joint energy at a fixed geometry (safe under jax.jit).
 
     The reference SCF and the AO integrals are computed once here; the
@@ -223,7 +235,7 @@ def make_nevpt2_theta_fn(mol, ncore, nact, nele, nmo, pairs, scf_builder,
     links_a, links_b = _spin_links(nact, nele)
     kw = dict(ncore=ncore, nact=nact, nele=nele, nmo=nmo, pairs=pairs,
               dets=dets, links_a=links_a, links_b=links_b,
-              ci_solver=ci_solver)
+              ci_solver=ci_solver, eig_solver=eig_solver)
 
     def E_theta(th_):
         E_cas, e2 = _components_from(C0_, h_, e_, enuc, th_,

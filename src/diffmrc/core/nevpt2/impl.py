@@ -295,7 +295,8 @@ def nevpt2_e2_full2(h1e_mo, eri_mo, c_ci, dets, E0_elec, mo_energy=None,
     return e2_sr + e2_srs, eps
 
 
-def canonicalize_jax(C, h1e, eri, c_ci, ncore=0, nact=2, nele_act=2, occ2_idx=(), occ0_idx=()):
+def canonicalize_jax(C, h1e, eri, c_ci, ncore=0, nact=2, nele_act=2, occ2_idx=(),
+                     occ0_idx=(), eig_solver='eigh'):
     """Differentiable canonicalization, following mcscf.canonicalize with
     cas_nat=True.
 
@@ -328,7 +329,8 @@ def canonicalize_jax(C, h1e, eri, c_ci, ncore=0, nact=2, nele_act=2, occ2_idx=()
     # Re-solve the CI in the natural-orbital basis
     h1e_mo1 = jnp.einsum("ai,ab,bj->ij", C1, h1e, C1)
     eri_mo1 = jnp.einsum("pi,qj,rk,sl,pqrs->ijkl", C1, C1, C1, C1, eri)
-    E0, ci1 = _casci_ci(h1e_mo1, eri_mo1, ncore, nact, nele_act)
+    E0, ci1 = _casci_ci(h1e_mo1, eri_mo1, ncore, nact, nele_act,
+                        eig_solver=eig_solver)
     # 2) Generalized Fock matrix, F = h + J - K/2, in the ORIGINAL orbital
     #    basis and with the original active density
     dm1_orig, _, _ = make_dm123_sf(c_ci, cas_dets_for2(ncore, nact, nele_act), nact, ncore)
@@ -386,7 +388,8 @@ def canonicalize_jax(C, h1e, eri, c_ci, ncore=0, nact=2, nele_act=2, occ2_idx=()
     # Final CI solve in the canonical orbital basis
     h1e_mo2 = jnp.einsum("ai,ab,bj->ij", C2, h1e, C2)
     eri_mo2 = jnp.einsum("pi,qj,rk,sl,pqrs->ijkl", C2, C2, C2, C2, eri)
-    E0c, ci2 = _casci_ci(h1e_mo2, eri_mo2, ncore, nact, nele_act)
+    E0c, ci2 = _casci_ci(h1e_mo2, eri_mo2, ncore, nact, nele_act,
+                         eig_solver=eig_solver)
     return C2, ci2, eps
 
 
@@ -404,10 +407,11 @@ def cas_dets_for2(ncore=0, nact=2, nele_act=2):
     return dets
 
 
-def _casci_ci(h1e_mo, eri_mo, ncore, nact, nele_act=2):
+def _casci_ci(h1e_mo, eri_mo, ncore, nact, nele_act=2, eig_solver='eigh'):
     """Ground-state CAS energy and CI vector, returned as (E_elec, ci)."""
     from ..casci import cs_casci
     nact_mo = ncore + nact
     e, ci = cs_casci(h1e_mo[:nact_mo, :nact_mo], eri_mo[:nact_mo, :nact_mo, :nact_mo, :nact_mo],
-                     ncore=ncore, nact=nact, nele_act=nele_act, return_ci=True)
+                     ncore=ncore, nact=nact, nele_act=nele_act, return_ci=True,
+                     eig_solver=eig_solver)
     return e, ci

@@ -29,7 +29,8 @@ from itertools import combinations
 
 from .eigh import eigh_safe
 
-def cs_casci(h1e_mo, eri_mo, ncore=0, nact=2, nele_act=2, nroots=1, return_ci=False):
+def cs_casci(h1e_mo, eri_mo, ncore=0, nact=2, nele_act=2, nroots=1, return_ci=False,
+             eig_solver='eigh'):
     """CASCI over a Slater-determinant basis built by the Condon-Slater rules.
 
     The occupied set is the fully occupied core plus `nele_act` spin orbitals
@@ -137,6 +138,14 @@ def cs_casci(h1e_mo, eri_mo, ncore=0, nact=2, nele_act=2, nroots=1, return_ci=Fa
     # ---- Fold in the diagonal ----
     H = H + jnp.diag(H_diag)
     if return_ci:
+        if eig_solver == 'lanczos':
+            # Decomposition-free lowest pair (see core/lanczos.py): the
+            # second derivative of eigvalsh is NaN on matrices with
+            # bit-exact degenerate pairs, and CO/6-31G CAS(6,6) carries
+            # them. First-order callers keep the default.
+            from .lanczos import lowest_eigpair_lanczos
+            lam, v = lowest_eigpair_lanczos(H)
+            return lam, v
         eigs = jnp.linalg.eigvalsh(H)
         if nroots > 1:
             return jnp.mean(eigs[:nroots]), None  # state average; no CI vector
@@ -160,7 +169,24 @@ def cs_casci(h1e_mo, eri_mo, ncore=0, nact=2, nele_act=2, nroots=1, return_ci=Fa
     eigs = jnp.linalg.eigvalsh(H)
     return jnp.mean(eigs[:nroots])
 
-def cs_casci_blocked(h1e_mo, eri_mo, ncore=0, nact=2, nele_act=2):
+def _block_lowest_pair(h_blk, eig_solver='eigh_safe'):
+    """Lowest eigenpair of one S_z block.
+
+    ``eigh_safe`` (default): the degeneracy-safe decomposition; correct to
+    first order everywhere (see core/eigh.py). ``lanczos``: the
+    decomposition-free route (see core/lanczos.py), which is additionally
+    safe at second order on matrices with bit-exact degenerate pairs --
+    the case that blocks second derivatives on linear molecules.
+    """
+    if eig_solver == 'lanczos':
+        from .lanczos import lowest_eigpair_lanczos
+        return lowest_eigpair_lanczos(h_blk)
+    w, U = eigh_safe(h_blk)
+    return w[0], U[:, 0]
+
+
+def cs_casci_blocked(h1e_mo, eri_mo, ncore=0, nact=2, nele_act=2,
+                     eig_solver='eigh_safe'):
     """Ground-state energy and CI vector by blockwise diagonalization in S_z.
 
     WHY THIS EXISTS
@@ -231,17 +257,17 @@ def cs_casci_blocked(h1e_mo, eri_mo, ncore=0, nact=2, nele_act=2):
     for s in sorted(set(sz)):
         idx = [i for i, x in enumerate(sz) if x == s]
         H_blk = _block_H(h1e_mo, eri_mo, DETS, idx, ncore, nact, nele_act)
-        w, U = eigh_safe(H_blk)
+        w0, u0 = _block_lowest_pair(H_blk, eig_solver)
         if E_min is None:
-            E_min = w[0]
-            out = out.at[jnp.asarray(idx)].set(U[:, 0])
+            E_min = w0
+            out = out.at[jnp.asarray(idx)].set(u0)
         else:
             # jnp.minimum keeps the energy differentiable. The vector is
             # updated by whichever block wins; the comparison is physically
             # stable because the block energies differ by far more than the
             # numerical noise (0.34 Ha for H2O).
-            better = w[0] < E_min
-            E_min = jnp.minimum(E_min, w[0])
+            better = w0 < E_min
+            E_min = jnp.minimum(E_min, w0)
             # When a new block wins, the vector of the previously leading
             # block must be erased over the WHOLE vector: it lives in a
             # different index set than the current block, so a per-block
@@ -254,7 +280,7 @@ def cs_casci_blocked(h1e_mo, eri_mo, ncore=0, nact=2, nele_act=2):
             # previous content, which is always zero, so it never fired.
             out = jnp.where(better, 0.0, 1.0) * out
             out = out.at[jnp.asarray(idx)].set(
-                out[jnp.asarray(idx)] + jnp.where(better, 1.0, 0.0) * U[:, 0])
+                out[jnp.asarray(idx)] + jnp.where(better, 1.0, 0.0) * u0)
     return E_min, out
 
 def _block_H(h1e_mo, eri_mo, DETS, idx, ncore, nact, nele_act):
