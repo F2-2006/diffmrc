@@ -167,6 +167,19 @@ CI eigensolver (`cs_casci_blocked`) — the plain eigensolver's second
 derivative is NaN at a cross-`S_z` degeneracy, which its own docstring
 records.
 
+At actinide scale (ThO and UF with a Stuttgart ECP and 6-31G ligands, nao
+= 96) the correlation energy cross-checks against an independent
+implementation to 2.5 × 10⁻⁶ (ThO) and 2.9 × 10⁻⁸ (UF), and the theta
+gradients are finite. Those runs carry a ~10⁻⁶ reproducibility band, and
+their theta-space derivatives a ~8% degenerate-branch uncertainty: the
+linear molecules' generalized-Fock blocks contain machine-precision
+degeneracies whose inverse gaps amplify every numerical path choice, so
+the numerical route (contraction order, eigensolver rule) must be tested
+on such a system rather than assumed equivalent. The nuclear-derivative
+layer of the actinide protocol is blocked upstream: pyscfad's
+integral-derivative path allocates a dense (nctr, nao⁴) array — 51 GiB at
+nao = 96 — before any chemistry happens.
+
 ## Second derivatives
 
 The orbital-response term enters the second derivative even though it cancels
