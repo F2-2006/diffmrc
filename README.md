@@ -149,9 +149,19 @@ raw-eigh theta gradient is all-NaN while the energy is finite. The block
 eigenproblem therefore goes through `core.eigh.eigh_safe`, whose
 Lorentzian-softened rule freezes the rotation inside a degenerate subspace;
 that rule is first-order safe by direct measurement. Second derivatives of
-any decomposition-based path remain NaN on such systems — the decomposition
-must be avoided there (finite differences of the first-order gradient are
-the interim route).
+any decomposition-based path remain NaN on such systems. The remedy is
+`core.lanczos.lowest_eigpair_lanczos`, selected with `eig_solver='lanczos'`:
+a reorthogonalized Lanczos forward, polished by Newton steps and then
+stopped, whose derivatives come from one bordered implicit-function
+(Newton) step on the eigenequation — nothing decomposes on the
+differentiated path. Measured on the same CO winning block (400
+determinants, 24 bit-exact pairs): the AD second derivative agrees with
+gradient finite differences and with value-based second differences to
+1.4 × 10⁻⁶, independent of the Krylov depth from 24 to 160, where every
+decomposition kernel returns NaN. The design measurements — in
+particular why the forward runs under `stop_gradient` (the Lanczos
+basis's sensitivity to the matrix grows like the product of 1/beta) —
+are recorded in the module docstring.
 
 **Orbital relaxation.** Orbitals are parametrized by an exponential map of
 antisymmetric rotation parameters, $C = C_0 R(\theta)$, so the optimization is a
