@@ -187,7 +187,11 @@ finite-difference ladder to 6 × 10⁻⁷ at the finest step, with the Hessian
 symmetric to 10⁻¹¹. Second derivatives of this chain go through the blocked
 CI eigensolver (`cs_casci_blocked`) — the plain eigensolver's second
 derivative is NaN at a cross-`S_z` degeneracy, which its own docstring
-records.
+records — and on systems whose block spectra carry bit-exact degenerate
+pairs (linear molecules) through the same solver with
+`eig_solver='lanczos'`; the end-to-end check on CO/6-31G measured the
+theta gradient finite at 1.705953 × 10⁻¹ and the HVP finite, where every
+decomposition-based path returns NaN.
 
 At actinide scale (ThO and UF with a Stuttgart ECP and 6-31G ligands, nao
 = 96) the correlation energy cross-checks against an independent
