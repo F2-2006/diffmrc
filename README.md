@@ -139,7 +139,19 @@ eigenvector is differentiated through the same operation. Because the
 Hamiltonian is block-diagonal in the spin projection $S_z$, the diagonalization
 is performed blockwise (`cs_casci_blocked`); a single `eigh` over the full
 determinant space encounters degeneracies across blocks and returns NaN in
-reverse mode.
+reverse mode. Block separation is necessary but not sufficient: the reverse
+rule forms 1/(w_j - w_i) for every pair in a block whether or not that pair
+carries cotangent, so one bit-exact degenerate pair anywhere in any block
+turns the untouched entries into 0 × inf = NaN. Measured on CO/6-31G
+CAS(6,6), five of the seven blocks carry bit-exact pairs (24 in the
+400-determinant winning block, whose own ground state is simple) and the
+raw-eigh theta gradient is all-NaN while the energy is finite. The block
+eigenproblem therefore goes through `core.eigh.eigh_safe`, whose
+Lorentzian-softened rule freezes the rotation inside a degenerate subspace;
+that rule is first-order safe by direct measurement. Second derivatives of
+any decomposition-based path remain NaN on such systems — the decomposition
+must be avoided there (finite differences of the first-order gradient are
+the interim route).
 
 **Orbital relaxation.** Orbitals are parametrized by an exponential map of
 antisymmetric rotation parameters, $C = C_0 R(\theta)$, so the optimization is a
