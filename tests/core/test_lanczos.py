@@ -78,3 +78,38 @@ def test_the_blocked_solver_runs_on_the_lanczos_kernel():
     g = np.asarray(jax.grad(lambda h: jnp.sum(cs_casci_blocked(
         h, eri, ncore=0, nact=2, nele_act=2, eig_solver='lanczos')[1]))(h1e))
     assert np.isfinite(g).all()
+
+
+def test_cluster_ift_values_match_and_the_projector_derivative_is_consistent():
+    """``eigh_cluster_ift``: values exact; a smooth invariant functional's
+    second derivative matches finite differences.
+
+    The functional is the fixed-size cluster projector of the lowest two
+    eigenvalues (the cluster size is fixed so the functional is smooth
+    even when the pair is bit-exactly degenerate -- a membership mask
+    would jump). This is the property the driver chain needs: the
+    natural-orbital transform may only rotate the degenerate cluster
+    freely if downstream quantities do not see it.
+    """
+    from diffmrc.core.eigh import eigh_cluster_ift
+
+    A = jnp.asarray(np.diag([-1.0, -1.0, 0.5, 2.0]))
+    w, u = eigh_cluster_ift(A)
+    assert np.allclose(np.asarray(w), [-1.0, -1.0, 0.5, 2.0], atol=1e-12)
+    assert np.allclose(np.asarray(u @ u.T), np.eye(4), atol=1e-12)
+    rng = np.random.default_rng(0)
+    W = jnp.asarray(rng.normal(size=(4, 4)))
+
+    def f(M):
+        _, uu = eigh_cluster_ift(M)
+        P = uu[:, :2] @ uu[:, :2].T
+        return jnp.sum(P * W)
+
+    V = jnp.asarray(np.diag([1.0, 2.0, -0.5, 0.3]))
+    hv = np.asarray(jax.jvp(jax.grad(f), (A,), (V,))[1])
+    gp = np.asarray(jax.grad(f)(A + 1e-5 * V))
+    gm = np.asarray(jax.grad(f)(A - 1e-5 * V))
+    fd = float(np.sum((gp - gm) / 2e-5 * np.asarray(V)))
+    ad = float(np.sum(hv * np.asarray(V)))
+    assert np.isfinite(hv).all()
+    assert abs(ad - fd) <= 1e-4 * max(abs(fd), 1.0)

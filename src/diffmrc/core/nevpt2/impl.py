@@ -27,7 +27,7 @@ from jax import numpy as jnp
 
 from .rdm import make_dm123_sf
 from .f3ca import fdm2fdm3_jax
-from ..eigh import eigh_safe
+from ..eigh import eigh_safe, eigh_mask, eigh_cluster_ift
 
 
 def make_gfock_mo_energy(h1e_mo, eri_mo, dm1_sf, ncore=0, nact=2):
@@ -316,11 +316,18 @@ def canonicalize_jax(C, h1e, eri, c_ci, ncore=0, nact=2, nele_act=2, occ2_idx=()
     """
     nmo = C.shape[1]
     nocc = ncore + nact
+    # Derivative semantics for the two eigensolves below. The default
+    # (eigh_safe) is first-order safe; on `eig_solver='lanczos'` the
+    # implicit-solve variant moves the decomposition out of the
+    # differentiated path entirely (measured on CO/6-31G: with any
+    # rule-on-top-of-eigh the chain HVP was off by 375x, with the
+    # implicit correction it matches FD/VD; see core/eigh.eigh_cluster_ift).
+    eig = eigh_cluster_ift if eig_solver == 'lanczos' else eigh_safe
     h1e_mo = jnp.einsum("ai,ab,bj->ij", C, h1e, C)
     eri_mo = jnp.einsum("pi,qj,rk,sl,pqrs->ijkl", C, C, C, C, eri)
     # 1) Active natural orbitals from the one-particle density
     dm1, _, _ = make_dm123_sf(c_ci, cas_dets_for2(ncore, nact, nele_act), nact, ncore)
-    w_nat, U_nat = eigh_safe(dm1)
+    w_nat, U_nat = eig(dm1)
     # The reference orders active natural orbitals by descending occupation
     # number, whereas eigh returns ascending eigenvalues, so the columns are
     # reversed.
@@ -375,7 +382,7 @@ def canonicalize_jax(C, h1e, eri, c_ci, ncore=0, nact=2, nele_act=2, occ2_idx=()
         idx = jnp.asarray(blk, dtype=int)
         if len(blk) > 1:
             f_blk = F[idx][:, idx]
-            w, u = eigh_safe(f_blk)
+            w, u = eig(f_blk)
             C2 = C2.at[:, blk].set(C1[:, blk] @ u)
             for a, i in enumerate(blk):
                 eps_map[i] = w[a]

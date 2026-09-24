@@ -68,7 +68,7 @@ import jax
 jax.config.update("jax_enable_x64", True)
 from jax import numpy as jnp
 
-__all__ = ['eigh_safe']
+__all__ = ['eigh_safe', 'make_eigh_mask', 'eigh_mask', 'eigh_cluster_ift']
 
 
 @jax.custom_jvp
@@ -95,3 +95,101 @@ def _eigh_safe_jvp(primals, tangents):
     dw = jnp.diag(L)
     du = u @ C
     return (w, u), (dw, du)
+
+
+def make_eigh_mask(tol=1e-6):
+    """``eigh_safe`` with a hard mask instead of the Lorentzian softening.
+
+    ``F = keep/diff`` with ``keep = |diff| > tol``: eigenvector pairs whose
+    eigenvalues lie within ``tol`` are frozen with an *identically zero*
+    coupling at every order, and pairs outside the mask get the exact
+    ``1/diff`` -- more accurate than the Lorentzian at small-but-real gaps
+    (relative deviation ``(tau/diff)^2``, e.g. 1e-2 at diff = 1e-3 with
+    tau = 1e-4), and, crucially, free of the Lorentzian's ``1/tau^2``
+    second-order term. That term was measured to contaminate the driver
+    chain: at CO/6-31G theta = 0 (near-degenerate pi occupations entering
+    the canonicalization) the AD-HVP read +4.10e3 while the finite
+    difference of the gradient read +16.39 (t245, rel 0.996). The mask is
+    the all-orders version of "freeze the rotation inside a degenerate
+    subspace": the intra-cluster block couplings vanish identically.
+
+    The hard cutoff needs the smallest *real* gap to sit well above
+    ``tol`` -- the 1/diff^3 term of a pair just outside the mask is
+    bounded by tol^-3, so with tol = 1e-6 every physical gap above ~1e-3
+    is safe. Systems whose gap spectrum has structure near the tolerance
+    should keep the Lorentzian route instead.
+    """
+    @jax.custom_jvp
+    def eigh_mask(a):
+        return jnp.linalg.eigh(a)
+
+    @eigh_mask.defjvp
+    def _eigh_mask_jvp(primals, tangents):
+        (a,), (da,) = primals, tangents
+        w, u = jnp.linalg.eigh(a)
+        L = u.T @ (0.5 * (da + da.T)) @ u
+        diff = w[None, :] - w[:, None]
+        keep = jnp.abs(diff) > tol
+        F = jnp.where(keep, 1.0 / jnp.where(keep, diff, 1.0), 0.0)
+        n = w.shape[0]
+        C = L * F * (1.0 - jnp.eye(n))
+        return (w, u), (jnp.diag(L), u @ C)
+
+    return eigh_mask
+
+
+_EIGH_MASK = make_eigh_mask(1e-6)
+eigh_mask = _EIGH_MASK                    # module-level instance, tol = 1e-6
+
+
+def eigh_cluster_ift(a, tol=1e-8):
+    """Eigendecomposition whose derivatives come from implicit solves.
+
+    ``eigh_safe`` and ``eigh_mask`` replace the derivative *rule* but still
+    call ``jnp.linalg.eigh`` inside it, so a second differentiation
+    re-enters the primal decomposition and the raw 1/0 at a bit-exact
+    degeneracy returns. Measured (t268, 2026-09-25): with the natural-
+    orbital transform's derivative cut (``stop_gradient``) the CO chain's
+    AD-HVP matched FD/VD to 5e-10; with either rule in place it was off by
+    375x. This function removes the decomposition from the differentiated
+    path entirely: the primal (w, u) is stopped, and each column is moved
+    by one implicit correction
+
+        U_new_i = u_i + (I - P_i) X_i,
+        M_i X_i = (I - P_i) A u_i,
+        M_i     = (I - P_i)(A - w_i I)(I - P_i) + P_i,
+
+    with P_i the projector onto u_i's degenerate cluster (eigenvalues
+    within ``tol`` of w_i). X_i is *identically zero* at the solution
+    (both terms of (A - w_i)u_i either lie in the cluster or vanish by
+    the projection), so values are untouched; the derivative of the
+    expression is the standard eigenvector perturbation formula with
+    intra-cluster rotations frozen identically at every order, and the
+    second derivative is self-consistent because ``a`` is *live* inside
+    M_i and the right-hand side (the same mechanism as the Lanczos
+    kernel's bordered IFT step).
+
+    ``tol`` must separate the degenerate clusters from the smallest real
+    gap; on the CO chain the clusters are bit-exact (1e-15) and the
+    smallest real gap is 1.5e-2, so the default 1e-8 is safe.
+    """
+    w, u = jnp.linalg.eigh(a)
+    w_sg = jax.lax.stop_gradient(w)
+    u_sg = jax.lax.stop_gradient(u)
+    n = a.shape[0]
+    eye = jnp.eye(n)
+    close = jnp.abs(w_sg[None, :] - w_sg[:, None]) <= tol
+    u_new = []
+    for i in range(n):
+        ui = u_sg[:, i]
+        wi = w_sg[i]
+        Pi = (u_sg * close[i][None, :]) @ u_sg.T          # projector of cluster(i)
+        Ii = eye - Pi
+        M = Ii @ (a - wi * eye) @ Ii + Pi
+        xi = jnp.linalg.solve(M, Ii @ (a @ ui))
+        u_new.append(ui + Ii @ xi)
+    u_out = jnp.stack(u_new, axis=1)
+    # Rayleigh quotient of the *live* matrix at the stopped vectors: equals
+    # w at the solution and carries u^T dA u as its derivative.
+    w_out = jnp.diag(u_sg.T @ (a @ u_sg))
+    return w_out, u_out

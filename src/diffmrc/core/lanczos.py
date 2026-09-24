@@ -289,4 +289,16 @@ def lowest_eigpair_lanczos(a, m=None, v0=None):
         lam0, u0 = _ift_step(a, lam0, u0)
     lam = jax.lax.stop_gradient(lam0)
     u = jax.lax.stop_gradient(u0)
-    return _ift_step(a, lam, u)
+    # Two chained live IFT steps, not one. The single-step tail drops the
+    # *stopped* forward's own A-dependence through the term
+    # (d u_new / d u0) * (d u0 / d A) -- and while d u_new / d u0 vanishes
+    # quadratically with the residual, d u0 / d A does not: the forward's
+    # vector is a product of Lanczos-basis directions whose sensitivity to
+    # A grows like prod 1/beta. Measured (t261/t263, 2026-09-25): the
+    # vector functional `sum(u)` had an AD second derivative 50% off the
+    # FD/VD value on the CO winning block, while the eigenvalue functional
+    # (whose stopped input has an O(1) sensitivity) agreed to 2e-6. Chaining
+    # a second live step makes the total input-sensitivity O(residual^2) of
+    # the first live step (~1e-24 after the polish), which kills the term.
+    lam1, u1 = _ift_step(a, lam, u)
+    return _ift_step(a, lam1, u1)
