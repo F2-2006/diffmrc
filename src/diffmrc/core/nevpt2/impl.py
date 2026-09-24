@@ -79,8 +79,10 @@ def srs_e2(h1e_act, h2e_act, h2e_v, dm1, dm2, dm3, mo_energy, nocc=2):
     norm = 0.5 * jnp.einsum("rsqp,rsba,pqba->rs", h2e_v, h2e_v, rm2)
     h = 0.5 * jnp.einsum("rsqp,rsba,pqab->rs", h2e_v, h2e_v, a7)
     diff = mo_energy[nocc:, None] + mo_energy[None, nocc:]
-    norm_safe = jnp.where(jnp.abs(norm) > 1e-12, norm, jnp.zeros_like(norm))
-    e2 = -(norm_safe / (diff + jnp.where(jnp.abs(norm) > 1e-12, h / norm, 0.0) + 1e-30)).sum()
+    norm_safe = jnp.where(jnp.abs(norm) > 1e-12, norm, jnp.ones_like(norm))
+    e2 = -(jnp.where(jnp.abs(norm) > 1e-12, norm, 0.0)
+           / (diff + jnp.where(jnp.abs(norm) > 1e-12, h / norm_safe, 0.0)
+              + 1e-30)).sum()
     return e2, norm, h
 
 
@@ -202,8 +204,13 @@ def sr_e2(h2e_v3, h1e_v, h1e_act, h2e_act, dm1, dm2, dm3, mo_energy, nocc=2,
             + jnp.einsum("ip,pa,ia->i", h1e_v, dm1, h1e_v))
     diff = mo_energy[nocc:]
     idx = jnp.abs(norm) > 1e-12
+    # Guarded denominator: a raw 0/0 in the untaken branch of where() still
+    # propagates NaN through the reverse pass of the division (0 * inf).
+    # Measured: the H2O/6-31G single-external class has value exactly 0, and
+    # its theta gradient came back NaN until the denominator was guarded.
+    norm_safe = jnp.where(idx, norm, 1.0)
     e2 = -(jnp.where(idx, norm, 0.0)
-           / (diff + jnp.where(idx, ener / norm, 0.0) + 1e-30)).sum()
+           / (diff + jnp.where(idx, ener / norm_safe, 0.0) + 1e-30)).sum()
     return e2
 
 

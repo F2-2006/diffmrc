@@ -111,8 +111,12 @@ def si_e2(h1e_act, h2e_act, h2e_v_si, h1e_v_si, dm1, dm2, dm3, f3ca, f3ac,
             + jnp.einsum('pi,pa,ai->i', h1e_v_si, dm1_h, h1e_v_si))
     diff = -mo_energy_core
     idx = jnp.abs(norm) > 1e-12
+    # Guarded denominator: a raw 0/0 in the untaken branch of where() still
+    # propagates NaN -- the reverse pass of the division computes 0/0 when
+    # the cotangent is zeroed by that same where.
+    norm_safe = jnp.where(idx, norm, 1.0)
     e2 = -(jnp.where(idx, norm, 0.0)
-           / (diff + jnp.where(idx, ener / norm, 0.0) + 1e-30)).sum()
+           / (diff + jnp.where(idx, ener / norm_safe, 0.0) + 1e-30)).sum()
     return e2
 
 
@@ -141,8 +145,10 @@ def sijr_e2(h2e_v, hdm1, a3, mo_energy_vir, mo_energy_core, ncore):
     h_t = h[:, ci_triu[0], ci_triu[1]]
     diff_t = diff[:, ci_triu[0], ci_triu[1]]
     idx = jnp.abs(norm_t) > 1e-12
+    norm_t_safe = jnp.where(idx, norm_t, 1.0)
     return -(jnp.where(idx, norm_t, 0.0)
-             / (diff_t + jnp.where(idx, h_t / norm_t, 0.0) + 1e-30)).sum()
+             / (diff_t + jnp.where(idx, h_t / norm_t_safe, 0.0)
+                + 1e-30)).sum()
 
 
 def make_k27(h1e, h2e, dm1, dm2):
@@ -169,8 +175,10 @@ def srsi_e2(h2e_v, dm1, k27, mo_energy_vir, mo_energy_core, nvir):
     h_t = h[vi_triu]
     diff_t = diff[vi_triu]
     idx = jnp.abs(norm_t) > 1e-12
+    norm_t_safe = jnp.where(idx, norm_t, 1.0)
     return -(jnp.where(idx, norm_t, 0.0)
-             / (diff_t + jnp.where(idx, h_t / norm_t, 0.0) + 1e-30)).sum()
+             / (diff_t + jnp.where(idx, h_t / norm_t_safe, 0.0)
+                + 1e-30)).sum()
 
 
 def make_a9(h1e, h2e, hdm1, hdm2, hdm3):
@@ -218,8 +226,10 @@ def sij_e2(h2e_v, hdm2, a9, mo_energy_core, ncore):
     h_t = h.reshape(-1)
     diff_t = diff.reshape(-1)
     idx = jnp.abs(norm_t) > 1e-14
+    norm_t_safe = jnp.where(idx, norm_t, 1.0)
     return -(jnp.where(idx, norm_t, 0.0)
-             / (-diff_t + jnp.where(idx, h_t / norm_t, 0.0) + 1e-30)).sum()
+             / (-diff_t + jnp.where(idx, h_t / norm_t_safe, 0.0)
+                + 1e-30)).sum()
 
 
 def make_a12(h1e, h2e, dm1, dm2, dm3):
@@ -266,8 +276,9 @@ def sir_e2(h2e_v1, h2e_v2, h1e_v, dm1, dm2, dm3, a12, a13, mo_energy_core,
          + jnp.einsum('rpqi,rabi,pqab->ir', h2e_v2, h2e_v2, a13))
     diff = mo_energy_core[:, None] - mo_energy_vir[None, :]
     idx = jnp.abs(norm) > 1e-12
+    norm_safe = jnp.where(idx, norm, 1.0)
     return -(jnp.where(idx, norm, 0.0)
-             / (-diff + jnp.where(idx, h / norm, 0.0) + 1e-30)).sum()
+             / (-diff + jnp.where(idx, h / norm_safe, 0.0) + 1e-30)).sum()
 
 
 def sijrs_e2(cvcv, mo_energy_core, mo_energy_vir, ncore, nvir):
