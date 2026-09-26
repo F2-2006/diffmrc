@@ -412,3 +412,69 @@ def test_molecular_end_refuses_a_ligand_without_p_functions():
     occ = np.array([2.0, 1.0, 1.0])
     assert molecular_end_candidate(mol, np.eye(3), occ, center='Eu',
                                    ligand='F') is None
+
+
+from diffmrc.policy.rules import DipoleChoice, dipole_rule  # noqa: E402
+
+
+def test_gdm_picks_the_candidate_nearest_the_reference():
+    dipoles = {
+        'a': np.array([0.10, 0.0, 0.0]),
+        'b': np.array([0.22, 0.0, 0.0]),
+        'c': np.array([0.35, 0.0, 0.0]),
+    }
+    choice = dipole_rule(dipoles, np.array([0.20, 0.0, 0.0]))
+    assert isinstance(choice, DipoleChoice)
+    assert choice.winner == 'b'
+    assert set(choice.distances) == {'a', 'b', 'c'}
+    assert choice.distances['b'] == pytest.approx(0.02)
+
+
+def test_the_projection_and_plain_distance_variants_can_disagree():
+    """The projection form ignores transverse deviation, the plain
+    distance charges for it -- the 2023 protocol's two readings.
+
+    Candidate ``off_axis`` sits exactly on the reference direction in
+    projection but 0.5 D off it; candidate ``short`` is on the axis but
+    farther in absolute distance.  gdm takes ``short``, vgdm takes
+    ``off_axis``.
+    """
+    ref = np.array([2.0, 0.0, 0.0])
+    dipoles = {
+        'off_axis': np.array([2.0, 0.5, 0.0]),    # vgdm 0.0 ; gdm 0.5
+        'short': np.array([1.7, 0.0, 0.0]),       # vgdm 0.3 ; gdm 0.3
+    }
+    assert dipole_rule(dipoles, ref, variant='gdm').winner == 'short'
+    assert dipole_rule(dipoles, ref, variant='vgdm').winner == 'off_axis'
+
+
+def test_a_zero_reference_refuses_both_variants():
+    dipoles = {'a': np.array([0.1, 0.0, 0.0])}
+    for variant in ('gdm', 'vgdm'):
+        choice = dipole_rule(dipoles, np.zeros(3), variant=variant)
+        assert choice.winner is None
+        assert choice.evidence
+
+
+def test_a_non_finite_dipole_refuses_the_whole_selection():
+    dipoles = {'a': np.array([0.1, 0.0, 0.0]),
+               'b': np.array([np.nan, 0.0, 0.0])}
+    choice = dipole_rule(dipoles, np.array([0.2, 0.0, 0.0]))
+    assert choice.winner is None
+    assert any('b' in line for line in choice.evidence)
+
+
+def test_the_margin_can_refuse_a_close_call():
+    dipoles = {'a': np.array([0.200, 0.0, 0.0]),
+               'b': np.array([0.205, 0.0, 0.0])}
+    ref = np.array([0.2, 0.0, 0.0])
+    assert dipole_rule(dipoles, ref).winner == 'a'
+    refused = dipole_rule(dipoles, ref, min_margin=0.01)
+    assert refused.winner is None
+    assert any('margin' in line for line in refused.evidence)
+
+
+def test_an_unknown_variant_is_a_programming_error():
+    with pytest.raises(ValueError):
+        dipole_rule({'a': np.zeros(3)}, np.array([1.0, 0.0, 0.0]),
+                    variant='edm')

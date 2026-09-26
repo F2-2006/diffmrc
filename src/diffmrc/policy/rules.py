@@ -66,7 +66,8 @@ from .occupation import select_valence, split_by_occupation
 
 __all__ = ['SHELL_RULES', 'Candidate', 'SelectionPlan',
            'candidate_from_elements', 'plan_from_elements',
-           'dominant_shell', 'molecular_end_candidate']
+           'dominant_shell', 'molecular_end_candidate',
+           'DipoleChoice', 'dipole_rule']
 
 # The shells the molecular-end rule inspects, in the order they are
 # offered to the labelling. The order does not affect the result -- the
@@ -461,3 +462,106 @@ def molecular_end_candidate(mol, C, occ, center, ligand, min_weight=0.5,
                      ligand: dict(n_orbitals=len(donor))},
         evidence=evidence,
     )
+
+
+# ---------------------------------------------------------------------------
+# Property-distance rules.  Their input is a computed property of each
+# candidate space rather than the molecular structure, so they read the
+# arrays a caller has already produced -- the dipole values from
+# driver.properties, in the rule below.
+
+@dataclass
+class DipoleChoice:
+    """The winning candidate, or the refusal and its reason."""
+
+    winner: object = None
+    distances: dict = field(default_factory=dict)
+    variant: str = 'gdm'
+    evidence: list = field(default_factory=list)
+
+
+def dipole_rule(dipoles, reference, variant='gdm', min_margin=None):
+    """Pick the candidate whose dipole is closest to an external reference.
+
+    The protocol is Kaufold and Dong's (JCTC 2023; the 2026 update moves
+    the selection runs to CASCI orbitals and gives the projection variant
+    the plain-distance form): compute the dipole of each candidate space
+    and take the one nearest an outside reference -- experiment, or a
+    calculation at a level the candidate is meant to reproduce.  Two
+    boundaries belong to the caller, not this function: the reference
+    must come from outside the candidate set, and charged systems are
+    outside the protocol because the dipole is origin dependent.
+
+    This rule consumes only dipole *values*.  The chain that produces
+    them (``driver.properties``) is differentiable in the orbital
+    parameters, so a caller can additionally read the sensitivity of a
+    near-tie to re-optimization -- the one quantity the original protocol
+    does not have -- but that diagnostic is deliberately not part of the
+    decision here.
+
+    Parameters
+    ----------
+    dipoles : mapping
+        Candidate label to a length-3 dipole vector, any unit as long as
+        all share it. Labels are opaque.
+    reference : array_like
+        The external reference dipole, length 3, same unit.
+    variant : str
+        ``'gdm'``  D_n = ||mu_n - mu_ref||;
+        ``'vgdm'`` D_n = |mu_n . mu_hat_ref - ||mu_ref|||, the 2023
+        projection form, which measures only the component along the
+        reference direction.
+    min_margin : float, optional
+        When given, a winner that beats the runner-up by less than this
+        margin is refused -- the distances are inside their own noise.
+        ``None`` keeps the original protocol's plain argmin.
+
+    Returns
+    -------
+    DipoleChoice
+        ``winner`` is None when nothing could be decided; the distances
+        computed so far and an evidence trail are always present.
+    """
+    if variant not in ('gdm', 'vgdm'):
+        raise ValueError(f'unknown variant {variant!r}; expected gdm or '
+                         f'vgdm')
+    ref = np.asarray(reference, dtype=float).reshape(-1)
+    if ref.shape != (3,):
+        raise ValueError(f'reference must have three components, got '
+                         f'{ref.shape}')
+    if not np.isfinite(ref).all() or not np.any(ref):
+        return DipoleChoice(
+            None, {}, variant,
+            [f'reference dipole {ref.tolist()} is zero or non-finite; '
+             f'the distance to it is not meaningful'])
+    ref_norm = float(np.linalg.norm(ref))
+
+    distances = {}
+    for label, mu in dict(dipoles).items():
+        mu = np.asarray(mu, dtype=float).reshape(-1)
+        if mu.shape != (3,) or not np.isfinite(mu).all():
+            return DipoleChoice(
+                None, distances, variant,
+                [f'{label}: malformed dipole {mu.tolist()}; refusing the '
+                 f'whole selection rather than sorting a NaN'])
+        if variant == 'gdm':
+            distances[label] = float(np.linalg.norm(mu - ref))
+        else:
+            distances[label] = abs(float(mu @ (ref / ref_norm))
+                                   - ref_norm)
+    if not distances:
+        return DipoleChoice(None, {}, variant,
+                            ['no candidate dipoles supplied'])
+
+    order = sorted(distances, key=distances.get)
+    winner = order[0]
+    evidence = [f'{label}: D = {distances[label]:.6g}' for label in order]
+    if (min_margin is not None and len(order) > 1
+            and distances[order[1]] - distances[winner] < min_margin):
+        margin = distances[order[1]] - distances[winner]
+        evidence.append(
+            f'margin {margin:.6g} between {winner} and {order[1]} is '
+            f'below {min_margin:g}; refusing to choose')
+        return DipoleChoice(None, distances, variant, evidence)
+    evidence.append(f'winner {winner} with D = {distances[winner]:.6g}')
+    return DipoleChoice(winner, distances, variant, evidence)
