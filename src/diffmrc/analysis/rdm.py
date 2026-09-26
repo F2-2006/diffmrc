@@ -10,13 +10,21 @@ Conventions
 -----------
 
 The two-particle density matrix is assumed to be **spin-summed**, the
-convention of PySCF's ``fcisolver.make_rdm2`` and of this project's kernel:
+convention of PySCF's ``fcisolver.make_rdm2``:
 
     rdm2[p, q, r, s] = sum_{sigma,tau} <p+_sigma q+_tau s_tau r_sigma>
 
 so that the same-orbital element counts both spin orderings,
 
     rdm2[i, i, i, i] = 2 * <n_{i,alpha} n_{i,beta}>.
+
+Note which builder this is *not*: the kernel's ``make_dm123_sf`` follows
+PySCF ``fci.rdm.make_dm123``'s pre-reorder convention,
+``2pdm[p,q,r,s] = <p+ q r+ s>``, whose same-orbital element is instead
+``(n_alpha + n_beta)^2 = diag(dm1) + 2 p2`` (measured to ten decimals on
+this project's builder, 2026-09-27; ``reorder_dm123`` is what would bring
+it to the form this module expects).  Feeding that builder's ``dm2`` here
+with ``spin_summed=True`` would halve a quantity that is not ``2 p2``.
 
 The one-orbital entropy needs the probability of double occupation, which is
 ``<n_a n_b>``, not twice that. Passing the raw element through gives a doubly

@@ -14,8 +14,8 @@ def _determinant_rdms(occ_alpha, occ_beta, ncas, spin_summed=True):
     ----------
     spin_summed : bool
         Store the two-particle diagonal as ``2 * n_a * n_b`` when True,
-        matching PySCF's ``make_rdm2`` and this project's kernel, and as
-        ``n_a * n_b`` when False.
+        matching PySCF's ``make_rdm2`` (the convention this module's
+        input documents), and as ``n_a * n_b`` when False.
     """
     rdm1a = np.diag(np.asarray(occ_alpha, dtype=float))
     rdm1b = np.diag(np.asarray(occ_beta, dtype=float))
