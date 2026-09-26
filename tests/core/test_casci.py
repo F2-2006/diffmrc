@@ -113,12 +113,23 @@ def test_the_blocked_ci_reproduces_the_plain_density_matrix():
 
 
 def _random_symmetric_ints(n=6, seed=5):
-    """A synthetic Hamiltonian's ingredients (no chemistry, pure algebra)."""
+    """A synthetic Hamiltonian's ingredients (no chemistry, pure algebra).
+
+    The two-electron tensor carries the chemist symmetries p<->q, r<->s
+    and (pq)<->(rs), so the CI matrix is exactly Hermitian and the two
+    eigensolver routes (rotations and inverse iteration) target the same
+    operator.  A tensor with only the p<->q symmetry leaves the CI matrix
+    non-symmetric: the decomposition reads one triangle while the
+    inverse-iteration solve reads the full matrix, and the two ground
+    vectors then disagree (measured before this fix).
+    """
     rng = np.random.default_rng(seed)
     h1e = rng.normal(size=(n, n))
     h1e = 0.5 * (h1e + h1e.T)
     eri = rng.normal(size=(n, n, n, n))
     eri = eri + eri.transpose(1, 0, 2, 3)
+    eri = eri + eri.transpose(0, 1, 3, 2)
+    eri = eri + eri.transpose(2, 3, 0, 1)
     return jnp.asarray(h1e), jnp.asarray(eri)
 
 
