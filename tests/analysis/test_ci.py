@@ -134,3 +134,19 @@ def test_the_production_builder_agrees_under_its_measured_convention():
     assert np.allclose(n_a + n_b, diag, atol=1e-10)
     assert np.allclose(p2, [(dm2[i, i, i, i] - diag[i]) / 2.0
                             for i in range(nact)], atol=1e-10)
+
+
+def test_the_pre_reorder_diagonal_on_a_single_determinant():
+    """|alpha beta> on one orbital: the builder's diagonal is 4, not 2.
+
+    The sharpest single point of the convention difference. Under the
+    normal spin-summed convention the value would be 2 p2 = 2; the
+    pre-reorder convention gives (n_a + n_b)^2 = 4. Exact, integer
+    arithmetic -- no tolerance.
+    """
+    pytest.importorskip('jax')
+    from diffmrc.core.nevpt2.rdm import make_dm123_sf
+
+    dm1, dm2, _ = make_dm123_sf(np.array([1.0]), [3], ncas=1, ncore=0)
+    assert float(np.asarray(dm1)[0, 0]) == 2.0
+    assert float(np.asarray(dm2)[0, 0, 0, 0]) == 4.0
