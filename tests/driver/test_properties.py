@@ -82,15 +82,17 @@ def test_translating_a_neutral_molecule_leaves_the_dipole_alone():
 
 
 # --------------------------------------------------------------- jax-gated
-# The chain tests import jax and pyscfad and skip without them, exactly
-# like tests/driver/test_nevpt2.py, so the numpy assembly above keeps
-# running on a bare interpreter.
+# The chain tests import jax and pyscfad and skip without them.  The
+# importorskip lives INSIDE each test (not at module level) so the numpy
+# assembly above still collects and runs on a bare interpreter.
 
-jax = pytest.importorskip('jax')
-jax.config.update('jax_enable_x64', True)
-import jax.numpy as jnp  # noqa: E402
 
-pyscfad = pytest.importorskip('pyscfad')
+def _jax_env():
+    jax = pytest.importorskip('jax')
+    pytest.importorskip('pyscfad')
+    jax.config.update('jax_enable_x64', True)
+    import jax.numpy as jnp
+    return jax, jnp
 
 
 def _h2o_chain(shift=None):
@@ -101,6 +103,7 @@ def _h2o_chain(shift=None):
     zero and prove nothing (the lesson this project already learned on
     the HVP test).
     """
+    import jax.numpy as jnp
     from pyscfad import gto, scf
 
     from diffmrc.core.nevpt2.impl import cas_dets_for2
@@ -151,6 +154,7 @@ def test_the_chained_dipole_is_invariant_under_a_translation():
     RDM -- with real integrals, where the overlap matrix makes the
     electronic shift non-trivial.
     """
+    _, jnp = _jax_env()
     shift = np.array([0.31, -0.17, 0.42])
     out = []
     for s in (shift, -shift):
@@ -169,6 +173,7 @@ def test_the_theta_derivative_of_the_dipole_matches_its_own_difference():
     while still exercising the canonicalization and the CI inside the
     differentiated path.
     """
+    jax, jnp = _jax_env()
     ref, ncore, nact, nele, nmo, pairs, dets = _h2o_chain()
     mu = _mu_fn(ref, ncore, nact, nele, nmo, pairs, dets)
     th0 = jnp.zeros(len(pairs))
