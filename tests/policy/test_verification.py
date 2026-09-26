@@ -186,3 +186,47 @@ def test_correlation_shift_flags_the_large_shift_only():
     small = correlation_shift(0.2, 0.9, threshold=1.1)
     assert small.gap == pytest.approx(0.7)
     assert small.reliable
+
+
+from diffmrc.policy.rules import Candidate  # noqa: E402
+from diffmrc.policy.verification import (  # noqa: E402
+    ConsistencyReport,
+    GapReport,
+    convergence_gap,
+    state_consistency,
+)
+
+
+def test_gap_flags_a_far_from_stationary_calculation():
+    r = convergence_gap(-0.970, -1.000, threshold=0.020)
+    assert isinstance(r, GapReport)
+    assert r.gap == pytest.approx(0.030)
+    assert not r.converged
+    r2 = convergence_gap(-0.998, -1.000, threshold=0.020)
+    assert r2.converged
+
+
+def test_gap_threshold_is_keyword_required():
+    with pytest.raises(TypeError):
+        convergence_gap(-1.0, -1.0)
+
+
+def test_identical_selections_are_consistent():
+    r = state_consistency({'singlet': Candidate(active=[1, 2, 3]),
+                           'triplet': [3, 1, 2]})
+    assert isinstance(r, ConsistencyReport)
+    assert r.consistent
+    assert r.symmetric_difference == []
+
+
+def test_a_different_space_is_reported_for_review():
+    r = state_consistency({'a': [0, 1, 2], 'b': [0, 1, 3]})
+    assert not r.consistent
+    assert r.symmetric_difference == [2, 3]
+    assert any('b' in line for line in r.evidence)
+
+
+def test_a_single_state_has_nothing_to_compare():
+    r = state_consistency({'only': [0, 1]})
+    assert r.consistent
+    assert r.evidence

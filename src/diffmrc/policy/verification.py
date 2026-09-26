@@ -31,7 +31,8 @@ from ..analysis.plateau import detect_plateaus
 __all__ = ['Verdict', 'VerificationResult', 'recombine_entropies',
            'verify_candidate', 'OVERLAP_MIN_SIGMA', 'NEVPT2_SHIFT_MAX_EV',
            'EV_TO_WAVENUMBER', 'OverlapReport', 'active_space_overlap',
-           'ShiftReport', 'correlation_shift']
+           'ShiftReport', 'correlation_shift', 'GapReport',
+           'convergence_gap', 'ConsistencyReport', 'state_consistency']
 
 
 class Verdict(Enum):
@@ -282,3 +283,91 @@ def correlation_shift(delta_casscf, delta_nevpt2, *, threshold):
     ]
     return ShiftReport(gap=gap, reliable=reliable, threshold=threshold,
                        evidence=evidence)
+
+
+@dataclass
+class GapReport:
+    gap: float = 0.0
+    converged: bool = True
+    threshold: float = 0.0
+    evidence: list = field(default_factory=list)
+
+
+def convergence_gap(e_casci, e_casscf, *, threshold):
+    """E_CASCI - E_CASSCF at the converged orbitals, as a convergence flag.
+
+    Zou et al. used this gap as a *convergence* diagnostic for the orbital
+    optimization; their well-behaved cases sit at 0.5-5.5 mHartree and
+    their poor columns at 20-60 mHartree.  King and Gagliardi measured no
+    correlation between the gap and the final excitation-energy error --
+    consistent, because the gap answers "do the orbitals sit at the
+    stationary point", not "is the result accurate".  The threshold is
+    keyword required and unit-agnostic (the published values above are
+    mHartree, 1e-3 Eh); a near-1.0 overlap sigma_min and a 20-60 mHartree
+    gap can occur together, so this check and ``active_space_overlap``
+    measure different things.
+
+    The gap is reported as computed; a small negative value is round-off
+    (the CASCI energy cannot lie below its own CASSCF relaxation).
+    """
+    gap = float(e_casci) - float(e_casscf)
+    converged = gap <= threshold
+    verdict = ('within; the orbitals are close to the stationary point'
+               if converged else
+               'beyond; the orbitals are far from the CASSCF stationary '
+               'point (a convergence diagnosis, not an accuracy one)')
+    evidence = [
+        f'E_CASCI - E_CASSCF = {gap:.6g} against the threshold '
+        f'{threshold:.6g} ({verdict})'
+    ]
+    return GapReport(gap=gap, converged=converged, threshold=threshold,
+                     evidence=evidence)
+
+
+@dataclass
+class ConsistencyReport:
+    consistent: bool = True
+    labels: list = field(default_factory=list)
+    symmetric_difference: list = field(default_factory=list)
+    evidence: list = field(default_factory=list)
+
+
+def state_consistency(selections):
+    """All states entering one energy difference must share one space.
+
+    A bond energy, an excitation energy or a magnetic coupling is a
+    difference of two energies; if the two states were computed in
+    different active spaces the difference mixes a state change with a
+    space change, and the error can exceed the quantity itself.  Each
+    value may be a ``Candidate`` (its ``active`` field is used) or an
+    iterable of orbital indices.  Inconsistency is reported for human
+    review, never repaired here: silently taking the union changes the
+    meaning of both states.
+    """
+    items = {}
+    for label, value in dict(selections).items():
+        active = getattr(value, 'active', value)
+        items[str(label)] = sorted({int(i) for i in active})
+    labels = list(items)
+    if len(items) < 2:
+        return ConsistencyReport(
+            True, labels, [],
+            [f'{len(items)} state(s) supplied; nothing to compare'])
+    first = labels[0]
+    bad = [label for label in labels[1:] if items[label] != items[first]]
+    if not bad:
+        return ConsistencyReport(
+            True, labels, [],
+            [f'{len(labels)} states share the active space '
+             f'{items[first]}'])
+    diff = sorted(set(items[bad[0]]) ^ set(items[first]))
+    evidence = [
+        f'{bad[0]} and {first} use different active spaces; the '
+        f'symmetric difference is {diff}'
+    ]
+    for other in bad[1:]:
+        evidence.append(f'{other} also differs from {first}')
+    evidence.append(
+        'a difference of energies computed in different spaces mixes a '
+        'state change with a space change; resolve before reporting')
+    return ConsistencyReport(False, labels, diff, evidence)
