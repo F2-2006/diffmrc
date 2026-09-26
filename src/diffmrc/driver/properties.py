@@ -16,7 +16,8 @@ same two functions.
 import numpy as np
 
 __all__ = ['dipole_from_density', 'mo_density',
-           'make_casscf_dipole_theta_fn']
+           'make_casscf_dipole_theta_fn', 'cassci_candidate_dipole',
+           'pick_candidate_by_dipole']
 
 
 def mo_density(ncore, nact, nmo, dm1_act):
@@ -98,3 +99,83 @@ def make_casscf_dipole_theta_fn(C0_, h_, e_, dip_, charges, coords, *,
                 + jnp.einsum('a,ax->x', charges_, coords_))
 
     return mu_theta
+
+
+def cassci_candidate_dipole(C, h1e_ao, eri_ao, dip_ao, charges, coords, *,
+                            active, occupied, n_ele_act):
+    """CASCI dipole of one candidate active space on fixed orbitals.
+
+    The evaluating half of the Kaufold protocol: candidates are compared
+    by the dipole of a CASCI in the candidate space on the reference
+    orbitals (no orbital relaxation, the 2026 sequel's default reading).
+    The candidate orbitals are moved to the front (the occupied part
+    first, the rest of the space after), the integrals are transformed
+    once, and the dipole is the same contraction the differentiable path
+    uses: one convention, one assembly.
+
+    ``active`` is normalized (sorted, deduplicated); the caller's index
+    order does not matter.  ``n_ele_act`` is the active electron count
+    and is checked against the occupied set (the frozen core carries two
+    electrons per orbital).  The 1-RDM comes from ``make_dm123_sf``,
+    whose cost limits this call to the small candidate spaces the
+    protocol compares.
+    """
+    from jax import numpy as jnp
+
+    from ..core.casci import cs_casci
+    from ..core.nevpt2.impl import cas_dets_for2
+    from ..core.nevpt2.rdm import make_dm123_sf
+
+    C = np.asarray(C, dtype=float)
+    active = sorted({int(i) for i in active})
+    occupied = [int(i) for i in occupied]
+    core_out = [i for i in occupied if i not in active]
+    virt = [i for i in range(C.shape[1]) if i not in active
+            and i not in core_out]
+    if 2 * len(core_out) + int(n_ele_act) != 2 * len(occupied):
+        raise ValueError(
+            f'{n_ele_act} active electrons + {len(core_out)} core pairs '
+            f'do not match {len(occupied)} occupied orbitals')
+    order = core_out + active + virt
+    C_r = jnp.asarray(C[:, order])
+    ncore, nact = len(core_out), len(active)
+
+    h = jnp.asarray(h1e_ao)
+    e = jnp.asarray(eri_ao)
+    h_mo = jnp.einsum('ai,ab,bj->ij', C_r, h, C_r)
+    e_mo = jnp.einsum('pi,qj,rk,sl,pqrs->ijkl', C_r, C_r, C_r, C_r, e)
+    energy, ci = cs_casci(h_mo, e_mo, ncore=ncore, nact=nact,
+                          nele_act=n_ele_act, nroots=1, return_ci=True)
+    dets = cas_dets_for2(ncore, nact, n_ele_act)
+    dm1, _, _ = make_dm123_sf(ci, dets, nact, ncore)
+    d_mo = jnp.zeros((C.shape[1], C.shape[1]))
+    d_mo = d_mo.at[:ncore, :ncore].set(2.0 * jnp.eye(ncore))
+    d_mo = d_mo.at[ncore:ncore + nact, ncore:ncore + nact].set(dm1)
+    d_ao = C_r @ d_mo @ C_r.T
+    mu = (-jnp.einsum('pq,xpq->x', d_ao, jnp.asarray(dip_ao))
+          + jnp.einsum('a,ax->x', jnp.asarray(charges, dtype=float),
+                       jnp.asarray(coords, dtype=float)))
+    return mu, energy
+
+
+def pick_candidate_by_dipole(C, h1e_ao, eri_ao, dip_ao, charges, coords,
+                             candidates, *, reference, **rule_kwargs):
+    """Run ``policy.rules.dipole_rule`` on freshly evaluated candidates.
+
+    ``candidates`` maps a label to ``(active, occupied)`` index lists;
+    every candidate is evaluated by ``cassci_candidate_dipole`` and the
+    distances to ``reference`` decide (the Kaufold protocol's selection
+    half; fBlockKit's dm_selection is the value-only reading half of the
+    same protocol).  An evaluation failure propagates: a batch with one
+    broken candidate is not silently reduced.
+    """
+    from ..policy.rules import dipole_rule
+
+    dipoles = {}
+    for label, (active, occupied) in dict(candidates).items():
+        n_ele = 2 * sum(1 for i in occupied if i in set(active))
+        mu, _ = cassci_candidate_dipole(
+            C, h1e_ao, eri_ao, dip_ao, charges, coords, active=active,
+            occupied=occupied, n_ele_act=n_ele)
+        dipoles[label] = np.asarray(mu, dtype=float)
+    return dipole_rule(dipoles, reference, **rule_kwargs)

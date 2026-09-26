@@ -187,3 +187,70 @@ def test_the_theta_derivative_of_the_dipole_matches_its_own_difference():
         fd = (np.asarray(mu(th0 + d * jnp.asarray(e)))
               - np.asarray(mu(th0 - d * jnp.asarray(e)))) / (2 * d)
         assert np.allclose(jac[:, k], fd, atol=1e-9, rtol=1e-5)
+
+
+def test_a_single_orbital_candidate_reproduces_the_numpy_assembly():
+    """CAS(2e,1o) on the bonding orbital equals the manual density.
+
+    The candidate's CI collapses to one determinant, so its density is
+    2 |phi><phi| on the active orbital plus the frozen core; the numpy
+    ``dipole_from_density`` gives the independent number.
+    """
+    from diffmrc.driver.properties import (
+        cassci_candidate_dipole,
+        dipole_from_density,
+    )
+
+    _jax_env()
+    ref, ncore, nact, nele, nmo, pairs, dets = _h2o_chain()
+    occupied = list(range(ncore + 1))
+    mu, e_ci = cassci_candidate_dipole(
+        np.asarray(ref['C']), ref['h'], ref['e'], ref['dip'],
+        ref['chg'], ref['crd'], active=[ncore], occupied=occupied,
+        n_ele_act=2)
+    D = np.zeros((nmo, nmo))
+    for i in occupied:
+        D[i, i] = 2.0
+    mu_ref = dipole_from_density(
+        np.asarray(ref['C']), D, np.asarray(ref['dip']),
+        np.asarray(ref['chg']), np.asarray(ref['crd']))
+    assert np.allclose(np.asarray(mu), mu_ref, atol=1e-9)
+    assert np.isfinite(float(e_ci))
+
+
+def test_the_picker_selects_the_candidate_nearest_the_reference():
+    from diffmrc.driver.properties import (
+        cassci_candidate_dipole,
+        pick_candidate_by_dipole,
+    )
+
+    _jax_env()
+    ref, ncore, nact, nele, nmo, pairs, dets = _h2o_chain()
+    occupied = list(range(ncore + 1))
+    kw = dict(C=np.asarray(ref['C']), h1e_ao=ref['h'], eri_ao=ref['e'],
+              dip_ao=ref['dip'], charges=ref['chg'], coords=ref['crd'])
+    mu_two, _ = cassci_candidate_dipole(
+        **kw, active=[ncore, ncore + 1], occupied=occupied, n_ele_act=2)
+    mu_one, _ = cassci_candidate_dipole(
+        **kw, active=[ncore], occupied=occupied, n_ele_act=2)
+    choice = pick_candidate_by_dipole(
+        **kw, candidates={'one': ([ncore], occupied),
+                          'two': ([ncore, ncore + 1], occupied)},
+        reference=np.asarray(mu_two))
+    if not np.allclose(np.asarray(mu_one), np.asarray(mu_two), atol=1e-8):
+        assert choice.winner == 'two'
+    assert set(choice.distances) == {'one', 'two'}
+
+
+def test_unsorted_active_lists_are_normalized():
+    from diffmrc.driver.properties import cassci_candidate_dipole
+
+    _jax_env()
+    ref, ncore, nact, nele, nmo, pairs, dets = _h2o_chain()
+    occupied = list(range(ncore + 1))
+    kw = dict(C=np.asarray(ref['C']), h1e_ao=ref['h'], eri_ao=ref['e'],
+              dip_ao=ref['dip'], charges=ref['chg'], coords=ref['crd'],
+              occupied=occupied, n_ele_act=2)
+    a, _ = cassci_candidate_dipole(**kw, active=[ncore + 2, ncore])
+    b, _ = cassci_candidate_dipole(**kw, active=[ncore, ncore + 2])
+    assert np.allclose(np.asarray(a), np.asarray(b), atol=1e-12)
