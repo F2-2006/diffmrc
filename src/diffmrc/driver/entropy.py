@@ -61,7 +61,7 @@ def make_casscf_entropy_theta_fn(C0_, h_, e_, dets, *, ncore, nact, nele,
     masks = occupation_masks(dets, ncore=ncore, nact=nact)
 
     def s1_theta(th_):
-        _, _, ci2, _ = _casscf_solution(
+        _, _, ci2, _, _, _ = _casscf_solution(
             C0_, h_, e_, th_, ncore=ncore, nact=nact, nele=nele, nmo=nmo,
             pairs=pairs, ci_solver=ci_solver, eig_solver=eig_solver)
         return entropy_from_ci_masks(ci2, masks)

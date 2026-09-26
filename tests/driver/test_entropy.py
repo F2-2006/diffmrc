@@ -101,9 +101,9 @@ def test_the_entropy_factory_matches_the_direct_extraction():
         C0, h_, e_, dets, ncore=ncore, nact=nact, nele=nele, nmo=nmo,
         pairs=pairs)
     s_factory = np.asarray(fn(th0))
-    _, _, ci2, _ = _casscf_solution(C0, h_, e_, th0, ncore=ncore,
-                                    nact=nact, nele=nele, nmo=nmo,
-                                    pairs=pairs)
+    _, _, ci2, _, _, _ = _casscf_solution(C0, h_, e_, th0, ncore=ncore,
+                                          nact=nact, nele=nele, nmo=nmo,
+                                          pairs=pairs)
     s_direct = entropy_from_ci(np.asarray(ci2), dets, ncore=ncore,
                                nact=nact)
     assert np.allclose(s_factory, s_direct, atol=1e-12)
