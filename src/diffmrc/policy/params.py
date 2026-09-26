@@ -123,6 +123,11 @@ _PARAM_LIST = [
           'smallest acceptable ratio between the weakest kept and the '
           'strongest dropped candidate in a weight ranking',
           'policy', unit='ratio', lo=1.0, hi=100.0),
+    Param('overlap_min_sigma', 1.1e-6,
+          'smallest active-space overlap singular value that still counts '
+          'as safe (King & Gagliardi 2021, following Sayfutyarova; '
+          'significant only at the extreme low end)',
+          'policy', unit='dimensionless', lo=0.0, hi=1.0),
 ]
 
 PARAMS = {p.key: p for p in _PARAM_LIST}

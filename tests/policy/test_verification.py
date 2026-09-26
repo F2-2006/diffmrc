@@ -135,3 +135,54 @@ def test_the_plateau_settings_are_forwarded():
     loose = verify_candidate(s1, candidate=list(range(5)),
                              plateau_values=5, threshold_step=0.01)
     assert len(loose.plateau_heights) >= len(strict.plateau_heights)
+
+
+from diffmrc.policy.verification import (  # noqa: E402
+    OVERLAP_MIN_SIGMA,
+    active_space_overlap,
+    correlation_shift,
+)
+
+
+def test_identical_spaces_have_unit_overlap():
+    rng = np.random.default_rng(5)
+    C = np.linalg.qr(rng.normal(size=(6, 3)))[0]
+    r = active_space_overlap(C, C, np.eye(6))
+    assert r.sigma_min == pytest.approx(1.0, abs=1e-12)
+    assert not r.vanished
+
+
+def test_a_rotated_out_orbital_drives_sigma_min_to_zero():
+    """One active column replaced by a vector orthogonal to the space.
+
+    This is the failure the check exists for: the candidate space
+    described an orbital the converged solution does not occupy.  The
+    replacement must be orthogonal to the whole span -- a merely
+    different random vector still overlaps it and would not vanish.
+    """
+    rng = np.random.default_rng(6)
+    Q = np.linalg.qr(rng.normal(size=(6, 6)))[0]
+    C = Q[:, :3]
+    C2 = C.copy()
+    C2[:, 2] = Q[:, 3]
+    r = active_space_overlap(C, C2, np.eye(6))
+    assert r.vanished
+    assert r.sigma_min < OVERLAP_MIN_SIGMA
+    assert r.evidence
+
+
+def test_overlap_rejects_mismatched_shapes():
+    C = np.eye(4)[:, :2]
+    with pytest.raises(ValueError):
+        active_space_overlap(C, np.eye(4)[:, 1:3], np.eye(3))
+    with pytest.raises(ValueError):
+        active_space_overlap(C, np.eye(4)[:, :2], np.eye(4)[:, :3])
+
+
+def test_correlation_shift_flags_the_large_shift_only():
+    big = correlation_shift(0.2, 1.5, threshold=1.1)
+    assert big.gap == pytest.approx(1.3)
+    assert not big.reliable
+    small = correlation_shift(0.2, 0.9, threshold=1.1)
+    assert small.gap == pytest.approx(0.7)
+    assert small.reliable

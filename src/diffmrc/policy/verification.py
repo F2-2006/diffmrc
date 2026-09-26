@@ -29,7 +29,9 @@ from ..analysis.diagnostics import (
 from ..analysis.plateau import detect_plateaus
 
 __all__ = ['Verdict', 'VerificationResult', 'recombine_entropies',
-           'verify_candidate']
+           'verify_candidate', 'OVERLAP_MIN_SIGMA', 'NEVPT2_SHIFT_MAX_EV',
+           'EV_TO_WAVENUMBER', 'OverlapReport', 'active_space_overlap',
+           'ShiftReport', 'correlation_shift']
 
 
 class Verdict(Enum):
@@ -174,3 +176,109 @@ def verify_candidate(s1, candidate, plateau_values=10, threshold_step=0.01):
             f'orbitals'
         ]
     return result
+
+
+OVERLAP_MIN_SIGMA = 1.1e-6
+"""Smallest active-space overlap singular value that still counts as safe.
+
+Sayfutyarova and coworkers proposed the smallest singular value of the
+overlap between the initial and the final active spaces as an
+orbital-rotation diagnostic; King and Gagliardi measured it over 1120
+calculations and report that this threshold separates a ~6% subset whose
+mean error is higher by 0.08 eV -- significant, but only at the extreme
+low end.  The check flags *vanished* orbitals, it does not rank quality.
+"""
+
+NEVPT2_SHIFT_MAX_EV = 1.1
+"""Bao and Truhlar's suggested bound on the correlation shift, in eV.
+
+King and Gagliardi retested it as a weak classifier: the flagged ~7% of
+calculations carry a mean error higher by 0.34 eV.  The eV value is
+evidential; the check itself is unit-agnostic and takes its threshold.
+"""
+
+# 1 eV expressed in wavenumbers, derived from CODATA SI constants:
+# E = h c nu  =>  nu [cm^-1] = e [C] / (h [J s] * c [m/s]) / 100.
+EV_TO_WAVENUMBER = (1.602176634e-19 / (6.62607015e-34 * 299792458.0)
+                    / 100.0)
+
+
+@dataclass
+class OverlapReport:
+    singular_values: np.ndarray = field(default_factory=lambda: np.array([]))
+    sigma_min: float = 0.0
+    vanished: bool = False
+    evidence: list = field(default_factory=list)
+
+
+def active_space_overlap(C_initial, C_final, S, threshold=OVERLAP_MIN_SIGMA):
+    """Singular values of the initial-to-final active-space overlap.
+
+    ``C_initial`` and ``C_final`` are the active-space coefficient blocks
+    (nao x nact) before and after the orbital optimization, ``S`` the
+    atomic-orbital overlap.  ``S_change = C_final^T S C_initial``; a
+    singular value near zero means an orbital was rotated out completely
+    -- the candidate described a space the converged solution does not
+    occupy.  This is the one check in this module that looks at the
+    space's own geometry rather than at the entropy spectrum.
+    """
+    C0 = np.asarray(C_initial, dtype=float)
+    C1 = np.asarray(C_final, dtype=float)
+    S = np.asarray(S, dtype=float)
+    if C0.ndim != 2 or C1.ndim != 2 or C0.shape != C1.shape:
+        raise ValueError(
+            f'active blocks must share one shape, got {C0.shape} and '
+            f'{C1.shape}')
+    if S.shape != (C0.shape[0], C0.shape[0]):
+        raise ValueError(
+            f'S shape {S.shape} does not match {C0.shape[0]} atomic '
+            f'orbitals')
+    svals = np.linalg.svd(C1.T @ S @ C0, compute_uv=False)
+    sigma_min = float(svals[-1])
+    vanished = sigma_min < threshold
+    if vanished:
+        note = ('; an orbital was rotated out during the optimization'
+                if not np.isclose(sigma_min, 0.0)
+                else '; an orbital is exactly orthogonal to the initial '
+                     'space')
+    else:
+        note = ''
+    evidence = [
+        f'active-space overlap sigma_min = {sigma_min:.3e} '
+        f'({"below" if vanished else "above"} the {threshold:.1e} '
+        f'threshold{note})'
+    ]
+    return OverlapReport(singular_values=svals, sigma_min=sigma_min,
+                         vanished=vanished, evidence=evidence)
+
+
+@dataclass
+class ShiftReport:
+    gap: float = 0.0
+    reliable: bool = True
+    threshold: float = 0.0
+    evidence: list = field(default_factory=list)
+
+
+def correlation_shift(delta_casscf, delta_nevpt2, *, threshold):
+    """|dE_NEVPT2 - dE_CASSCF| for a differential property, and its flag.
+
+    The property differences are at whatever level the caller reports --
+    a bond energy, an excitation energy -- and the threshold is keyword
+    required in the *same unit*: the function refuses to guess it, since
+    the published 1.1 eV value silently means 8872 cm^-1 when the
+    property is a wavenumber (``NEVPT2_SHIFT_MAX_EV`` and
+    ``EV_TO_WAVENUMBER`` are provided for that conversion).  Exceeding
+    the threshold is a warning, not a verdict: King and Gagliardi's
+    measurement makes it a weak classifier, not a filter.
+    """
+    gap = abs(float(delta_nevpt2) - float(delta_casscf))
+    reliable = gap <= threshold
+    evidence = [
+        f'correlation shift |dE_NEVPT2 - dE_CASSCF| = {gap:.4g} against '
+        f'the threshold {threshold:.4g} '
+        f'({"within" if reliable else "beyond"}; beyond the threshold the '
+        f'flagged results carry a higher mean error but are not excluded)'
+    ]
+    return ShiftReport(gap=gap, reliable=reliable, threshold=threshold,
+                       evidence=evidence)
