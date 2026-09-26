@@ -110,3 +110,76 @@ def test_the_blocked_ci_reproduces_the_plain_density_matrix():
     dm_u, _, _ = make_dm123_sf(jnp.asarray(ci_u).reshape(-1), dets, 2, 4)
     dm_b, _, _ = make_dm123_sf(jnp.asarray(ci_b).reshape(-1), dets, 2, 4)
     assert float(np.abs(np.asarray(dm_b) - np.asarray(dm_u)).max()) < 1e-8
+
+
+def _random_symmetric_ints(n=6, seed=5):
+    """A synthetic Hamiltonian's ingredients (no chemistry, pure algebra)."""
+    rng = np.random.default_rng(seed)
+    h1e = rng.normal(size=(n, n))
+    h1e = 0.5 * (h1e + h1e.T)
+    eri = rng.normal(size=(n, n, n, n))
+    eri = eri + eri.transpose(1, 0, 2, 3)
+    return jnp.asarray(h1e), jnp.asarray(eri)
+
+
+def test_the_casci_and_cas_dets_orderings_agree():
+    """The two determinant constructions must be the same list, in order.
+
+    ``cs_casci`` builds its Slater basis with ``combinations`` over spin
+    orbitals after the core block; the analysis-layer consumers read CI
+    vectors against ``cas_dets_for2``.  If the two lists ever diverge,
+    every per-state number is silently permuted, so the ordering is
+    pinned here instead of assumed.
+    """
+    from itertools import combinations
+
+    from diffmrc.core.nevpt2.impl import cas_dets_for2
+
+    ncore, nact, nele = 0, 3, 2
+    ref = [sum(1 << x for x in (tuple(range(2 * ncore)) + c))
+           for c in combinations(range(2 * ncore,
+                                     2 * (ncore + nact)), nele)]
+    assert list(cas_dets_for2(ncore, nact, nele)) == ref
+
+
+def test_state_average_vectors_are_orthonormal_and_match_the_single_root():
+    from diffmrc.core.casci import cs_casci
+
+    h1e, eri = _random_symmetric_ints()
+    E, V = cs_casci(h1e, eri, ncore=0, nact=3, nele_act=2, nroots=2,
+                    return_ci=True)
+    V = np.asarray(V)
+    assert V.ndim == 2 and V.shape[1] == 2
+    assert np.allclose(V.T @ V, np.eye(2), atol=1e-10)
+    # The ground vector of the state-averaged call agrees with the
+    # single-root path (inverse iteration) up to its own residual.
+    _, v1 = cs_casci(h1e, eri, ncore=0, nact=3, nele_act=2, nroots=1,
+                     return_ci=True)
+    overlap = abs(float(np.dot(np.asarray(v1), V[:, 0])))
+    assert abs(overlap - 1.0) < 1e-6
+
+
+def test_state_average_energy_is_bit_identical_with_and_without_vectors():
+    from diffmrc.core.casci import cs_casci
+
+    h1e, eri = _random_symmetric_ints(seed=7)
+    E_pairs, _ = cs_casci(h1e, eri, ncore=0, nact=3, nele_act=2, nroots=2,
+                          return_ci=True)
+    E_plain = cs_casci(h1e, eri, ncore=0, nact=3, nele_act=2, nroots=2)
+    assert np.asarray(E_pairs) == np.asarray(E_plain)
+
+
+def test_per_state_entropies_from_the_state_average_vectors():
+    from diffmrc.analysis.ci import entropy_from_ci
+    from diffmrc.core.casci import cs_casci
+    from diffmrc.core.nevpt2.impl import cas_dets_for2
+
+    h1e, eri = _random_symmetric_ints(seed=11)
+    _, V = cs_casci(h1e, eri, ncore=0, nact=3, nele_act=2, nroots=2,
+                    return_ci=True)
+    dets = cas_dets_for2(0, 3, 2)
+    for k in range(2):
+        s_k = entropy_from_ci(np.asarray(V[:, k]), dets, ncore=0, nact=3)
+        assert np.all(np.isfinite(s_k))
+        assert np.all(s_k >= -1e-12)
+        assert np.all(s_k <= np.log(4) + 1e-12)

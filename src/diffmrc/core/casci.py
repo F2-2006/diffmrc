@@ -148,7 +148,15 @@ def cs_casci(h1e_mo, eri_mo, ncore=0, nact=2, nele_act=2, nroots=1, return_ci=Fa
             return lam, v
         eigs = jnp.linalg.eigvalsh(H)
         if nroots > 1:
-            return jnp.mean(eigs[:nroots]), None  # state average; no CI vector
+            # State-averaged callers additionally need the per-state CI
+            # vectors (SA perturbation densities, per-state entropies).
+            # The energy average is taken from the eigvalsh spectrum
+            # exactly as before; the vectors come from the degeneracy-safe
+            # decomposition (first-order safe; analysis use, not for
+            # second derivatives).  Additive: the previous return value
+            # was None and no caller consumed it.
+            _, vecs = eigh_safe(H)
+            return jnp.mean(eigs[:nroots]), vecs[:, :nroots]
         # The ground-state eigenvector is obtained by inverse iteration with a
         # shift, because the vjp of jnp.linalg.eigh is NaN at degenerate
         # eigenvectors, and the CI matrix has a three-fold degenerate triplet.
