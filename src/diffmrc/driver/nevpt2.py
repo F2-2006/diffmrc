@@ -58,16 +58,18 @@ def _spin_links(nact, nele):
     return fmt(la), fmt(lb)
 
 
-def _components_from(C0_, h_, e_, enuc, th_, *, ncore, nact, nele, nmo,
-                     pairs, dets, links_a, links_b, ci_solver='plain',
-                     eig_solver='default', want_e2=True):
-    """``(E_casscf, E2)`` from reference quantities already in hand.
+def _casscf_solution(C0_, h_, e_, th_, *, ncore, nact, nele, nmo, pairs,
+                     ci_solver='plain', eig_solver='default'):
+    """The rotated, canonicalized CASSCF state at theta.
 
-    Contains no SCF call and no Mole access -- theta and the precomputed
-    arrays only. Both the joint function (which computes the reference
-    from the Mole first) and the frozen-geometry theta function (which
-    computes it once at construction) funnel through here, so the two
-    cannot drift apart.
+    Returns ``(E0c, C_can, ci2, eps, h1c, eric)``: the canonical-basis
+    energy, orbitals and CI vector, the orbital energies, and the
+    canonical-basis integrals (which the energy path reuses for the
+    correlation contraction). Extracted from ``_components_from`` so that
+    the energy path and the dipole path (``driver.properties``) evaluate
+    the same object with the same conventions; two copies of this
+    sequence would be free to drift apart, and a drift here is invisible
+    in every downstream number.
 
     ``ci_solver`` selects the CI eigensolver, following the instruction in
     ``core.casci.cs_casci_blocked``'s own docstring: the plain solver for
@@ -80,8 +82,7 @@ def _components_from(C0_, h_, e_, enuc, th_, *, ncore, nact, nele, nmo,
     from jax import numpy as jnp
 
     from ..core.casci import cs_casci_blocked
-    from ..core.nevpt2.impl import (_casci_ci, canonicalize_jax,
-                                    nevpt2_e2_full2)
+    from ..core.nevpt2.impl import _casci_ci, canonicalize_jax
     from ..core.rotation import block_rotation
 
     nm = ncore + nact
@@ -131,6 +132,27 @@ def _components_from(C0_, h_, e_, enuc, th_, *, ncore, nact, nele, nmo,
                                      eig_solver=pln_eig)
     h1c, eric = mo_ints(C_can)
     E0c, ci2 = ci_solve(h1c, eric)
+    return E0c, C_can, ci2, eps, h1c, eric
+
+
+def _components_from(C0_, h_, e_, enuc, th_, *, ncore, nact, nele, nmo,
+                     pairs, dets, links_a, links_b, ci_solver='plain',
+                     eig_solver='default', want_e2=True):
+    """``(E_casscf, E2)`` from reference quantities already in hand.
+
+    Contains no SCF call and no Mole access -- theta and the precomputed
+    arrays only. Both the joint function (which computes the reference
+    from the Mole first) and the frozen-geometry theta function (which
+    computes it once at construction) funnel through here, so the two
+    cannot drift apart.
+    """
+    from jax import numpy as jnp
+
+    from ..core.nevpt2.impl import nevpt2_e2_full2
+
+    E0c, _C_can, ci2, eps, h1c, eric = _casscf_solution(
+        C0_, h_, e_, th_, ncore=ncore, nact=nact, nele=nele, nmo=nmo,
+        pairs=pairs, ci_solver=ci_solver, eig_solver=eig_solver)
     if not want_e2:
         # The caller multiplies e2 by zero; skipping the expensive
         # contraction is exact (0 * x = 0 in IEEE, and the VJP of a term
