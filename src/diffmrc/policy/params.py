@@ -128,6 +128,10 @@ _PARAM_LIST = [
           'as safe (King & Gagliardi 2021, following Sayfutyarova; '
           'significant only at the extreme low end)',
           'policy', unit='dimensionless', lo=0.0, hi=1.0),
+    Param('noon_threshold', 0.05,
+          'half-width of the ASS1ST quasi-natural-orbital band [T, 2 - T] '
+          '(Khedkar & Roemelt; their examples span T = 0.02 to 0.05)',
+          'policy', unit='occupation', lo=0.0, hi=1.0),
 ]
 
 PARAMS = {p.key: p for p in _PARAM_LIST}

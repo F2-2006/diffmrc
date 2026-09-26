@@ -67,7 +67,7 @@ from .occupation import select_valence, split_by_occupation
 __all__ = ['SHELL_RULES', 'Candidate', 'SelectionPlan',
            'candidate_from_elements', 'plan_from_elements',
            'dominant_shell', 'molecular_end_candidate',
-           'DipoleChoice', 'dipole_rule']
+           'DipoleChoice', 'dipole_rule', 'NoonDecision', 'noon_selection']
 
 # The shells the molecular-end rule inspects, in the order they are
 # offered to the labelling. The order does not affect the result -- the
@@ -565,3 +565,90 @@ def dipole_rule(dipoles, reference, variant='gdm', min_margin=None):
         return DipoleChoice(None, distances, variant, evidence)
     evidence.append(f'winner {winner} with D = {distances[winner]:.6g}')
     return DipoleChoice(winner, distances, variant, evidence)
+
+
+@dataclass
+class NoonDecision:
+    """The band classification and how close each call was."""
+
+    classification: dict = field(default_factory=dict)  # label -> verdict
+    margins: dict = field(default_factory=dict)
+    closest: tuple = ()
+    evidence: list = field(default_factory=list)
+
+
+def noon_selection(internal, external, threshold=0.05):
+    """Classify quasi-natural orbitals by the ASS1ST band T <= n <= 2 - T.
+
+    Khedkar and Roemelt select from the densities of the first-order
+    perturbed wavefunction rather than the reference density: the
+    internal and external blocks are diagonalized separately and an
+    orbital whose occupation sits inside the symmetric band joins the
+    active space, giving one criterion that both grows and shrinks
+    (JCTC 2019; the 2020 extension adds the state-averaged variant and an
+    approximate denominator that drops the fourth-order density).  The
+    authors' thresholds run 0.02 to 0.05 on the low side and 1.95 to 1.97
+    on the high side -- the two edges need not be symmetric, so a caller
+    with an asymmetric choice classifies by the same rule and passes its
+    own margins; this function implements the default symmetric band.
+
+    What is differentiable here is not the decision -- a threshold
+    comparison has zero derivative almost everywhere -- but the margins:
+    ``min(n - T, (2 - T) - n)`` says how close an orbital sits to
+    flipping, and it carries orbital-parameter derivatives when the
+    occupations come from the differentiable chain.  A near-degenerate
+    density block must route around eigh's NaN derivative, as elsewhere
+    in this project.
+
+    Parameters
+    ----------
+    internal, external : mapping
+        Quasi-natural-orbital label to occupation number, one mapping per
+        block. Labels are opaque and must be unique across the blocks
+        (a caller with colliding integer labels should prefix them) --
+        a silent overwrite would drop an orbital from the decision.
+    threshold : float
+        Half-width of the two excluded edges; the band is [T, 2 - T].
+
+    Returns
+    -------
+    NoonDecision
+        Per-label classification ('active' inside the band, 'below' or
+        'above' outside) and signed margins (non-negative inside), with
+        the closest call in ``closest``. An empty input returns an empty
+        decision with evidence, not an exception.
+    """
+    if not 0.0 < threshold < 1.0:
+        raise ValueError(f'threshold {threshold} outside (0, 1); the band '
+                         f'[{threshold}, {2 - threshold}] degenerates')
+    occupations = {}
+    for mapping in (internal, external):
+        for label, n in dict(mapping).items():
+            if label in occupations:
+                raise ValueError(
+                    f'label {label!r} appears in both blocks; labels must '
+                    f'be unique or an orbital is silently dropped')
+            occupations[label] = float(n)
+
+    if not occupations:
+        return NoonDecision({}, {}, (),
+                            ['no quasi-natural occupations supplied'])
+
+    classification, margins = {}, {}
+    for label, n in occupations.items():
+        margin_lo = n - threshold
+        margin_hi = (2.0 - threshold) - n
+        margins[label] = float(min(margin_lo, margin_hi))
+        if margins[label] >= 0.0:
+            classification[label] = 'active'
+        else:
+            classification[label] = ('below' if margin_lo < margin_hi
+                                     else 'above')
+    closest = min(margins.items(), key=lambda item: abs(item[1]))
+    n_active = sum(1 for v in classification.values() if v == 'active')
+    evidence = [
+        f'{n_active} of {len(classification)} quasi-natural orbitals '
+        f'inside the band [{threshold:g}, {2 - threshold:g}]',
+        f'closest call: {closest[0]} with margin {closest[1]:+.4f}',
+    ]
+    return NoonDecision(classification, margins, closest, evidence)

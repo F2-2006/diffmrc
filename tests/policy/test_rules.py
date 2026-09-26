@@ -478,3 +478,43 @@ def test_an_unknown_variant_is_a_programming_error():
     with pytest.raises(ValueError):
         dipole_rule({'a': np.zeros(3)}, np.array([1.0, 0.0, 0.0]),
                     variant='edm')
+
+
+from diffmrc.policy.rules import NoonDecision, noon_selection  # noqa: E402
+
+
+def test_the_band_classifies_by_its_symmetric_edges():
+    internal = {'i1': 1.99, 'i2': 1.90, 'i3': 1.95}
+    external = {'e1': 0.04, 'e2': 0.10}
+    d = noon_selection(internal, external, threshold=0.05)
+    assert isinstance(d, NoonDecision)
+    assert d.classification == {'i1': 'above', 'i2': 'active',
+                                'i3': 'active', 'e1': 'below',
+                                'e2': 'active'}
+
+
+def test_the_closest_call_is_reported_with_its_signed_margin():
+    d = noon_selection({'a': 1.946}, {}, threshold=0.05)
+    assert d.classification['a'] == 'active'
+    assert d.closest[0] == 'a'
+    assert d.closest[1] == pytest.approx(0.004)
+    d2 = noon_selection({'a': 1.99}, {}, threshold=0.05)
+    assert d2.classification['a'] == 'above'
+    assert d2.closest[1] == pytest.approx(-0.04)
+
+
+def test_an_empty_input_is_reported_not_crashed():
+    d = noon_selection({}, {}, threshold=0.05)
+    assert d.classification == {}
+    assert d.evidence
+
+
+def test_labels_must_be_unique_across_the_two_blocks():
+    with pytest.raises(ValueError):
+        noon_selection({'x': 1.5}, {'x': 0.1}, threshold=0.05)
+
+
+def test_a_degenerate_threshold_is_a_programming_error():
+    for t in (0.0, 1.0, -0.1):
+        with pytest.raises(ValueError):
+            noon_selection({'a': 1.0}, {}, threshold=t)
