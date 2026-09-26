@@ -73,14 +73,50 @@ def test_the_active_window_must_fit_a_64_bit_word():
         occupation_masks(dets, ncore=0, nact=32)
 
 
-def test_the_two_routes_agree_on_a_real_ci_vector():
-    """The bit-count against the kernel's RDM builder, same vector.
+def test_the_bit_count_agrees_with_explicit_second_quantization():
+    """n_a, n_b and p2 against rdm1_spin / rdm2_spin, same vector.
 
-    Confined to the S_z = 0 sector so that n_alpha == n_beta per orbital,
-    which is what lets the spin-summed RDM diagonal be split in two.
+    The spin-orbital builders apply the operators to the determinants
+    directly, so they are an independent implementation of the convention
+    the masks encode; a random vector suffices and no spin symmetry is
+    used anywhere.
     """
     pytest.importorskip('jax')
-    from diffmrc.analysis.entropy import single_orbital_entropy
+    from diffmrc.core.nevpt2.impl import cas_dets_for2
+    from diffmrc.core.nevpt2.rdm import rdm1_spin, rdm2_spin
+
+    ncore, nact, nele = 0, 2, 2
+    dets = cas_dets_for2(ncore, nact, nele)
+    rng = np.random.default_rng(5)
+    c = rng.normal(size=len(dets))
+    c = c / np.linalg.norm(c)
+
+    n_a, n_b, p2 = occupations_from_ci(c, dets, ncore=ncore, nact=nact)
+    g1 = np.asarray(rdm1_spin(c, dets, ncas=nact))
+    g2 = np.asarray(rdm2_spin(c, dets, ncas=nact))
+    assert np.allclose(n_a, np.diag(g1)[0::2], atol=1e-12)
+    assert np.allclose(n_b, np.diag(g1)[1::2], atol=1e-12)
+    # Gamma[p,q,r,s] = <a+_p a+_q a_s a_r>; the double occupancy is
+    # <n_a n_b> = <a+_alpha a+_beta a_beta a_alpha> at [alpha, beta,
+    # alpha, beta].
+    assert np.allclose(p2, [g2[2 * i, 2 * i + 1, 2 * i, 2 * i + 1]
+                            for i in range(nact)], atol=1e-12)
+
+
+def test_the_production_builder_agrees_under_its_measured_convention():
+    """The bit-count against make_dm123_sf at CAS(4,4), same vector.
+
+    That builder follows PySCF ``fci.rdm.make_dm123``'s *pre-reorder*
+    convention, 2pdm[p,q,r,s] = <p+ q r+ s>, whose same-orbital element
+    is (n_a + n_b)^2 -- measured here as
+    dm2[i,i,i,i] = diag(dm1)[i] + 2 p2[i] (a single |alpha beta>
+    determinant gives 4, not the 2 of the reordered/normal convention
+    <p+ q+ s r> that PySCF's fcisolver.make_rdm2 and
+    analysis.rdm.entropy_from_rdms use). Halving *this* builder's
+    diagonal would not give p2, so the conversion is written out rather
+    than assumed.
+    """
+    pytest.importorskip('jax')
     from diffmrc.core.nevpt2.impl import cas_dets_for2
     from diffmrc.core.nevpt2.rdm import make_dm123_sf
 
@@ -88,19 +124,13 @@ def test_the_two_routes_agree_on_a_real_ci_vector():
     dets = cas_dets_for2(ncore, nact, nele)
     rng = np.random.default_rng(11)
     c = rng.normal(size=len(dets))
-    keep = []
-    for d in dets:
-        a = sum(1 for i in range(0, 2 * nact, 2) if (d >> i) & 1)
-        b = sum(1 for i in range(1, 2 * nact, 2) if (d >> i) & 1)
-        keep.append(a == b)
-    c = np.where(keep, c, 0.0)
     c = c / np.linalg.norm(c)
 
-    s_bit = entropy_from_ci(c, dets, ncore=ncore, nact=nact)
+    n_a, n_b, p2 = occupations_from_ci(c, dets, ncore=ncore, nact=nact)
     dm1, dm2, _ = make_dm123_sf(c, dets, nact, ncore)
     dm1 = np.asarray(dm1)
     dm2 = np.asarray(dm2)
-    n_a = np.diag(dm1) / 2.0
-    p2 = np.array([dm2[i, i, i, i] for i in range(nact)]) / 2.0
-    s_rdm = single_orbital_entropy(n_a, n_a, p2)
-    assert np.allclose(s_bit, s_rdm, atol=1e-10)
+    diag = np.diag(dm1)
+    assert np.allclose(n_a + n_b, diag, atol=1e-10)
+    assert np.allclose(p2, [(dm2[i, i, i, i] - diag[i]) / 2.0
+                            for i in range(nact)], atol=1e-10)

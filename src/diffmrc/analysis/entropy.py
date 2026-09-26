@@ -36,7 +36,7 @@ LN4 = float(np.log(4.0))
 MAX_ENTROPY = LN4
 
 
-def single_orbital_entropy(n_a, n_b, p2):
+def single_orbital_entropy(n_a, n_b, p2, xp=None):
     """Compute the single-orbital entropy for a set of orbitals.
 
     Parameters
@@ -45,10 +45,14 @@ def single_orbital_entropy(n_a, n_b, p2):
         Alpha and beta occupation numbers of each orbital. Any shape.
     p2 : array_like
         Probability that each orbital is doubly occupied, same shape.
+    xp : module, optional
+        Array backend; defaults to numpy. The chain passes ``jax.numpy``
+        so that the differentiable path and this module share one
+        formula instead of two copies free to drift apart.
 
     Returns
     -------
-    s1 : numpy.ndarray
+    s1 : ndarray
         Entropy of each orbital, in the range [0, ln 4], of the same shape
         as the inputs.
 
@@ -57,9 +61,11 @@ def single_orbital_entropy(n_a, n_b, p2):
     ValueError
         If the three inputs do not all have the same shape.
     """
-    n_a = np.asarray(n_a, dtype=float)
-    n_b = np.asarray(n_b, dtype=float)
-    p2 = np.asarray(p2, dtype=float)
+    if xp is None:
+        xp = np
+    n_a = xp.asarray(n_a, dtype=float)
+    n_b = xp.asarray(n_b, dtype=float)
+    p2 = xp.asarray(p2, dtype=float)
     if not (n_a.shape == n_b.shape == p2.shape):
         raise ValueError(
             f'shape mismatch: n_a{n_a.shape}, n_b{n_b.shape}, p2{p2.shape}'
@@ -68,24 +74,21 @@ def single_orbital_entropy(n_a, n_b, p2):
     # Stack the four occupation-basis weights on a leading axis. For
     # physical occupations the four entries are already non-negative and
     # sum to one.
-    w = np.empty((4,) + n_a.shape, dtype=float)
-    w[0] = 1.0 - n_a - n_b + p2
-    w[1] = n_a - p2
-    w[2] = n_b - p2
-    w[3] = p2
+    w = xp.stack([1.0 - n_a - n_b + p2, n_a - p2, n_b - p2, p2])
 
     # Round-off can push a weight a few ulps outside [0, 1], and a
     # malformed input can push it far outside. Clipping alone would leave
-    # the weights summing to something other than one, so renormalize:
-    # the result is the entropy of the nearest valid distribution and
-    # stays inside [0, ln 4] by construction.
-    w = np.clip(w, 0.0, 1.0)
+    # the weights summing to something other than one, so renormalize; a
+    # zero-sum vector (only reachable from malformed input) keeps the
+    # long-standing 0.25 fallback, which reads as maximum entropy.
+    w = xp.clip(w, 0.0, 1.0)
     total = w.sum(axis=0)
-    w = np.divide(w, total, out=np.full_like(w, 0.25),
-                  where=total > 0.0)
+    w = w / xp.where(total > 0.0, total, 1.0)
+    w = xp.where(total > 0.0, w, 0.25)
 
     positive = w > 0.0
-    contrib = np.where(positive, w * np.log(np.where(positive, w, 1.0)), 0.0)
+    contrib = xp.where(positive,
+                       w * xp.log(xp.where(positive, w, 1.0)), 0.0)
     s1 = -contrib.sum(axis=0)
     # A tiny negative can survive the sum at the extremes.
-    return np.maximum(s1, 0.0)
+    return xp.maximum(s1, 0.0)
