@@ -150,3 +150,59 @@ def test_the_pre_reorder_diagonal_on_a_single_determinant():
     dm1, dm2, _ = make_dm123_sf(np.array([1.0]), [3], ncas=1, ncore=0)
     assert float(np.asarray(dm1)[0, 0]) == 2.0
     assert float(np.asarray(dm2)[0, 0, 0, 0]) == 4.0
+
+
+from diffmrc.analysis.ci import (  # noqa: E402
+    mutual_information,
+    pair_density,
+    two_orbital_entropy,
+)
+
+
+def test_a_single_determinant_is_a_product_state_everywhere():
+    dets = [_det([0, 1, 4, 5])]
+    c = np.array([1.0])
+    I = mutual_information(c, dets, ncore=1, nact=2)
+    assert I.shape == (2, 2)
+    assert np.allclose(I, 0.0, atol=1e-12)
+    s2 = two_orbital_entropy(c, dets, 0, 1, ncore=1, nact=2)
+    assert s2 == pytest.approx(0.0, abs=1e-12)
+
+
+def test_a_pure_pair_state_carries_2ln2_against_an_inert_one():
+    """(|up-dn 0> + |0 up-dn>)/sqrt(2) on orbitals 0 and 1, orbital 2 inert.
+
+    The (0, 1) pair sits in a pure superposition of two orthogonal
+    patterns with equal weight and is a product with the inert orbital:
+    s2(0, 1) = 0 while s1 = ln 2 each, so I_01 = 2 ln 2, the maximum
+    for a two-orbital singlet.  Orbital 2 is doubly occupied
+    throughout: s1_2 = 0 and I_02 = ln 2 + 0 - ln 2 = 0.
+    """
+    dets = [_det([0, 1, 4, 5]), _det([2, 3, 4, 5])]
+    c = np.array([np.sqrt(0.5), np.sqrt(0.5)])
+    assert two_orbital_entropy(c, dets, 0, 1, ncore=0, nact=3) == \
+        pytest.approx(0.0, abs=1e-12)
+    I = mutual_information(c, dets, ncore=0, nact=3)
+    assert I[0, 1] == pytest.approx(2.0 * np.log(2.0), abs=1e-12)
+    assert I[1, 0] == pytest.approx(2.0 * np.log(2.0), abs=1e-12)
+    assert I[0, 2] == pytest.approx(0.0, abs=1e-12)
+    assert I[1, 2] == pytest.approx(0.0, abs=1e-12)
+
+
+def test_the_pair_density_is_hermitian_positive_and_unit_trace():
+    dets = [_det([0, 1, 4, 5]), _det([2, 3, 4, 5]), _det([0, 2])]
+    c = np.array([0.5, 0.5, np.sqrt(0.5)])
+    rho = pair_density(c, dets, 0, 1, ncore=0, nact=3)
+    assert rho.shape == (16, 16)
+    assert np.allclose(rho, rho.T, atol=1e-12)
+    w = np.linalg.eigvalsh(rho)
+    assert w.min() > -1e-10
+    assert w.sum() == pytest.approx(1.0, abs=1e-10)
+
+
+def test_the_orbital_order_is_enforced():
+    dets = [_det([0, 1])]
+    with pytest.raises(ValueError):
+        pair_density(np.array([1.0]), dets, 1, 0, ncore=0, nact=2)
+    with pytest.raises(ValueError):
+        pair_density(np.array([1.0]), dets, 0, 0, ncore=0, nact=2)

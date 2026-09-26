@@ -21,7 +21,8 @@ import numpy as np
 
 from .entropy import single_orbital_entropy
 
-__all__ = ['occupation_masks', 'occupations_from_ci', 'entropy_from_ci']
+__all__ = ['occupation_masks', 'occupations_from_ci', 'entropy_from_ci',
+           'pair_density', 'two_orbital_entropy', 'mutual_information']
 
 
 def occupation_masks(dets, ncore=0, nact=2):
@@ -80,3 +81,88 @@ def entropy_from_ci(c_ci, dets, ncore=0, nact=2):
     """
     n_a, n_b, p2 = occupations_from_ci(c_ci, dets, ncore=ncore, nact=nact)
     return single_orbital_entropy(n_a, n_b, p2)
+
+
+def pair_density(c_ci, dets, i, j, ncore=0, nact=2):
+    """Two-orbital reduced density of the pair (i, j), shape (16, 16).
+
+    The pair's Fock space has 16 occupation patterns of the four spin
+    orbitals; the reduced state is the partial trace of |psi><psi| over
+    the environment, built without fermionic-operator bookkeeping: each
+    determinant factors into (pair pattern) x (environment), picking up
+    the crossing parity p = (-1)^{number of occupied environment spin
+    orbitals below each occupied pair spin orbital}, and the reduced
+    matrix is the Gram matrix of the environment-indexed amplitudes,
+    rho = V^T V.  Patterns of different electron count decouple
+    automatically (no environment can host both amplitudes).
+
+    The 16x16 basis does not diagonalize itself (two patterns of equal
+    N and S_z can mix), so two-orbital spectroscopies rest on the
+    eigenproblem of rho, not on occupation counting
+    (Stein/Pantazis/Krewald 2019).  The order i < j fixes the bit
+    layout and is enforced.
+    """
+    c = np.asarray(c_ci, dtype=float)
+    dets = list(dets)
+    if c.ndim != 1:
+        raise ValueError(f'c_ci must be one-dimensional, got shape '
+                         f'{c.shape}')
+    if not (0 <= i < j < nact):
+        raise ValueError(f'pair ({i}, {j}) outside the active space of '
+                         f'{nact} orbitals; the order i < j fixes the '
+                         f'bit layout')
+    if c.shape[0] != len(dets):
+        raise ValueError(f'c_ci has {c.shape[0]} coefficients for '
+                         f'{len(dets)} determinants')
+    base = 2 * ncore
+    g = (base + 2 * i, base + 2 * i + 1, base + 2 * j, base + 2 * j + 1)
+    pair_mask = 0
+    for x in g:
+        pair_mask |= 1 << x
+    weight = (1, 2, 4, 8)
+    nd = len(dets)
+    pat = np.zeros(nd, dtype=np.int64)
+    parity = np.zeros(nd, dtype=np.int64)
+    env_key = np.zeros(nd, dtype=np.int64)
+    for idx, d in enumerate(dets):
+        d = int(d)
+        p = 0
+        for t, x in enumerate(g):
+            if (d >> x) & 1:
+                p |= weight[t]
+                lower = (d & ((1 << x) - 1)) & ~pair_mask
+                parity[idx] += bin(lower).count('1')
+        pat[idx] = p
+        env_key[idx] = d & ~pair_mask
+    sign = np.where(parity % 2 == 0, 1.0, -1.0)
+    keys, inv = np.unique(env_key, return_inverse=True)
+    V = np.zeros((keys.size, 16))
+    np.add.at(V, (inv, pat), c * sign)
+    return V.T @ V
+
+
+def two_orbital_entropy(c_ci, dets, i, j, ncore=0, nact=2):
+    """s_ij(2) = -sum_r w_r ln w_r over the 16 eigenvalues of the pair."""
+    rho = pair_density(c_ci, dets, i, j, ncore=ncore, nact=nact)
+    w = np.linalg.eigvalsh(0.5 * (rho + rho.T))
+    w = w[w > 1e-14]
+    return float(-(w * np.log(w)).sum())
+
+
+def mutual_information(c_ci, dets, ncore=0, nact=2):
+    """I_ij = s1_i + s1_j - s_ij(2) for every active orbital pair.
+
+    The diagonal is zero by convention (an orbital carries no mutual
+    information with itself).  I_ij >= 0 up to round-off; no pair-sum
+    rule is assumed.  Cost is O(ndet) per pair in the current
+    Python-level accumulation, which bounds this to the spaces the
+    bitmask route already serves.
+    """
+    s1 = entropy_from_ci(c_ci, dets, ncore=ncore, nact=nact)
+    I = np.zeros((nact, nact))
+    for i in range(nact):
+        for j in range(i + 1, nact):
+            s2 = two_orbital_entropy(c_ci, dets, i, j, ncore=ncore,
+                                     nact=nact)
+            I[i, j] = I[j, i] = float(s1[i] + s1[j] - s2)
+    return I
