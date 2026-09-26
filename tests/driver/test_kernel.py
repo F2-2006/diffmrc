@@ -76,6 +76,18 @@ class _FakeMol:
                 if i != j:
                     self._eri[i, j, i, j] = 0.10
                     self._eri[i, j, j, i] = 0.10
+        # Real two-electron integrals carry the 8-fold symmetry
+        # [pq|rs] = [qp|rs] = [pq|sr] = [rs|pq]. The explicit loop in the
+        # energy test re-spells the tensor into the <pr|qs> convention,
+        # and the two spellings can only describe the same integrals if
+        # the fixture has that symmetry; without it the kernel and the
+        # hand-built reference compare two different Hamiltonians
+        # (measured 0.45 apart, 2026-09-27).
+        t = self._eri
+        t = 0.5 * (t + t.transpose(0, 1, 3, 2))
+        t = 0.5 * (t + t.transpose(1, 0, 2, 3))
+        t = 0.5 * (t + t.transpose(2, 3, 0, 1))
+        self._eri = t
 
     def nao_nr(self):
         return 3
@@ -98,7 +110,13 @@ def test_energy_function_feeds_the_kernel_the_transformed_integrals():
 
     The test transforms the integrals with explicit loops -- a different
     spelling from the implementation's einsums -- so an index-order slip
-    in either shows up as a disagreement.
+    in either shows up as a disagreement.  The re-spelling uses only
+    genuine symmetries of a real two-electron integral tensor,
+    [pq|rs] = [qp|rs] = [pq|sr]; an earlier version also swapped the
+    second and third indices, which is *not* a symmetry -- the two
+    spellings then described different Hamiltonians (measured 0.45
+    apart, 2026-09-27) and the test could only pass against a solver
+    that read the other index convention.
     """
     # The kernel's CASCI imports pyscfad, so the energy path is
     # exercised where pyscfad is installed; the properties asserted here
@@ -121,7 +139,8 @@ def test_energy_function_feeds_the_kernel_the_transformed_integrals():
         for j in range(2):
             for k in range(2):
                 for l in range(2):
-                    e1[i, j, k, l] = mol._eri[i, k, j, l]
+                    e1[i, j, k, l] = mol._eri[j, i, l, k]
+    assert np.allclose(e1, mol._eri[:2, :2, :2, :2], atol=0.0)
     direct = float(cs_casci_blocked(h1, e1, ncore=0, nact=2, nele_act=2)[0])
     assert float(E_theta(np.zeros(npar))) == pytest.approx(direct, abs=1e-12)
 

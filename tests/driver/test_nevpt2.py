@@ -210,7 +210,7 @@ def test_the_hvp_matches_a_finite_difference_of_the_gradient():
     v[2] = -1.0
     v[5] = 1.0                       # symmetric stretch along z
     E_of = lambda m_: fn(m_, theta)
-    hvp = np.asarray(nevpt2_hvp(mol, E_of, v))
+    hvp = np.asarray(nevpt2_hvp(mol, E_of, v)).reshape(-1)
     rows = []
     for d in (1e-2, 3e-3, 1e-3, 3e-4):
         m1 = mol.copy()
