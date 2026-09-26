@@ -255,10 +255,31 @@ required, and where that reference is itself an iterative calculation its
 convergence must be checked at every point — an unconverged reference enters a
 central difference as an intermediate value, not as a stationary point.
 
+An independent reference for the CASSCF-layer nuclear Hessian now exists in the
+project's record: on CO/6-31G, a construction that uses plain PySCF 2.14 and
+none of this package's derivative machinery — analytic CASSCF gradients
+central-differenced in Cartesian coordinates, with the orbitals re-converged at
+every displaced geometry — reproduces the base energy to 1.1e-8 Eh, the relaxed
+bond curvature to 3.1e-5 through the implicit route and to 1.8e-3 through the
+value route at a 3e-3 bohr step, and the relaxed wavenumber to 0.09%. That
+construction also carries its own branch certificate (the displaced energies'
+central difference reproduces the analytic base gradient to 1.0e-5 relative,
+while warm-started solutions off the continuous branch fail that test).
+
 ## Known limitations
 
 *Full diagonalization* in the CI step limits the active-space size. Larger
 spaces require a differentiable iterative eigensolver.
+
+*Degenerate pairs at a stationary point.* The cluster tolerance of the
+eigensolver must sit inside the measured gap between the floating-point noise
+that splits symmetry-degenerate pairs at a rotated stationary point (1e-8 to
+1.2e-5 in the systems measured here) and the physical gaps of the same spectrum
+(1.9e-2 and above). A tolerance below the noise scale exposes both the first
+and the second derivative to a bare inverse gap; one above the physical gaps
+clusters distinct states. The window measured here spans 1e-5 to 1e-2, and the
+rule has no admissible value when a physical gap falls inside the noise band —
+the fallback for that case is the decomposition-free Lanczos kernel.
 
 *Multiple stationary points.* The CASSCF energy is non-convex in the orbital
 parameters; different starting points can reach different stationary points,
