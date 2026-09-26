@@ -68,3 +68,63 @@ def test_the_gradient_matches_a_finite_difference_of_the_numpy_route():
     ad = float(jnp.asarray(g) @ jnp.asarray(v))
     assert np.isfinite(ad)
     assert abs(ad - fd) < 1e-8 * max(1.0, abs(fd))
+
+
+def _h2_chain():
+    from pyscfad import gto, scf
+
+    from diffmrc.core.orblib import orbital_pairs
+
+    mol = gto.Mole()
+    mol.atom = "H 0 0 0; H 0 0 0.74"
+    mol.basis = "sto-3g"
+    mol.build()
+    mf = scf.RHF(mol)
+    mf.kernel()
+    ncore, nact, nele, nmo = 0, 2, 2, mol.nao_nr()
+    pairs = orbital_pairs(ncore, nact, nmo, include_cv=True)
+    C0 = jnp.asarray(mf.mo_coeff)
+    h_ = jnp.asarray(mol.intor('int1e_kin') + mol.intor('int1e_nuc'))
+    e_ = jnp.asarray(mol.intor('int2e', aosym='s1'))
+    dets = cas_dets_for2(ncore, nact, nele)
+    return C0, h_, e_, dets, ncore, nact, nele, nmo, pairs
+
+
+def test_the_entropy_factory_matches_the_direct_extraction():
+    pytest.importorskip("pyscfad")
+    from diffmrc.driver.entropy import make_casscf_entropy_theta_fn
+    from diffmrc.driver.nevpt2 import _casscf_solution
+
+    C0, h_, e_, dets, ncore, nact, nele, nmo, pairs = _h2_chain()
+    th0 = jnp.zeros((len(pairs),))
+    fn = make_casscf_entropy_theta_fn(
+        C0, h_, e_, dets, ncore=ncore, nact=nact, nele=nele, nmo=nmo,
+        pairs=pairs)
+    s_factory = np.asarray(fn(th0))
+    _, _, ci2, _ = _casscf_solution(C0, h_, e_, th0, ncore=ncore,
+                                    nact=nact, nele=nele, nmo=nmo,
+                                    pairs=pairs)
+    s_direct = entropy_from_ci(np.asarray(ci2), dets, ncore=ncore,
+                               nact=nact)
+    assert np.allclose(s_factory, s_direct, atol=1e-12)
+
+
+def test_the_entropy_gradient_matches_a_finite_difference():
+    pytest.importorskip("pyscfad")
+    from diffmrc.driver.entropy import make_casscf_entropy_theta_fn
+
+    C0, h_, e_, dets, ncore, nact, nele, nmo, pairs = _h2_chain()
+    npar = len(pairs)
+    fn = make_casscf_entropy_theta_fn(
+        C0, h_, e_, dets, ncore=ncore, nact=nact, nele=nele, nmo=nmo,
+        pairs=pairs)
+    th0 = jnp.zeros((npar,))
+    v = jnp.asarray(np.random.default_rng(3).normal(size=npar))
+    v = v / jnp.linalg.norm(v)
+    g = jax.grad(lambda t: jnp.sum(fn(t)))(th0)
+    ad = float(g @ v)
+    eps = 1e-5
+    fd = float((jnp.sum(fn(th0 + eps * v))
+                - jnp.sum(fn(th0 - eps * v))) / (2 * eps))
+    assert np.isfinite(ad)
+    assert abs(ad - fd) < 1e-7 * max(1.0, abs(fd))
