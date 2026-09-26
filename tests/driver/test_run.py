@@ -170,3 +170,59 @@ def test_an_electronic_structure_failure_refuses_rather_than_escalating(
     assert result.decision.level is Level.REFUSED
     assert not result.trustworthy
     assert any('boom' in r for r in result.decision.reasons)
+
+
+import numpy as np  # noqa: E402
+
+
+def test_estimator_checks_convert_policy_reports_in_a_fixed_order():
+    from diffmrc.driver.run import estimator_checks
+    from diffmrc.policy.verification import (
+        active_space_overlap,
+        convergence_gap,
+        correlation_shift,
+        state_consistency,
+    )
+
+    rng = np.random.default_rng(5)
+    C = np.linalg.qr(rng.normal(size=(6, 3)))[0]
+    checks = estimator_checks(
+        overlap_report=active_space_overlap(C, C, np.eye(6)),
+        gap_report=convergence_gap(-0.998, -1.000, threshold=0.020),
+        shift_report=correlation_shift(0.2, 0.9, threshold=1.1),
+        consistency_report=state_consistency({'a': [0, 1]}),
+    )
+    assert [c.name for c in checks] == [
+        'active_space_overlap', 'convergence_gap', 'correlation_shift',
+        'state_consistency']
+    assert all(c.passed for c in checks)
+    assert all(c.detail for c in checks)
+
+
+def test_estimator_checks_report_failures_as_check_failures():
+    from diffmrc.driver.run import estimator_checks
+    from diffmrc.policy.verification import (
+        active_space_overlap,
+        convergence_gap,
+        state_consistency,
+    )
+
+    rng = np.random.default_rng(6)
+    Q = np.linalg.qr(rng.normal(size=(6, 6)))[0]
+    C = Q[:, :3]
+    C2 = C.copy()
+    C2[:, 2] = Q[:, 3]           # an orbital rotated out
+    checks = estimator_checks(
+        overlap_report=active_space_overlap(C, C2, np.eye(6)),
+        gap_report=convergence_gap(-0.96, -1.000, threshold=0.020),
+        consistency_report=state_consistency({'a': [0, 1], 'b': [0, 2]}),
+    )
+    by_name = {c.name: c for c in checks}
+    assert not by_name['active_space_overlap'].passed
+    assert not by_name['convergence_gap'].passed
+    assert not by_name['state_consistency'].passed
+
+
+def test_absent_reports_produce_no_checks():
+    from diffmrc.driver.run import estimator_checks
+    assert estimator_checks() == []

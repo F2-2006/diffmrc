@@ -131,6 +131,47 @@ def checks_from_result(grad_norm, n_negative, e_casscf, e_reference,
     return checks
 
 
+def estimator_checks(overlap_report=None, gap_report=None,
+                     shift_report=None, consistency_report=None):
+    """Policy report objects as ``SelfCheck`` entries, fixed order.
+
+    The report layer renders whatever self-checks a run carries; this is
+    the one conversion through which the round-1 and round-2 estimators
+    enter a report, so their names stay stable across runs.  Each entry
+    fails exactly when its report says the measurement did (a vanished
+    overlap, a gap beyond the convergence threshold, a correlation shift
+    beyond its bound, inconsistent spaces between states).  Nothing is
+    imported from the policy layer here: the reports arrive as objects
+    and are read by their documented fields.
+    """
+    checks = []
+    if overlap_report is not None:
+        checks.append(SelfCheck(
+            name='active_space_overlap',
+            passed=bool(not overlap_report.vanished),
+            detail='; '.join(overlap_report.evidence),
+        ))
+    if gap_report is not None:
+        checks.append(SelfCheck(
+            name='convergence_gap',
+            passed=bool(gap_report.converged),
+            detail='; '.join(gap_report.evidence),
+        ))
+    if shift_report is not None:
+        checks.append(SelfCheck(
+            name='correlation_shift',
+            passed=bool(shift_report.reliable),
+            detail='; '.join(shift_report.evidence),
+        ))
+    if consistency_report is not None:
+        checks.append(SelfCheck(
+            name='state_consistency',
+            passed=bool(consistency_report.consistent),
+            detail='; '.join(consistency_report.evidence),
+        ))
+    return checks
+
+
 def read_xyz(path):
     """Read an xyz file into a list of ``(symbol, x, y, z)``.
 
@@ -252,6 +293,12 @@ def run_from_geometry(geometry_file, charge=0, spin=0, level='robust',
         active_space_verified=(None if start is Level.FAST
                                else bool(verification)),
     )
+    extra = (computed.get('algorithm_data', {}) or {}).get(
+        'estimator_reports')
+    if extra:
+        # The single injection point for the policy estimators: a
+        # producer fills this mapping and the report renders the checks.
+        checks = checks + estimator_checks(**extra)
     result.decision = next_level(start, checks)
     return result
 
