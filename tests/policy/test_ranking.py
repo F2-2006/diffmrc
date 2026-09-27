@@ -79,3 +79,35 @@ def test_mismatched_shapes_are_rejected():
     with pytest.raises(ValueError):
         ranked_orbital_selection(np.zeros(2), np.zeros(3), np.zeros(2),
                                  n_csf_cap=100)
+
+
+def test_singly_occupied_orbitals_enter_unconditionally():
+    # The source's open-shell rule: a singly occupied orbital is given
+    # the highest entropy and enters unconditionally.  Counts: three
+    # occupied + one singly occupied + three virtual give L=7, ele=7 ->
+    # n_csf(7,7) = 784; without the singly occupied orbital the same
+    # window gives n_csf(6,6) = 175.
+    eps_i = np.array([-0.6, -0.5, -0.4])
+    eps_a = np.array([0.4, 0.5, 0.6])
+    x = np.array([0.30, 0.10, 0.02])
+    wide = ranked_orbital_selection(eps_i, eps_a, x, n_csf_cap=10**6,
+                                    singly_occupied=[10])
+    assert wide.n_csf == 784
+    assert 10 in wide.active
+    assert wide.entropies[10] == pytest.approx(np.log(2.0))
+    # Under a binding cap the singly occupied orbital is never dropped.
+    tight = ranked_orbital_selection(eps_i, eps_a, x, n_csf_cap=50,
+                                     singly_occupied=[10])
+    assert tight.n_csf <= 50
+    assert 10 in tight.active
+    assert len(tight.active) < 7
+
+
+def test_the_singly_occupied_rule_defaults_off():
+    # Without the keyword the counted electron budget excludes any
+    # singly occupied orbital, matching the pre-extension behaviour.
+    choice = ranked_orbital_selection(np.array([-0.6, -0.5, -0.4]),
+                                      np.array([0.4, 0.5, 0.6]),
+                                      np.array([0.30, 0.10, 0.02]),
+                                      n_csf_cap=10**6)
+    assert choice.n_csf == 175

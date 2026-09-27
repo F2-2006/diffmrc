@@ -107,8 +107,8 @@ class RankedOrbitalChoice:
 
 
 def ranked_orbital_selection(eps_occupied, eps_virtual, exchange_virtual, *,
-                             occupied=None, virtual=None, n_csf_cap,
-                             min_occupied=1, min_virtual=2):
+                             occupied=None, virtual=None, singly_occupied=None,
+                             n_csf_cap, min_occupied=1, min_virtual=2):
     """Rank occupied and window-virtual orbitals, trim to the CSF cap.
 
     Parameters
@@ -121,6 +121,12 @@ def ranked_orbital_selection(eps_occupied, eps_virtual, exchange_virtual, *,
     occupied, virtual : array_like of int, optional
         Index labels for the two blocks, returned in ``active`` and
         ``entropies``.  Defaults: 0..n_occ-1 and n_occ..n_occ+n_vir-1.
+    singly_occupied : array_like of int, optional
+        Index labels of singly occupied orbitals (open-shell
+        references).  The source's rule applies: each is given the
+        highest entropy, ln 2, and enters the space unconditionally --
+        it is never a drop candidate -- while its electron is counted
+        in the CSF cap, whose electron budget becomes 2 n_occ + n_sing.
     n_csf_cap : int
         Maximum configuration count; the loop drops the lowest-ranked
         orbital until the count fits.
@@ -148,6 +154,8 @@ def ranked_orbital_selection(eps_occupied, eps_virtual, exchange_virtual, *,
                else [int(i) for i in occupied])
     vir_idx = (list(range(ei.size, ei.size + ea.size))
                if virtual is None else [int(i) for i in virtual])
+    sing_idx = ([] if singly_occupied is None
+                else [int(i) for i in singly_occupied])
     if len(occ_idx) != ei.size or len(vir_idx) != ea.size:
         raise ValueError('index label lists must match the array sizes')
     if n_csf_cap < 1:
@@ -164,16 +172,25 @@ def ranked_orbital_selection(eps_occupied, eps_virtual, exchange_virtual, *,
         ent[label] = float(value)
     for label, value in zip(vir_idx, s_vir):
         ent[label] = float(value)
-    kept_occ, kept_vir, dropped = list(occ_idx), list(vir_idx), []
+    for label in sing_idx:
+        ent[label] = float(np.log(2.0))
+    kept_occ, kept_vir, kept_sing, dropped = (list(occ_idx), list(vir_idx),
+                                              list(sing_idx), [])
     evidence = [
         f'pool {len(kept_occ)} occupied + {len(kept_vir)} virtual ranked '
         f'by APC (eqs. 12/13/18/19); the source overestimates occupied '
         f'entropies (R^2 0.64 vs DMRG) and degrades where the HF '
         f'determinant is a poor approximation'
     ]
+    if kept_sing:
+        evidence.append(
+            f'{len(kept_sing)} singly occupied {sorted(kept_sing)} given '
+            f'the highest entropy (ln 2) and entered unconditionally '
+            f'(source open-shell rule)')
 
     def _count():
-        return n_csf(len(kept_occ) + len(kept_vir), 2 * len(kept_occ))
+        return n_csf(len(kept_occ) + len(kept_sing) + len(kept_vir),
+                     2 * len(kept_occ) + len(kept_sing))
 
     while _count() > n_csf_cap:
         cands = []
@@ -193,7 +210,7 @@ def ranked_orbital_selection(eps_occupied, eps_virtual, exchange_virtual, *,
         (kept_occ if block == 0 else kept_vir).remove(label)
         dropped.append(label)
 
-    active = sorted(kept_occ + kept_vir)
+    active = sorted(kept_occ + kept_sing + kept_vir)
     count = _count()
     if dropped:
         evidence.append(f'dropped {sorted(dropped)} (lowest ranked) to '
