@@ -135,6 +135,28 @@ def _casscf_solution(C0_, h_, e_, th_, *, ncore, nact, nele, nmo, pairs,
     return E0c, C_can, ci2, eps, h1c, eric
 
 
+def sa_cas_solution(h1e_mo, eri_mo, *, ncore, nact, nele, nroots,
+                    eig_solver='default'):
+    """State-averaged CAS solution: equal-weight mean energy and the
+    per-root CI vectors.
+
+    Thin wrapper over ``core.casci.cs_casci``'s state-average branch:
+    ``nroots > 1`` with ``return_ci`` returns the equal-weight mean of
+    the lowest ``nroots`` eigenvalues together with the corresponding
+    eigenvectors as an ``(ndet, nroots)`` array.  Kept separate from
+    ``_casscf_solution`` so the validated single-root path is untouched;
+    both use the same call conventions (block slicing to ncore + nact,
+    the plain eigensolver default for first derivatives).
+    """
+    from ..core.casci import cs_casci
+
+    pln_eig = 'eigh' if eig_solver == 'default' else eig_solver
+    nm = ncore + nact
+    return cs_casci(h1e_mo[:nm, :nm], eri_mo[:nm, :nm, :nm, :nm],
+                    ncore=ncore, nact=nact, nele_act=nele,
+                    nroots=nroots, return_ci=True, eig_solver=pln_eig)
+
+
 def _components_from(C0_, h_, e_, enuc, th_, *, ncore, nact, nele, nmo,
                      pairs, dets, links_a, links_b, ci_solver='plain',
                      eig_solver='default', want_e2=True):
