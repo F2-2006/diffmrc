@@ -108,7 +108,8 @@ class RankedOrbitalChoice:
 
 def ranked_orbital_selection(eps_occupied, eps_virtual, exchange_virtual, *,
                              occupied=None, virtual=None, singly_occupied=None,
-                             n_csf_cap, min_occupied=1, min_virtual=2):
+                             virtual_removal=0, n_csf_cap, min_occupied=1,
+                             min_virtual=2):
     """Rank occupied and window-virtual orbitals, trim to the CSF cap.
 
     Parameters
@@ -127,6 +128,15 @@ def ranked_orbital_selection(eps_occupied, eps_virtual, exchange_virtual, *,
         highest entropy, ln 2, and enters the space unconditionally --
         it is never a drop candidate -- while its electron is counted
         in the CSF cap, whose electron budget becomes 2 n_occ + n_sing.
+    virtual_removal : int
+        The source's bias correction (main-group default N = 2, TM
+        grids use N = 4/8): N times, the highest-entropy virtual is
+        removed from the sums of eqs. (5)/(6) and the entropies are
+        recomputed; the removed virtuals are finally assigned the
+        highest remaining entropy.  The recomputation lowers the
+        occupied entropies (they lose the removed pairs' weight) and so
+        rebalances the ranking toward virtuals.  Must leave at least
+        one virtual in the sums.
     n_csf_cap : int
         Maximum configuration count; the loop drops the lowest-ranked
         orbital until the count fits.
@@ -160,12 +170,37 @@ def ranked_orbital_selection(eps_occupied, eps_virtual, exchange_virtual, *,
         raise ValueError('index label lists must match the array sizes')
     if n_csf_cap < 1:
         raise ValueError(f'n_csf_cap {n_csf_cap} must be positive')
+    if not 0 <= virtual_removal < ea.size:
+        raise ValueError(f'virtual_removal {virtual_removal} outside '
+                         f'0..{ea.size - 1} (at least one virtual must '
+                         f'remain in the sums of eqs. 5/6)')
 
     D = ea[None, :] - ei[:, None]                       # (nocc, nvir)
     c = -x[None, :] / (D + np.sqrt(x[None, :] ** 2 + D ** 2))
     c2 = c * c
     s_occ = _binary_entropy(c2.sum(axis=1) / (1.0 + c2.sum(axis=1)))
     s_vir = _binary_entropy(c2.sum(axis=0) / (1.0 + c2.sum(axis=0)))
+
+    # Bias correction (source's virtual-orbital-removal step, N times).
+    removed = []
+    for _ in range(virtual_removal):
+        current = [j for j in range(ea.size) if j not in removed]
+        # Highest entropy first; near-ties (1e-12) rank by index.
+        jmax = min(current,
+                   key=lambda j: (-round(float(s_vir[j]) / _TIE_TOL), j))
+        removed.append(jmax)
+    if removed:
+        keep = np.array([j for j in range(ea.size) if j not in removed])
+        c2k = c2[:, keep]
+        s_occ = _binary_entropy(c2k.sum(axis=1) / (1.0 + c2k.sum(axis=1)))
+        # The remaining virtuals' entropies do not depend on the virtual
+        # set (eq. 6 sums over occupied only), so a recomputation leaves
+        # them unchanged; the removed ones take the highest entropy left.
+        top = max(float(s_occ.max()),
+                  max(float(s_vir[j]) for j in range(ea.size)
+                      if j not in removed))
+        for j in removed:
+            s_vir[j] = top
 
     ent = {}
     for label, value in zip(occ_idx, s_occ):
@@ -187,6 +222,12 @@ def ranked_orbital_selection(eps_occupied, eps_virtual, exchange_virtual, *,
             f'{len(kept_sing)} singly occupied {sorted(kept_sing)} given '
             f'the highest entropy (ln 2) and entered unconditionally '
             f'(source open-shell rule)')
+    if removed:
+        evidence.append(
+            f'virtual removal N={virtual_removal}: virtuals '
+            f'{sorted(vir_idx[j] for j in removed)} removed from the '
+            f'sums and assigned the highest remaining entropy; occupied '
+            f'entropies recomputed without them')
 
     def _count():
         return n_csf(len(kept_occ) + len(kept_sing) + len(kept_vir),
