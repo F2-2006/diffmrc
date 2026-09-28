@@ -166,3 +166,44 @@ def test_sa_theta_fn_matches_the_joint_fn_at_fixed_geometry():
     for (ea, e2a), (eb, e2b) in zip(a["states"], b["states"]):
         assert float(ea) == pytest.approx(float(eb), abs=1e-10)
         assert float(e2a) == pytest.approx(float(e2b), abs=1e-10)
+
+
+def test_sa_state_weights_single_point_reduces_to_the_single_root():
+    from pyscfad import scf
+
+    from diffmrc.driver.nevpt2 import (make_nevpt2_joint_fn,
+                                       make_nevpt2_sa_fn)
+
+    mol = _h2_631g()
+    nmo = mol.nao_nr()
+    ncore, nact, nele = 0, 2, 2
+    pairs = _pairs(ncore, nact, nmo)
+    builder = lambda m: scf.RHF(m)  # noqa: E731
+    th = jnp.zeros(len(pairs))
+    joint = make_nevpt2_joint_fn(ncore, nact, nele, nmo, pairs, builder,
+                                 e2_scale=0.0)
+    sa = make_nevpt2_sa_fn(ncore, nact, nele, nmo, pairs, builder, nroots=2,
+                           e2_scale=0.0, state_weights=[1.0, 0.0])
+    assert float(sa(mol, th)["E_sa"]) == pytest.approx(
+        float(joint(mol, th)), abs=1e-8)
+
+
+def test_sa_state_weights_scaling_and_equal_default_agree():
+    from pyscfad import scf
+
+    from diffmrc.driver.nevpt2 import make_nevpt2_sa_fn
+
+    mol = _h2_631g()
+    nmo = mol.nao_nr()
+    pairs = _pairs(0, 2, nmo)
+    builder = lambda m: scf.RHF(m)  # noqa: E731
+    th = jnp.zeros(len(pairs))
+
+    def run(w=None):
+        fn = make_nevpt2_sa_fn(0, 2, 2, nmo, pairs, builder, nroots=2,
+                               e2_scale=0.0, state_weights=w)
+        return float(fn(mol, th)["E_sa"])
+
+    a = run()
+    assert run([0.5, 0.5]) == pytest.approx(a, abs=1e-10)
+    assert run([1.0, 1.0]) == pytest.approx(a, abs=1e-10)  # normalized

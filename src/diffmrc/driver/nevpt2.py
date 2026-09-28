@@ -169,7 +169,7 @@ def sa_cas_solution(h1e_mo, eri_mo, *, ncore, nact, nele, nroots,
 
 
 def canonicalize_sa_jax(C, h1e, eri, CIs, *, ncore, nact, nele, occ2_idx=(),
-                        occ0_idx=(), eig_solver='default'):
+                        occ0_idx=(), weights=None, eig_solver='default'):
     """Average-density canonicalization for state-averaged solutions.
 
     The same sequence as ``core.nevpt2.impl.canonicalize_jax`` -- active
@@ -199,11 +199,23 @@ def canonicalize_sa_jax(C, h1e, eri, CIs, *, ncore, nact, nele, occ2_idx=(),
         CIs = CIs[:, None]  # tolerate a bare vector (core-style nroots=1)
     nroots = int(CIs.shape[1])
     dets = cas_dets_for2(ncore, nact, nele)
-    # Equal-weight average of the per-root active densities.
-    dm1 = make_dm123_sf(CIs[:, 0], dets, nact, ncore)[0]
+    # Weighted average of the per-root active densities (equal weights
+    # when none are given; a weight vector shorter than the root count is
+    # extended by zero, a longer one is rejected).
+    if weights is None:
+        wv = jnp.full((nroots,), 1.0 / nroots)
+    else:
+        wv = jnp.asarray(weights, dtype=float)
+        if wv.ndim != 1 or wv.shape[0] > nroots:
+            raise ValueError(
+                f'weights must be a vector of at most {nroots} entries, '
+                f'got shape {tuple(wv.shape)}')
+        if wv.shape[0] < nroots:
+            wv = jnp.concatenate([wv, jnp.zeros(nroots - wv.shape[0])])
+        wv = wv / jnp.sum(wv)
+    dm1 = make_dm123_sf(CIs[:, 0], dets, nact, ncore)[0] * wv[0]
     for k in range(1, nroots):
-        dm1 = dm1 + make_dm123_sf(CIs[:, k], dets, nact, ncore)[0]
-    dm1 = dm1 / nroots
+        dm1 = dm1 + make_dm123_sf(CIs[:, k], dets, nact, ncore)[0] * wv[k]
 
     h1e_mo = jnp.einsum("ai,ab,bj->ij", C, h1e, C)
     eri_mo = jnp.einsum("pi,qj,rk,sl,pqrs->ijkl", C, C, C, C, eri)
@@ -372,7 +384,8 @@ def sa_vertical_excitations(states):
 
 
 def _sa_components_from(C0_, h_, e_, enuc, th_, *, ncore, nact, nele, nmo,
-                        pairs, nroots, dets, links_a, links_b, e2_scale=1.0,
+                        pairs, nroots, dets, links_a, links_b,
+                        state_weights=None, e2_scale=1.0,
                         eig_solver='default'):
     """``(E_sa, states, cis)`` from reference quantities already in hand.
 
@@ -393,20 +406,32 @@ def _sa_components_from(C0_, h_, e_, enuc, th_, *, ncore, nact, nele, nmo,
                                         nroots=nroots, eig_solver=eig_solver)
     C_can, CIs_can, eps = canonicalize_sa_jax(
         C2, h_, e_, CIs_rot, ncore=ncore, nact=nact, nele=nele,
-        eig_solver=eig_solver)
+        weights=state_weights, eig_solver=eig_solver)
     h1c, eric = _stepwise_mo_ints(C_can, h_, e_)
+    # The public branch clamps to the determinant-space dimension; the
+    # running-mean inversion is exact only up to that many roots, so the
+    # effective count is probed first and everything below uses it.
+    _, CIs_probe = sa_cas_solution(h1c, eric, ncore=ncore, nact=nact,
+                                   nele=nele, nroots=nroots,
+                                   eig_solver=eig_solver)
+    n_eff = int(CIs_probe.shape[1])
     # Running means give the per-state energies; the largest call's
     # vectors are the canonical-basis ones the contractions consume.
     m_prev, k_prev, Ek_list, CIs = 0.0, 0, [], None
-    for k in range(1, nroots + 1):
+    for k in range(1, n_eff + 1):
         mk, CIs_k = sa_cas_solution(h1c, eric, ncore=ncore, nact=nact,
                                     nele=nele, nroots=k,
                                     eig_solver=eig_solver)
         Ek_list.append(k * mk - k_prev * m_prev)
         m_prev, k_prev, CIs = mk, k, CIs_k
-    E_sa = m_prev  # the largest running mean is the SA energy itself
+    if state_weights is None:
+        E_sa = m_prev  # equal weights: the largest running mean itself
+    else:
+        wv = jnp.asarray(state_weights, dtype=float)[:n_eff]
+        wv = wv / jnp.sum(wv)
+        E_sa = sum(wv[k] * Ek_list[k] for k in range(n_eff))
     states = []
-    for k in range(nroots):
+    for k in range(n_eff):
         e2k, _ = nevpt2_e2_full2(h1c, eric, CIs[:, k], dets, Ek_list[k],
                                  mo_energy=eps, ncore=ncore, nact=nact,
                                  nocc=ncore + nact, links_a=links_a,
@@ -416,7 +441,8 @@ def _sa_components_from(C0_, h_, e_, enuc, th_, *, ncore, nact, nele, nmo,
 
 
 def make_nevpt2_sa_theta_fn(mol, ncore, nact, nele, nmo, pairs, scf_builder,
-                            nroots, e2_scale=1.0, eig_solver='default'):
+                            nroots, e2_scale=1.0, state_weights=None,
+                            eig_solver='default'):
     """Theta-only state-averaged components at a fixed geometry.
 
     The reference SCF and the AO integrals are computed once here and the
@@ -440,7 +466,8 @@ def make_nevpt2_sa_theta_fn(mol, ncore, nact, nele, nmo, pairs, scf_builder,
     links_a, links_b = _spin_links(nact, nele)
     kw = dict(ncore=ncore, nact=nact, nele=nele, nmo=nmo, pairs=pairs,
               nroots=nroots, dets=dets, links_a=links_a, links_b=links_b,
-              e2_scale=e2_scale, eig_solver=eig_solver)
+              state_weights=state_weights, e2_scale=e2_scale,
+              eig_solver=eig_solver)
 
     def components(th_):
         return _sa_components_from(C0_, h_, e_, enuc, th_, **kw)
@@ -449,7 +476,8 @@ def make_nevpt2_sa_theta_fn(mol, ncore, nact, nele, nmo, pairs, scf_builder,
 
 
 def make_nevpt2_sa_fn(ncore, nact, nele, nmo, pairs, scf_builder, nroots,
-                      e2_scale=1.0, eig_solver='default'):
+                      e2_scale=1.0, state_weights=None,
+                      eig_solver='default'):
     """Build the state-averaged joint components: SA-CASSCF plus
     per-state NEVPT2.
 
@@ -494,8 +522,8 @@ def make_nevpt2_sa_fn(ncore, nact, nele, nmo, pairs, scf_builder, nroots,
         return _sa_components_from(
             C0_, h_, e_, enuc, th_, ncore=ncore, nact=nact, nele=nele,
             nmo=nmo, pairs=pairs, nroots=nroots, dets=dets,
-            links_a=links_a, links_b=links_b, e2_scale=e2_scale,
-            eig_solver=eig_solver)
+            links_a=links_a, links_b=links_b, state_weights=state_weights,
+            e2_scale=e2_scale, eig_solver=eig_solver)
 
     return components
 
