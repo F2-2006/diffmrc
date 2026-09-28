@@ -142,3 +142,27 @@ def test_sa_vertical_excitations_reference_state_zero():
     assert out[1]["dE_casscf"] == pytest.approx(0.1, abs=1e-14)
     # dE_nevpt2 = 0.1 + (e2_1 - e2_0) = 0.1 - 0.02 = 0.08
     assert out[1]["dE_nevpt2"] == pytest.approx(0.08, abs=1e-14)
+
+
+def test_sa_theta_fn_matches_the_joint_fn_at_fixed_geometry():
+    from pyscfad import scf
+
+    from diffmrc.driver.nevpt2 import (make_nevpt2_sa_fn,
+                                       make_nevpt2_sa_theta_fn)
+
+    mol = _h2_631g()
+    nmo = mol.nao_nr()
+    ncore, nact, nele, nroots = 0, 2, 2, 2
+    pairs = _pairs(ncore, nact, nmo)
+    builder = lambda m: scf.RHF(m)  # noqa: E731
+    joint = make_nevpt2_sa_fn(ncore, nact, nele, nmo, pairs, builder,
+                              nroots=nroots)
+    theta_only = make_nevpt2_sa_theta_fn(mol, ncore, nact, nele, nmo, pairs,
+                                         builder, nroots=nroots)
+    th = jnp.zeros(len(pairs))
+    a = joint(mol, th)
+    b = theta_only(th)
+    assert float(a["E_sa"]) == pytest.approx(float(b["E_sa"]), abs=1e-10)
+    for (ea, e2a), (eb, e2b) in zip(a["states"], b["states"]):
+        assert float(ea) == pytest.approx(float(eb), abs=1e-10)
+        assert float(e2a) == pytest.approx(float(e2b), abs=1e-10)

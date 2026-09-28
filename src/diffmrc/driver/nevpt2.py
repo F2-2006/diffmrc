@@ -371,6 +371,83 @@ def sa_vertical_excitations(states):
             for Ek, e2k in states]
 
 
+def _sa_components_from(C0_, h_, e_, enuc, th_, *, ncore, nact, nele, nmo,
+                        pairs, nroots, dets, links_a, links_b, e2_scale=1.0,
+                        eig_solver='default'):
+    """``(E_sa, states, cis)`` from reference quantities already in hand.
+
+    The state-averaged analogue of ``_components_from``: contains no SCF
+    call and no Mole access -- theta and the precomputed arrays only.
+    Both the joint factory and the frozen-geometry theta factory funnel
+    through here, so the two cannot drift apart.
+    """
+    from jax import numpy as jnp
+
+    from ..core.nevpt2.impl import nevpt2_e2_full2
+    from ..core.rotation import block_rotation
+
+    C2 = jnp.asarray(C0_) @ block_rotation(th_, nmo, pairs)
+    h1_, eri_ = _stepwise_mo_ints(C2, h_, e_)
+    E_sa_rot, CIs_rot = sa_cas_solution(h1_, eri_, ncore=ncore,
+                                        nact=nact, nele=nele,
+                                        nroots=nroots, eig_solver=eig_solver)
+    C_can, CIs_can, eps = canonicalize_sa_jax(
+        C2, h_, e_, CIs_rot, ncore=ncore, nact=nact, nele=nele,
+        eig_solver=eig_solver)
+    h1c, eric = _stepwise_mo_ints(C_can, h_, e_)
+    # Running means give the per-state energies; the largest call's
+    # vectors are the canonical-basis ones the contractions consume.
+    m_prev, k_prev, Ek_list, CIs = 0.0, 0, [], None
+    for k in range(1, nroots + 1):
+        mk, CIs_k = sa_cas_solution(h1c, eric, ncore=ncore, nact=nact,
+                                    nele=nele, nroots=k,
+                                    eig_solver=eig_solver)
+        Ek_list.append(k * mk - k_prev * m_prev)
+        m_prev, k_prev, CIs = mk, k, CIs_k
+    E_sa = m_prev  # the largest running mean is the SA energy itself
+    states = []
+    for k in range(nroots):
+        e2k, _ = nevpt2_e2_full2(h1c, eric, CIs[:, k], dets, Ek_list[k],
+                                 mo_energy=eps, ncore=ncore, nact=nact,
+                                 nocc=ncore + nact, links_a=links_a,
+                                 links_b=links_b)
+        states.append((Ek_list[k] + enuc, e2_scale * e2k))
+    return {'E_sa': E_sa + enuc, 'states': states, 'cis': CIs}
+
+
+def make_nevpt2_sa_theta_fn(mol, ncore, nact, nele, nmo, pairs, scf_builder,
+                            nroots, e2_scale=1.0, eig_solver='default'):
+    """Theta-only state-averaged components at a fixed geometry.
+
+    The reference SCF and the AO integrals are computed once here and the
+    returned ``components(th_) -> dict`` depends on theta alone.  The
+    theta optimizer needs this form: this pyscfad build cannot trace the
+    SCF (or the intor JVPs it calls) under a jit context -- the
+    ``TracerArrayConversionError`` diagnostic is recorded in
+    ``make_nevpt2_theta_fn``.  At a fixed geometry the frozen-reference
+    form is the same function as the joint one: the SCF would run once
+    either way, so no physics is dropped.
+    """
+    from ..core.nevpt2.impl import cas_dets_for2
+
+    mf_ = scf_builder(mol)
+    mf_.kernel()
+    C0_ = mf_.mo_coeff
+    h_ = mf_.get_hcore()
+    e_ = mol.intor('int2e', aosym='s1')
+    enuc = mol.energy_nuc()
+    dets = cas_dets_for2(ncore, nact, nele)
+    links_a, links_b = _spin_links(nact, nele)
+    kw = dict(ncore=ncore, nact=nact, nele=nele, nmo=nmo, pairs=pairs,
+              nroots=nroots, dets=dets, links_a=links_a, links_b=links_b,
+              e2_scale=e2_scale, eig_solver=eig_solver)
+
+    def components(th_):
+        return _sa_components_from(C0_, h_, e_, enuc, th_, **kw)
+
+    return components
+
+
 def make_nevpt2_sa_fn(ncore, nact, nele, nmo, pairs, scf_builder, nroots,
                       e2_scale=1.0, eig_solver='default'):
     """Build the state-averaged joint components: SA-CASSCF plus
@@ -378,9 +455,11 @@ def make_nevpt2_sa_fn(ncore, nact, nele, nmo, pairs, scf_builder, nroots,
 
     Returns ``components(mol, theta) -> dict`` with ``E_sa`` (the
     equal-weight state-averaged CASSCF total energy, differentiable in
-    both arguments) and ``states = [(E_k, e2_k)]`` -- per-state CASSCF
+    both arguments), ``states = [(E_k, e2_k)]`` -- per-state CASSCF
     total energies and NEVPT2 correlation corrections in the canonical
-    basis whose orbitals the state-averaged density defines.
+    basis whose orbitals the state-averaged density defines -- and
+    ``cis`` (the ``(ndet, nroots)`` canonical-basis CI matrix, for spin
+    and symmetry bookkeeping downstream).
 
     The per-state CASSCF energies are recovered from the running means of
     the public state-average branch (``M_k`` averages the lowest ``k``
@@ -412,34 +491,11 @@ def make_nevpt2_sa_fn(ncore, nact, nele, nmo, pairs, scf_builder, nroots,
         e_ = m_.intor('int2e', aosym='s1')
         enuc = m_.energy_nuc()
 
-        C2 = C0_ @ block_rotation(th_, nmo, pairs)
-        h1_, eri_ = _stepwise_mo_ints(C2, h_, e_)
-        E_sa_rot, CIs_rot = sa_cas_solution(h1_, eri_, ncore=ncore,
-                                            nact=nact, nele=nele,
-                                            nroots=nroots,
-                                            eig_solver=eig_solver)
-        C_can, CIs_can, eps = canonicalize_sa_jax(
-            C2, h_, e_, CIs_rot, ncore=ncore, nact=nact, nele=nele,
+        return _sa_components_from(
+            C0_, h_, e_, enuc, th_, ncore=ncore, nact=nact, nele=nele,
+            nmo=nmo, pairs=pairs, nroots=nroots, dets=dets,
+            links_a=links_a, links_b=links_b, e2_scale=e2_scale,
             eig_solver=eig_solver)
-        h1c, eric = _stepwise_mo_ints(C_can, h_, e_)
-        # Running means give the per-state energies; the largest call's
-        # vectors are the canonical-basis ones the contractions consume.
-        m_prev, k_prev, Ek_list, CIs = 0.0, 0, [], None
-        for k in range(1, nroots + 1):
-            mk, CIs_k = sa_cas_solution(h1c, eric, ncore=ncore, nact=nact,
-                                        nele=nele, nroots=k,
-                                        eig_solver=eig_solver)
-            Ek_list.append(k * mk - k_prev * m_prev)
-            m_prev, k_prev, CIs = mk, k, CIs_k
-        E_sa = m_prev  # the largest running mean is the SA energy itself
-        states = []
-        for k in range(nroots):
-            e2k, _ = nevpt2_e2_full2(h1c, eric, CIs[:, k], dets, Ek_list[k],
-                                     mo_energy=eps, ncore=ncore, nact=nact,
-                                     nocc=ncore + nact, links_a=links_a,
-                                     links_b=links_b)
-            states.append((Ek_list[k] + enuc, e2_scale * e2k))
-        return {'E_sa': E_sa + enuc, 'states': states}
 
     return components
 
