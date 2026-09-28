@@ -106,33 +106,39 @@ def _casscf_solution(C0_, h_, e_, th_, *, ncore, nact, nele, nmo, pairs,
 
     C2 = jnp.asarray(C0_) @ block_rotation(th_, nmo, pairs)
 
-    def mo_ints(Cx):
-        # The four-operand einsum must be split into four sequential
-        # contractions. XLA lowers the one-shot form on a 96^4 array with
-        # only ~1e-6 absolute accuracy (measured: max|delta| = 1.28e-6
-        # against the stepwise transform, activity block 8.9e-16), and that
-        # perturbation is amplified by the ~1e-15 gaps of the generalized
-        # Fock's degenerate pairs -- linear molecules have exact pi/delta
-        # degeneracies -- so the eigenvector basis inside the degenerate
-        # subspace comes out completely different (perturbation/gap ~ 1e9).
-        # The energy is insensitive to it, but the theta gradient differed
-        # by 8% between the two contraction orders and the HVP was NaN for
-        # the one-shot form and finite for the stepwise one (t222/t224).
-        h1 = jnp.einsum('ai,ab,bj->ij', Cx, h_, Cx)
-        z = jnp.einsum('pi,pqrs->iqrs', Cx, e_)
-        z = jnp.einsum('qj,iqrs->ijrs', Cx, z)
-        z = jnp.einsum('rk,ijrs->ijks', Cx, z)
-        eri = jnp.einsum('sl,ijks->ijkl', Cx, z)
-        return h1, eri
-
-    h1_, eri_ = mo_ints(C2)
+    h1_, eri_ = _stepwise_mo_ints(C2, h_, e_)
     _, ci = ci_solve(h1_, eri_)
     C_can, _, eps = canonicalize_jax(C2, h_, e_, ci, ncore=ncore,
                                      nact=nact, nele_act=nele,
                                      eig_solver=pln_eig)
-    h1c, eric = mo_ints(C_can)
+    h1c, eric = _stepwise_mo_ints(C_can, h_, e_)
     E0c, ci2 = ci_solve(h1c, eric)
     return E0c, C_can, ci2, eps, h1c, eric
+
+
+def _stepwise_mo_ints(Cx, h_, e_):
+    """MO integrals by four sequential contractions.
+
+    The four-operand einsum must be split into four sequential
+    contractions. XLA lowers the one-shot form on a 96^4 array with only
+    ~1e-6 absolute accuracy (measured: max|delta| = 1.28e-6 against the
+    stepwise transform, activity block 8.9e-16), and that perturbation is
+    amplified by the ~1e-15 gaps of the generalized Fock's degenerate
+    pairs -- linear molecules have exact pi/delta degeneracies -- so the
+    eigenvector basis inside the degenerate subspace comes out completely
+    different (perturbation/gap ~ 1e9).  The energy is insensitive to it,
+    but the theta gradient differed by 8% between the two contraction
+    orders and the HVP was NaN for the one-shot form and finite for the
+    stepwise one (t222/t224).
+    """
+    from jax import numpy as jnp
+
+    h1 = jnp.einsum('ai,ab,bj->ij', Cx, h_, Cx)
+    z = jnp.einsum('pi,pqrs->iqrs', Cx, e_)
+    z = jnp.einsum('qj,iqrs->ijrs', Cx, z)
+    z = jnp.einsum('rk,ijrs->ijks', Cx, z)
+    eri = jnp.einsum('sl,ijks->ijkl', Cx, z)
+    return h1, eri
 
 
 def sa_cas_solution(h1e_mo, eri_mo, *, ncore, nact, nele, nroots,
@@ -346,6 +352,79 @@ def make_nevpt2_joint_fn(ncore, nact, nele, nmo, pairs, scf_builder,
 
     E_joint.components = components      # the anchor test uses both
     return E_joint
+
+
+def make_nevpt2_sa_fn(ncore, nact, nele, nmo, pairs, scf_builder, nroots,
+                      e2_scale=1.0, eig_solver='default'):
+    """Build the state-averaged joint components: SA-CASSCF plus
+    per-state NEVPT2.
+
+    Returns ``components(mol, theta) -> dict`` with ``E_sa`` (the
+    equal-weight state-averaged CASSCF total energy, differentiable in
+    both arguments) and ``states = [(E_k, e2_k)]`` -- per-state CASSCF
+    total energies and NEVPT2 correlation corrections in the canonical
+    basis whose orbitals the state-averaged density defines.
+
+    The per-state CASSCF energies are recovered from the running means of
+    the public state-average branch (``M_k`` averages the lowest ``k``
+    roots, so ``E_k = k M_k - (k-1) M_{k-1}``), which keeps the function
+    on validated public interfaces and avoids assuming anything about the
+    symmetry layout of the internal CI Hamiltonian.  The state-average
+    branch is called at growing ``nroots``; the largest call also
+    provides the canonical-basis vectors for the NEVPT2 contractions.
+    With ``nroots=1`` the function reduces to ``make_nevpt2_joint_fn``
+    (identity test in ``tests/driver/test_sa_pipeline.py``); the
+    single-root path is untouched.
+    """
+    from jax import numpy as jnp
+
+    from ..core.nevpt2.impl import cas_dets_for2, nevpt2_e2_full2
+    from ..core.rotation import block_rotation
+
+    dets = cas_dets_for2(ncore, nact, nele)
+    links_a, links_b = _spin_links(nact, nele)
+
+    def components(m_, th_):
+        """SA-CASSCF energy and per-state NEVPT2 corrections."""
+        mf_ = scf_builder(m_)
+        mf_.kernel()
+        # get_hcore carries the ECP and the X2C rotation; the raw
+        # int1e_kin + int1e_nuc sum would silently drop both.
+        C0_ = jnp.asarray(mf_.mo_coeff)
+        h_ = mf_.get_hcore()
+        e_ = m_.intor('int2e', aosym='s1')
+        enuc = m_.energy_nuc()
+
+        C2 = C0_ @ block_rotation(th_, nmo, pairs)
+        h1_, eri_ = _stepwise_mo_ints(C2, h_, e_)
+        E_sa_rot, CIs_rot = sa_cas_solution(h1_, eri_, ncore=ncore,
+                                            nact=nact, nele=nele,
+                                            nroots=nroots,
+                                            eig_solver=eig_solver)
+        C_can, CIs_can, eps = canonicalize_sa_jax(
+            C2, h_, e_, CIs_rot, ncore=ncore, nact=nact, nele=nele,
+            eig_solver=eig_solver)
+        h1c, eric = _stepwise_mo_ints(C_can, h_, e_)
+        # Running means give the per-state energies; the largest call's
+        # vectors are the canonical-basis ones the contractions consume.
+        m_prev, k_prev, Ek_list, CIs = 0.0, 0, [], None
+        for k in range(1, nroots + 1):
+            mk, CIs_k = sa_cas_solution(h1c, eric, ncore=ncore, nact=nact,
+                                        nele=nele, nroots=k,
+                                        eig_solver=eig_solver)
+            Ek_list.append(k * mk - k_prev * m_prev)
+            m_prev, k_prev, CIs = mk, k, CIs_k
+        E_sa = m_prev  # the largest running mean is the SA energy itself
+        states = []
+        for k in range(nroots):
+            e2k, _ = nevpt2_e2_full2(h1c, eric, CIs[:, k], dets, Ek_list[k],
+                                     mo_energy=eps, ncore=ncore, nact=nact,
+                                     nocc=ncore + nact, links_a=links_a,
+                                     links_b=links_b)
+            states.append((Ek_list[k] + enuc, e2_scale * e2k))
+        return {'E_sa': E_sa + enuc, 'states': states}
+
+    return components
 
 
 def make_nevpt2_theta_fn(mol, ncore, nact, nele, nmo, pairs, scf_builder,

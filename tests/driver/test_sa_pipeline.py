@@ -41,3 +41,92 @@ def test_sa_cas_solution_matches_the_core_state_average():
     assert np.asarray(cis).shape[1] == nroots
     gram = np.asarray(cis).T @ np.asarray(cis)
     assert np.allclose(gram, np.eye(nroots), atol=1e-10)
+
+
+def test_sa_canonicalization_reduces_to_the_core_routine_for_one_vector():
+    from diffmrc.core.nevpt2.impl import canonicalize_jax
+    from diffmrc.driver.nevpt2 import canonicalize_sa_jax, sa_cas_solution
+
+    h, eri = _symmetric_ints(4)
+    ncore, nact, nele = 0, 2, 2
+    _, cis = sa_cas_solution(h, eri, ncore=ncore, nact=nact, nele=nele,
+                             nroots=1)
+    C0 = jnp.eye(4)
+    C_core, ci_core, eps_core = canonicalize_jax(
+        C0, h, eri, cis[:, 0], ncore=ncore, nact=nact, nele_act=nele)
+    C_sa, cis_sa, eps_sa = canonicalize_sa_jax(
+        C0, h, eri, cis, ncore=ncore, nact=nact, nele=nele)
+    assert np.allclose(np.asarray(C_sa), np.asarray(C_core), atol=1e-12)
+    assert np.allclose(np.asarray(eps_sa), np.asarray(eps_core), atol=1e-12)
+    assert np.allclose(np.asarray(cis_sa)[:, 0], np.asarray(ci_core),
+                       atol=1e-12)
+
+
+def test_sa_canonicalization_keeps_two_vectors_orthonormal():
+    from diffmrc.driver.nevpt2 import canonicalize_sa_jax, sa_cas_solution
+
+    h, eri = _symmetric_ints(4)
+    ncore, nact, nele = 0, 2, 2
+    _, cis = sa_cas_solution(h, eri, ncore=ncore, nact=nact, nele=nele,
+                             nroots=2)
+    _, cis2, _ = canonicalize_sa_jax(jnp.eye(4), h, eri, cis, ncore=ncore,
+                                     nact=nact, nele=nele)
+    gram = np.asarray(cis2).T @ np.asarray(cis2)
+    assert np.allclose(gram, np.eye(2), atol=1e-10)
+
+
+def _h2_631g():
+    from pyscfad import gto
+
+    mol = gto.Mole()
+    mol.atom = "H 0 0 0; H 0 0 0.74"
+    mol.basis = "6-31g"
+    mol.build()
+    return mol
+
+
+def _pairs(ncore, nact, nmo):
+    from diffmrc.core.orblib import orbital_pairs
+
+    return orbital_pairs(ncore, nact, nmo, include_cv=True)
+
+
+def test_sa_joint_fn_reduces_to_the_single_root_joint_fn():
+    from pyscfad import scf
+
+    from diffmrc.driver.nevpt2 import make_nevpt2_joint_fn, make_nevpt2_sa_fn
+
+    mol = _h2_631g()
+    nmo = mol.nao_nr()
+    ncore, nact, nele = 0, 2, 2
+    pairs = _pairs(ncore, nact, nmo)
+    builder = lambda m: scf.RHF(m)  # noqa: E731
+    t = jnp.zeros(len(pairs))
+    for scale in (0.0, 1.0):
+        f1 = make_nevpt2_joint_fn(ncore, nact, nele, nmo, pairs, builder,
+                                  e2_scale=scale)
+        fs = make_nevpt2_sa_fn(ncore, nact, nele, nmo, pairs, builder,
+                               nroots=1, e2_scale=scale)
+        a = float(f1(mol, t))
+        out = fs(mol, t)
+        b = float(out["E_sa"]) + float(out["states"][0][1])  # scaled e2
+        assert b == pytest.approx(a, abs=1e-10)
+
+
+def test_sa_joint_fn_reports_per_state_energies():
+    from pyscfad import scf
+
+    from diffmrc.driver.nevpt2 import make_nevpt2_sa_fn
+
+    mol = _h2_631g()
+    nmo = mol.nao_nr()
+    ncore, nact, nele = 0, 2, 2
+    pairs = _pairs(ncore, nact, nmo)
+    builder = lambda m: scf.RHF(m)  # noqa: E731
+    fs = make_nevpt2_sa_fn(ncore, nact, nele, nmo, pairs, builder, nroots=2,
+                           e2_scale=0.0)
+    out = fs(mol, jnp.zeros(len(pairs)))
+    assert len(out["states"]) == 2
+    Ek = [float(e) for e, _ in out["states"]]
+    assert Ek[0] < Ek[1]
+    assert float(np.mean(Ek)) == pytest.approx(float(out["E_sa"]), abs=1e-8)
