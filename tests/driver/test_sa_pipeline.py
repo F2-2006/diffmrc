@@ -207,3 +207,65 @@ def test_sa_state_weights_scaling_and_equal_default_agree():
     a = run()
     assert run([0.5, 0.5]) == pytest.approx(a, abs=1e-10)
     assert run([1.0, 1.0]) == pytest.approx(a, abs=1e-10)  # normalized
+
+
+def _ecp_dimer(heavy, r_bohr, ecp_basis):
+    from pyscfad import gto
+
+    mol = gto.Mole()
+    mol.atom = [(heavy, (0.0, 0.0, 0.0)), ("O", (0.0, 0.0, r_bohr))]
+    mol.unit = "bohr"
+    mol.basis = {heavy: ecp_basis, "O": "6-31g"}
+    mol.ecp = {heavy: ecp_basis}
+    mol.charge = 0
+    mol.spin = 0
+    mol.build()
+    return mol
+
+
+def test_sa_pipeline_smoke_on_a_lanthanide_ecp_system():
+    """CeO/stuttgart_rsc: the SA solve, average-density canonicalization and
+    per-state NEVPT2 run end-to-end on ECP integrals with an f element --
+    finite numbers, correlation corrections negative, sane energy scale.
+    (Theta stays at zero here; the f-block theta-optimization scale is a
+    documented follow-up -- npar ~1e3, see the plan file.)"""
+    from pyscfad import scf
+
+    from diffmrc.driver.nevpt2 import make_nevpt2_sa_theta_fn
+
+    mol = _ecp_dimer("Ce", 3.44, "stuttgart_rsc")
+    nmo = mol.nao_nr()
+    ncore, nact, nele, nroots = 18, 2, 2, 2
+    pairs = _pairs(ncore, nact, nmo)
+    builder = lambda m: scf.RHF(m)  # noqa: E731
+    comp = make_nevpt2_sa_theta_fn(mol, ncore, nact, nele, nmo, pairs,
+                                   builder, nroots=nroots, e2_scale=1.0)
+    out = comp(jnp.zeros(len(pairs)))
+    E_sa = float(out["E_sa"])
+    Ek = np.array([float(e) for e, _ in out["states"]])
+    e2 = np.array([float(c) for _, c in out["states"]])
+    assert np.isfinite(E_sa) and np.isfinite(Ek).all() and np.isfinite(e2).all()
+    assert (e2 <= 1e-9).all()          # correlation lowers the energy
+    assert -600.0 < E_sa < -500.0      # CeO/ECP energy scale
+
+
+def test_sa_pipeline_smoke_on_an_actinide_ecp_system():
+    """ThO/stuttgart_rsc: same smoke for the actinide side."""
+    from pyscfad import scf
+
+    from diffmrc.driver.nevpt2 import make_nevpt2_sa_theta_fn
+
+    mol = _ecp_dimer("Th", 3.47, "stuttgart_rsc")
+    nmo = mol.nao_nr()
+    ncore, nact, nele, nroots = 18, 2, 2, 2
+    pairs = _pairs(ncore, nact, nmo)
+    builder = lambda m: scf.RHF(m)  # noqa: E731
+    comp = make_nevpt2_sa_theta_fn(mol, ncore, nact, nele, nmo, pairs,
+                                   builder, nroots=nroots, e2_scale=1.0)
+    out = comp(jnp.zeros(len(pairs)))
+    E_sa = float(out["E_sa"])
+    Ek = np.array([float(e) for e, _ in out["states"]])
+    e2 = np.array([float(c) for _, c in out["states"]])
+    assert np.isfinite(E_sa) and np.isfinite(Ek).all() and np.isfinite(e2).all()
+    assert (e2 <= 1e-9).all()
+    assert -600.0 < E_sa < -400.0      # ThO/ECP energy scale
