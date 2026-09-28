@@ -132,6 +132,40 @@ def test_sa_joint_fn_reports_per_state_energies():
     assert float(np.mean(Ek)) == pytest.approx(float(out["E_sa"]), abs=1e-8)
 
 
+def test_sa_root_table_groups_into_physical_states():
+    """The raw root table is not a state table: the triplet arrives as
+    three degenerate M components, and state_groups must merge them into
+    one multiplicity-3 state while leaving the singlets alone.  This is
+    the analysis path the M5-C driver script used to pick targets by
+    eye, now pinned on a real SA solve."""
+    from pyscfad import scf
+
+    from diffmrc.analysis.states import select_groups, state_groups
+    from diffmrc.core.nevpt2.impl import cas_dets_for2
+    from diffmrc.driver.nevpt2 import make_nevpt2_sa_fn
+
+    mol = _h2_631g()
+    nmo = mol.nao_nr()
+    ncore, nact, nele = 0, 2, 2
+    pairs = _pairs(ncore, nact, nmo)
+    builder = lambda m: scf.RHF(m)  # noqa: E731
+    fs = make_nevpt2_sa_fn(ncore, nact, nele, nmo, pairs, builder,
+                           nroots=6, e2_scale=0.0)
+    out = fs(mol, jnp.zeros(len(pairs)))
+    dets = cas_dets_for2(ncore, nact, nele)
+    energies = [float(e) for e, _ in out["states"]]
+    rows, groups = state_groups(energies, np.asarray(out["cis"]), dets)
+
+    triplets = select_groups(groups, multiplicity=3)
+    assert len(triplets) == 1
+    assert len(triplets[0]['roots']) == 3          # M = +1, 0, -1
+    assert triplets[0]['szs'] == [0.0, 1.0]
+    singlets = select_groups(groups, multiplicity=1, n=None)
+    assert len(singlets) == 3
+    assert len(groups) == 4
+    assert all(g['multiplicity'] is not None for g in groups)
+
+
 def test_sa_vertical_excitations_reference_state_zero():
     from diffmrc.driver.nevpt2 import sa_vertical_excitations
 
