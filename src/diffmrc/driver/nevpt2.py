@@ -354,6 +354,23 @@ def make_nevpt2_joint_fn(ncore, nact, nele, nmo, pairs, scf_builder,
     return E_joint
 
 
+def sa_vertical_excitations(states):
+    """Vertical excitation energies from per-state ``(E_k, e2_k)`` entries.
+
+    ``states`` is the list ``make_nevpt2_sa_fn`` returns; state 0 is the
+    reference.  Returns one dict per state with ``dE_casscf`` and
+    ``dE_nevpt2`` in the same energy unit as the input (the e2 entries
+    carry the caller's ``e2_scale`` already).  Plain arithmetic on the
+    component outputs -- no Mole and no differentiation here; the
+    theta-derivative of these differences is whatever the components
+    carry.
+    """
+    E0, e20 = states[0]
+    return [{'dE_casscf': Ek - E0,
+             'dE_nevpt2': (Ek + e2k) - (E0 + e20)}
+            for Ek, e2k in states]
+
+
 def make_nevpt2_sa_fn(ncore, nact, nele, nmo, pairs, scf_builder, nroots,
                       e2_scale=1.0, eig_solver='default'):
     """Build the state-averaged joint components: SA-CASSCF plus

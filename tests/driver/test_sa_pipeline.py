@@ -130,3 +130,15 @@ def test_sa_joint_fn_reports_per_state_energies():
     Ek = [float(e) for e, _ in out["states"]]
     assert Ek[0] < Ek[1]
     assert float(np.mean(Ek)) == pytest.approx(float(out["E_sa"]), abs=1e-8)
+
+
+def test_sa_vertical_excitations_reference_state_zero():
+    from diffmrc.driver.nevpt2 import sa_vertical_excitations
+
+    states = [(-1.0, -0.01), (-0.9, -0.03)]
+    out = sa_vertical_excitations(states)
+    assert out[0]["dE_casscf"] == 0.0
+    assert out[0]["dE_nevpt2"] == 0.0
+    assert out[1]["dE_casscf"] == pytest.approx(0.1, abs=1e-14)
+    # dE_nevpt2 = 0.1 + (e2_1 - e2_0) = 0.1 - 0.02 = 0.08
+    assert out[1]["dE_nevpt2"] == pytest.approx(0.08, abs=1e-14)
