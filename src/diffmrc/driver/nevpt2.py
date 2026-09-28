@@ -152,9 +152,110 @@ def sa_cas_solution(h1e_mo, eri_mo, *, ncore, nact, nele, nroots,
 
     pln_eig = 'eigh' if eig_solver == 'default' else eig_solver
     nm = ncore + nact
-    return cs_casci(h1e_mo[:nm, :nm], eri_mo[:nm, :nm, :nm, :nm],
-                    ncore=ncore, nact=nact, nele_act=nele,
-                    nroots=nroots, return_ci=True, eig_solver=pln_eig)
+    e_sa, vecs = cs_casci(h1e_mo[:nm, :nm], eri_mo[:nm, :nm, :nm, :nm],
+                          ncore=ncore, nact=nact, nele_act=nele,
+                          nroots=nroots, return_ci=True, eig_solver=pln_eig)
+    # The core call returns a bare vector for nroots == 1 and an
+    # (ndet, nroots) matrix otherwise; the SA interface is uniform.
+    if nroots == 1:
+        vecs = vecs[:, None]
+    return e_sa, vecs
+
+
+def canonicalize_sa_jax(C, h1e, eri, CIs, *, ncore, nact, nele, occ2_idx=(),
+                        occ0_idx=(), eig_solver='default'):
+    """Average-density canonicalization for state-averaged solutions.
+
+    The same sequence as ``core.nevpt2.impl.canonicalize_jax`` -- active
+    natural orbitals, then the subspace Fock diagonalization of the
+    (core + occupied-active) and (empty-active + external) blocks, then a
+    CI re-solve in the canonical basis -- with the active one-particle
+    density replaced by the equal-weight average over the state-averaged
+    CI vectors (the density the state-averaged orbitals minimize
+    against; the Fock matrix is likewise built from the average active
+    density, which is the direct analogue of the core routine's use of
+    the single root's density in the original basis).  Returns
+    ``(C2, CIs2, eps)`` in the core routine's order.  With a single
+    vector this reduces to the core routine bit-for-bit (identity test in
+    ``tests/driver/test_sa_pipeline.py``); the single-root path is
+    untouched.
+    """
+    from jax import numpy as jnp
+
+    from ..core.eigh import eigh_cluster_ift, eigh_safe
+    from ..core.nevpt2.impl import cas_dets_for2, make_dm123_sf
+
+    eig = eigh_cluster_ift if eig_solver == 'lanczos' else eigh_safe
+    nmo = C.shape[1]
+    nocc = ncore + nact
+    CIs = jnp.asarray(CIs)
+    if CIs.ndim == 1:
+        CIs = CIs[:, None]  # tolerate a bare vector (core-style nroots=1)
+    nroots = int(CIs.shape[1])
+    dets = cas_dets_for2(ncore, nact, nele)
+    # Equal-weight average of the per-root active densities.
+    dm1 = make_dm123_sf(CIs[:, 0], dets, nact, ncore)[0]
+    for k in range(1, nroots):
+        dm1 = dm1 + make_dm123_sf(CIs[:, k], dets, nact, ncore)[0]
+    dm1 = dm1 / nroots
+
+    h1e_mo = jnp.einsum("ai,ab,bj->ij", C, h1e, C)
+    eri_mo = jnp.einsum("pi,qj,rk,sl,pqrs->ijkl", C, C, C, C, eri)
+    # 1) Active natural orbitals from the average density.  The columns
+    #    are reversed because eigh returns ascending eigenvalues while
+    #    the reference orders by descending occupation number.
+    w_nat, U_nat = eig(dm1)
+    U_nat = U_nat[:, ::-1]
+    C1 = C.at[:, ncore:nocc].set(C[:, ncore:nocc] @ U_nat)
+    # Re-solve the CI in the natural-orbital basis (mirrors the core
+    # routine, which performs this solve as well; it enters no returned
+    # quantity there, and the identity test holds both routines to the
+    # same computation).
+    h1e_mo1 = jnp.einsum("ai,ab,bj->ij", C1, h1e, C1)
+    eri_mo1 = jnp.einsum("pi,qj,rk,sl,pqrs->ijkl", C1, C1, C1, C1, eri)
+    sa_cas_solution(h1e_mo1, eri_mo1, ncore=ncore, nact=nact, nele=nele,
+                    nroots=nroots, eig_solver=eig_solver)
+    # 2) Generalized Fock matrix, F = h + J - K/2, in the original orbital
+    #    basis and with the original (average) active density.
+    D = jnp.zeros((nmo, nmo))
+    for i in range(ncore):
+        D = D.at[i, i].set(2.0)
+    D = D.at[ncore:nocc, ncore:nocc].set(dm1)
+    F = h1e_mo + jnp.einsum("pqrs,rs->pq", eri_mo, D) \
+        - 0.5 * jnp.einsum("psrq,rs->pq", eri_mo, D)
+    # Transform to the natural-orbital basis, rotating only the active block.
+    U_full = jnp.eye(nmo).at[ncore:nocc, ncore:nocc].set(U_nat)
+    F = U_full.T @ F @ U_full
+    # Block diagonalization, matching the reference: only the core and
+    # external blocks are rotated; the active space stays in its
+    # natural-orbital basis and keeps the Fock diagonal as energies.
+    occ2 = [ncore + i for i in occ2_idx]
+    occ0 = [ncore + i for i in occ0_idx]
+    blocks = [list(range(ncore)) + occ2, occ0 + list(range(nocc, nmo))]
+    blocks = [b for b in blocks if b]
+    active_idx = [ncore + i for i in range(nact)]
+    C2 = C1.copy()
+    eps_map = {}
+    for blk in blocks:
+        idx = jnp.asarray(blk, dtype=int)
+        if len(blk) > 1:
+            f_blk = F[idx][:, idx]
+            w, u = eig(f_blk)
+            C2 = C2.at[:, blk].set(C1[:, blk] @ u)
+            for a, i in enumerate(blk):
+                eps_map[i] = w[a]
+        else:
+            eps_map[blk[0]] = F[blk[0], blk[0]]
+    for i in active_idx:
+        eps_map[i] = F[i, i]
+    eps = jnp.stack([eps_map[i] for i in range(nmo)])
+    # 3) Final state-averaged CI solve in the canonical orbital basis.
+    h1e_mo2 = jnp.einsum("ai,ab,bj->ij", C2, h1e, C2)
+    eri_mo2 = jnp.einsum("pi,qj,rk,sl,pqrs->ijkl", C2, C2, C2, C2, eri)
+    _, CIs2 = sa_cas_solution(h1e_mo2, eri_mo2, ncore=ncore, nact=nact,
+                              nele=nele, nroots=nroots,
+                              eig_solver=eig_solver)
+    return C2, CIs2, eps
 
 
 def _components_from(C0_, h_, e_, enuc, th_, *, ncore, nact, nele, nmo,
