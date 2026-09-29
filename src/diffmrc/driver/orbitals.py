@@ -39,13 +39,37 @@ from ..core.optimizer import optimize_theta_hand, optimize_theta_scipy
 from ..core.stationary import (StopReason, StationaryPoint,
                                refine_stationary_point)
 
-__all__ = ['OrbitalPoint', 'converge_orbital_point', 'OPTIMIZER_GRAD_TOL',
-           'REFINE_TARGET']
+__all__ = ['OrbitalPoint', 'converge_orbital_point', 'hessp_of',
+           'OPTIMIZER_GRAD_TOL', 'REFINE_TARGET']
 
 OPTIMIZER_GRAD_TOL = 1e-6
 REFINE_TARGET = 1e-11
 MAX_STEPS = 2000
 REFINE_MAX_ITER = 80
+
+
+def hessp_of(E_theta):
+    """Hessian-vector product of ``E_theta`` as a jitted callable.
+
+    The trust-region polish consumes the second-order object through
+    scipy's ``hessp`` interface.  ``jax.hessian`` on the same function is
+    mathematically identical but its fwd-over-fwd contraction broadcasts
+    every intermediate over the npar^2 tangent pairs; measured on the
+    M5-C batch (npar ~ 500, nmo ~ 42-48), the first polish to fire was
+    killed by a 402 GB allocation.  A ``jax.jvp`` of the gradient carries
+    a single tangent vector through one reverse pass -- same exact
+    Hessian, memory O(one vector) plus the jitted reverse graph.
+    """
+    import jax
+    from jax import numpy as jnp
+
+    g = jax.grad(E_theta)
+
+    @jax.jit
+    def hvp(x, v):
+        return jax.jvp(g, (x,), (v,))[1]
+
+    return hvp
 
 
 def _trust_region_polish(E_theta, theta0, target, max_iter=200):
@@ -56,6 +80,12 @@ def _trust_region_polish(E_theta, theta0, target, max_iter=200):
     10 and its stall rule gives up -- while trust-ncg with the exact
     Hessian reaches 9.7e-9 at the same energy and 8.8e-8 Eh lower. The
     stall was the protocol's, not the chart's.
+
+    The Hessian reaches scipy as ``hessp`` (``hessp_of``: a jvp of the
+    gradient) rather than as a materialized ``jax.hessian``; the two are
+    the same object, but the fwd-over-fwd form broadcasts every
+    intermediate over npar^2 tangents and died on a 402 GB allocation
+    at npar ~ 500 in the M5-C batch.
 
     Returns ``(theta, energy, grad_norm)`` or None when scipy cannot
     start; also None when the gradient did not improve, so the caller
@@ -68,7 +98,7 @@ def _trust_region_polish(E_theta, theta0, target, max_iter=200):
 
     E_jit = jax.jit(E_theta)
     g_jit = jax.jit(jax.grad(E_theta))
-    h_jit = jax.jit(jax.hessian(E_theta))
+    hvp_jit = hessp_of(E_theta)
     x0 = np.asarray(theta0, dtype=float)
 
     def fun(x):
@@ -77,12 +107,13 @@ def _trust_region_polish(E_theta, theta0, target, max_iter=200):
     def jac(x):
         return np.asarray(g_jit(jnp.asarray(x)), dtype=float)
 
-    def hess(x):
-        H = np.asarray(h_jit(jnp.asarray(x)), dtype=float)
-        return 0.5 * (H + H.T)
+    def hessp(x, p):
+        return np.asarray(hvp_jit(jnp.asarray(x), jnp.asarray(p)),
+                          dtype=float)
 
     try:
-        res = sopt.minimize(fun, x0, jac=jac, hess=hess, method='trust-ncg',
+        res = sopt.minimize(fun, x0, jac=jac, hessp=hessp,
+                            method='trust-ncg',
                             options=dict(gtol=float(target),
                                          maxiter=int(max_iter)))
     except Exception:

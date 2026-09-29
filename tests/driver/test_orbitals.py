@@ -201,3 +201,39 @@ def test_the_polish_repeats_while_it_keeps_improving(monkeypatch):
     assert len(calls) == 3            # third pass met the target, loop ends
     assert p.grad_norm == pytest.approx(1.0e-12)
     assert p.is_stationary
+
+
+def test_hessp_matches_the_explicit_hessian_on_a_non_quadratic_energy():
+    """The polish's second-order object is a jvp of the gradient. Pin it
+    against jax.hessian: the two must act identically on a vector. The
+    HVP path is what keeps the memory at one tangent vector instead of
+    the npar^2 tangent pairs the fwd-over-fwd Hessian broadcasts --
+    measured on the M5-C batch: a 402 GB allocation at npar ~ 500."""
+    from diffmrc.driver.orbitals import hessp_of
+
+    def E(t):
+        return (jnp.sum(jnp.sin(t)) + 0.5 * jnp.sum(t ** 2)
+                + 0.25 * t[0] ** 2 * t[1] ** 2)
+
+    t = jnp.asarray([0.3, -0.7, 1.1, 0.2])
+    v = jnp.asarray([1.0, -0.5, 0.25, 2.0])
+    got = np.asarray(hessp_of(E)(t, v))
+    want = np.asarray(jax.hessian(E)(t)) @ np.asarray(v)
+    assert np.allclose(got, want, atol=1e-10)
+
+
+def test_the_polish_descends_a_curved_valley_with_the_hvp_hessian():
+    """End to end through scipy's trust-ncg with the HVP Hessian -- the
+    exact call path the driver's third stage uses -- on the classic
+    stalling valley (Rosenbrock)."""
+    from diffmrc.driver.orbitals import _trust_region_polish
+
+    def E(t):
+        return (1.0 - t[0]) ** 2 + 100.0 * (t[1] - t[0] ** 2) ** 2
+
+    out = _trust_region_polish(E, np.array([-1.2, 1.0]), 1e-10,
+                               max_iter=200)
+    assert out is not None
+    th, en, gn = out
+    assert np.allclose(th, [1.0, 1.0], atol=1e-4)
+    assert en == pytest.approx(0.0, abs=1e-8)
