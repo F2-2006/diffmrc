@@ -67,9 +67,13 @@ _MAX_STEP_NORM = 10.0
 # ``jax.hessian`` alternative is fwd-over-fwd and broadcasts every
 # intermediate over npar^2 tangents -- measured on the M5-C batch, it
 # died on a 402 GB allocation at npar ~ 500 (nmo 42-48).  The HVP route
-# carries one tangent per reverse pass; the same exact Hessian.
-_CG_TOL = 1e-10
-_CG_MAXITER = 100
+# carries one tangent per reverse pass; the same exact Hessian.  The CG
+# budget is deliberately shallow: an inexact Newton step only has to
+# feed the damping ladder and the downhill acceptance, which correct it;
+# measured on the M5-C batch, a deep solver (tol 1e-10, 100 iters) put
+# single molecules at 5-8 h of HVP dispatch.
+_CG_TOL = 1e-6
+_CG_MAXITER = 40
 
 
 class StopReason(Enum):
