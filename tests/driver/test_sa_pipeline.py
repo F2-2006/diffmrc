@@ -166,6 +166,49 @@ def test_sa_root_table_groups_into_physical_states():
     assert all(g['multiplicity'] is not None for g in groups)
 
 
+def test_sa_nevpt2_state_table_matches_the_manual_assembly():
+    """The driver-level table is the glue the M5-C scripts assemble by
+    hand (state_groups on the CI vectors + the representative's vertical
+    excitations); it must reproduce that composition value for value."""
+    from pyscfad import scf
+
+    from diffmrc.analysis.states import state_groups
+    from diffmrc.core.nevpt2.impl import cas_dets_for2
+    from diffmrc.driver.nevpt2 import (make_nevpt2_sa_theta_fn,
+                                       sa_nevpt2_state_table,
+                                       sa_vertical_excitations)
+
+    mol = _h2_631g()
+    nmo = mol.nao_nr()
+    ncore, nact, nele, nroots = 0, 2, 2, 6
+    pairs = _pairs(ncore, nact, nmo)
+    builder = lambda m: scf.RHF(m)  # noqa: E731
+    comp = make_nevpt2_sa_theta_fn(mol, ncore, nact, nele, nmo, pairs,
+                                   builder, nroots=nroots, e2_scale=1.0)
+    out = comp(jnp.zeros(len(pairs)))
+    dets = cas_dets_for2(ncore, nact, nele)
+
+    rows, groups = sa_nevpt2_state_table(out, dets)
+    energies = [float(e) for e, _ in out["states"]]
+    usable = [bool(np.isfinite(float(e2))) for _, e2 in out["states"]]
+    _, ref_groups = state_groups(energies, np.asarray(out["cis"]), dets,
+                                 usable=usable)
+    vees = sa_vertical_excitations(out["states"])
+    assert len(rows) == len(out["states"])
+    assert len(groups) == len(ref_groups) == 4
+    for g, rg in zip(groups, ref_groups):
+        assert g["roots"] == rg["roots"]
+        assert g["multiplicity"] == rg["multiplicity"]
+        r = vees[g["representative"]]
+        assert g["dE_casscf"] == pytest.approx(float(r["dE_casscf"]),
+                                               abs=1e-12)
+        a = g["dE_nevpt2"]
+        b = float(r["dE_nevpt2"])
+        assert (a == pytest.approx(b, abs=1e-12)
+                or (np.isnan(a) and np.isnan(b)))
+    assert sum(1 for g in groups if g["multiplicity"] == 3) == 1
+
+
 def test_sa_vertical_excitations_reference_state_zero():
     from diffmrc.driver.nevpt2 import sa_vertical_excitations
 

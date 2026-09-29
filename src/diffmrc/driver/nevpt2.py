@@ -383,6 +383,37 @@ def sa_vertical_excitations(states):
             for Ek, e2k in states]
 
 
+def sa_nevpt2_state_table(out, dets, *, tol=1e-9):
+    """Physical-state table from a state-averaged NEVPT2 output.
+
+    ``out`` is what ``make_nevpt2_sa_fn`` / ``make_nevpt2_sa_theta_fn``
+    return.  The roots are collapsed with ``analysis.states.state_groups``
+    (energy-degenerate spin components form one state, <S^2> labels the
+    multiplicity, the lowest component with a finite NEVPT2 energy is the
+    group's representative) and every group gains ``dE_casscf`` /
+    ``dE_nevpt2`` -- the vertical excitations of its representative, in
+    the caller's energy unit and ``e2_scale``.  This is the composition
+    the state-averaged driver scripts otherwise assemble by hand; keeping
+    it here makes the root table a library output rather than script
+    glue.
+
+    Returns ``(rows, groups)`` exactly as ``state_groups``, with the two
+    extra keys on the groups.
+    """
+    from ..analysis.states import state_groups
+
+    energies = [float(e) for e, _ in out['states']]
+    usable = [bool(np.isfinite(float(e2))) for _, e2 in out['states']]
+    rows, groups = state_groups(energies, out['cis'], dets, tol=tol,
+                                usable=usable)
+    vees = sa_vertical_excitations(out['states'])
+    for g in groups:
+        r = vees[g['representative']]
+        g['dE_casscf'] = float(r['dE_casscf'])
+        g['dE_nevpt2'] = float(r['dE_nevpt2'])
+    return rows, groups
+
+
 def _sa_components_from(C0_, h_, e_, enuc, th_, *, ncore, nact, nele, nmo,
                         pairs, nroots, dets, links_a, links_b,
                         state_weights=None, e2_scale=1.0,
