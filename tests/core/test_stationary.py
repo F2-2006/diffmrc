@@ -266,3 +266,23 @@ def test_curvature_report_symmetrizes_its_input():
 def test_curvature_report_rejects_a_non_square_matrix():
     with pytest.raises(ValueError):
         curvature_report(np.zeros((2, 3)))
+
+
+def test_cg_solve_reproduces_the_explicit_linear_solve():
+    """Newton-CG's solver against numpy on a well-conditioned SPD system.
+    The refinement reaches the Hessian only through matvecs, so this is
+    the solver the damped-Newton step rests on."""
+    from diffmrc.core.stationary import _cg_solve
+
+    rng = np.random.default_rng(0)
+    A = rng.normal(size=(8, 8))
+    A = A @ A.T + 0.5 * np.eye(8)
+    b = rng.normal(size=8)
+    x = _cg_solve(lambda v: A @ v, b)
+    assert np.allclose(A @ x, b, atol=1e-8)
+
+
+def test_cg_solve_returns_zero_on_a_zero_right_hand_side():
+    from diffmrc.core.stationary import _cg_solve
+
+    assert np.allclose(_cg_solve(lambda v: 2.0 * v, np.zeros(4)), 0.0)

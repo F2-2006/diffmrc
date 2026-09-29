@@ -62,6 +62,14 @@ _INNER_TRIES = 14
 # budget. A step larger than this means the Newton model has stopped
 # describing the function, which is the signal to stop.
 _MAX_STEP_NORM = 10.0
+# Newton-CG controls: the damped-Newton step solves (H + lam I) x = g by
+# conjugate gradients on Hessian-vector products.  The explicit
+# ``jax.hessian`` alternative is fwd-over-fwd and broadcasts every
+# intermediate over npar^2 tangents -- measured on the M5-C batch, it
+# died on a 402 GB allocation at npar ~ 500 (nmo 42-48).  The HVP route
+# carries one tangent per reverse pass; the same exact Hessian.
+_CG_TOL = 1e-10
+_CG_MAXITER = 100
 
 
 class StopReason(Enum):
@@ -169,8 +177,49 @@ def curvature_report(H, negative_tol=1e-8):
     )
 
 
+def _cg_solve(matvec, b, tol=_CG_TOL, maxiter=_CG_MAXITER):
+    """Solve ``matvec(x) = b`` by conjugate gradients.
+
+    The Newton step of the refinement needs ``(H + lam I) x = g``; with
+    the Hessian reaching this code only through Hessian-vector products,
+    CG is the solver that never materializes it.  Positive-definiteness
+    is guaranteed by the shift for lam >= _LAMBDA_MIN; when a direction
+    is numerically flat the iteration stops rather than dividing by a
+    vanishing denominator, and the caller's step-norm guard decides what
+    to do with the result.
+    """
+    x = np.zeros_like(b)
+    r = np.array(b, dtype=float)
+    b_norm2 = float(r @ r)
+    if b_norm2 == 0.0:
+        return x
+    p = r.copy()
+    rs = b_norm2
+    for _ in range(maxiter):
+        Ap = np.asarray(matvec(p), dtype=float)
+        denom = float(p @ Ap)
+        if abs(denom) < 1e-300:
+            break
+        alpha = rs / denom
+        x = x + alpha * p
+        r = r - alpha * Ap
+        rs_new = float(r @ r)
+        if rs_new <= (tol ** 2) * b_norm2:
+            break
+        p = r + (rs_new / rs) * p
+        rs = rs_new
+    return x
+
+
 def refine_stationary_point(E_theta, theta0, max_iter=80, target=1e-11):
     """Damped Newton refinement that only ever moves downhill.
+
+    The Newton step solves ``(H + lam I) x = g`` by conjugate gradients
+    on Hessian-vector products (``_cg_solve``); the Hessian itself is
+    never materialized -- the explicit ``jax.hessian`` broadcast every
+    intermediate over npar^2 tangents and was killed by a 402 GB
+    allocation at npar ~ 500 on the M5-C batch.  The damping ladder, the
+    step-norm guard and the downhill acceptance are unchanged.
 
     Parameters
     ----------
@@ -193,8 +242,13 @@ def refine_stationary_point(E_theta, theta0, max_iter=80, target=1e-11):
     """
     import jax.numpy as jnp
 
-    grad = jax.jit(jax.grad(E_theta))
-    hess = jax.jit(jax.hessian(E_theta))
+    grad_plain = jax.grad(E_theta)
+    grad = jax.jit(grad_plain)
+
+    def _hvp_raw(theta, v):
+        return jax.jvp(grad_plain, (theta,), (v,))[1]
+
+    hvp = jax.jit(_hvp_raw)
 
     theta = jnp.asarray(np.asarray(theta0, dtype=float))
     energy = float(E_theta(theta))
@@ -208,16 +262,14 @@ def refine_stationary_point(E_theta, theta0, max_iter=80, target=1e-11):
         if gnorm < target:
             reason = StopReason.CONVERGED
             break
-        H = np.asarray(hess(theta))
-        H = 0.5 * (H + H.T)
         g = np.asarray(grad(theta), dtype=float)
         accepted = False
         for _try in range(_INNER_TRIES):
-            try:
-                step = np.linalg.solve(H + lam * np.eye(H.shape[0]), g)
-            except np.linalg.LinAlgError:
-                lam *= _LAMBDA_UP
-                continue
+            def _matvec(v):
+                return np.asarray(hvp(theta, jnp.asarray(v)),
+                                  dtype=float) + lam * v
+
+            step = _cg_solve(_matvec, g)
             if not np.all(np.isfinite(step)) \
                     or np.linalg.norm(step) > _MAX_STEP_NORM:
                 # The Newton model has stopped describing the function.
