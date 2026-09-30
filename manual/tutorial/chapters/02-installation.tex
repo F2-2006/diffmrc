@@ -1,0 +1,89 @@
+\section{Installing and running}
+\label{sec:installation}
+
+\subsection{Requirements}
+
+\begin{center}
+\begin{tabular}{ll}
+\toprule
+Component & Version and role \\
+\midrule
+Python & $\geq 3.10$ \\
+numpy, scipy & required; the analysis layer needs only these \\
+pyscfad & $\geq 0.3.3$; provides the JAX-based \texttt{gto} and \texttt{scf} \\
+pyscf & $\geq 2.5$; reference comparisons and integral drivers \\
+jax & $\geq 0.4$; the differentiable array layer \\
+matplotlib & only for the figure sources \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\texttt{pyscfad} pins a specific JAX version, so install the package
+into a dedicated environment rather than into a shared one.
+
+\begin{lstlisting}[language=bash]
+conda create -n diffmrc python=3.11
+conda activate diffmrc
+pip install -e ".[core,dev]"     # kernel, tests and lint tooling
+\end{lstlisting}
+
+For work on the analysis layer alone, \texttt{pip install -e ".[dev]"}
+is sufficient: that layer is plain NumPy and imports nothing from the
+numerical kernel.
+
+\subsection{Runtime settings that are not optional}
+
+Two settings must be established before the first JAX import.
+
+\begin{lstlisting}[language=Python]
+import os
+os.environ['JAX_PLATFORMS'] = 'cpu'     # before importing jax
+for v in ('OMP_NUM_THREADS', 'MKL_NUM_THREADS',
+          'OPENBLAS_NUM_THREADS', 'NUMEXPR_NUM_THREADS',
+          'VECLIB_MAXIMUM_THREADS'):
+    os.environ[v] = '8'
+
+import jax
+jax.config.update('jax_enable_x64', True)
+\end{lstlisting}
+
+\texttt{jax\_enable\_x64} must be set: the package is validated in
+double precision, and single-precision runs will produce silently
+wrong gradients.  The CPU platform pin is deliberate.  The stack has
+been developed and verified on CPU only; on a machine with a GPU the
+default JAX platform would select CUDA, where this build of pyscfad
+raises a solver error that has no bearing on the chemistry.  Pin the
+platform for now; GPU support is not claimed.
+
+The thread variables keep the BLAS layer inside the thread budget the
+driver assumes.  They are not a performance suggestion: without them a
+single calculation can oversubscribe a shared node.
+
+\subsection{Checking the installation}
+
+\begin{lstlisting}[language=bash]
+pytest tests/ -v        # unit and integration tests
+lint-imports            # verifies the layer boundaries
+\end{lstlisting}
+
+The layer contracts are worth a word even at install time.  The package
+is organized in six layers (kernel, analysis, policy, driver, report,
+command line), and the import direction between them is enforced as a
+test.  If \texttt{lint-imports} is unavailable in your environment,
+\texttt{tests/test\_layer\_contracts.py} performs the same check.  A
+run that passes the suite but fails the contracts is a run the
+developers would want to see.
+
+Two environment notes that cost us time, recorded so that they need
+not cost yours:
+
+\begin{itemize}
+  \item pyscfad's molecule object cannot be traced inside
+    \texttt{jax.jit}; the driver layer constructs plain-array callables
+    for anything that is jitted.  If you write your own jitted wrapper
+    around a factory from \texttt{driver.nevpt2}, use the
+    \texttt{theta}-only factories, which are built for that context.
+  \item The first call into a heavy node of the chain compiles an XLA
+    program and can take minutes; subsequent calls are fast.  A slow
+    first evaluation is expected, not a hang.
+\end{itemize}

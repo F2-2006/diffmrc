@@ -1,0 +1,104 @@
+\section{A first calculation}
+\label{sec:first-calculation}
+
+This chapter computes a CASSCF nuclear gradient for water at the
+6-31G level, with an active space of two electrons in two orbitals
+(the highest occupied and lowest unoccupied orbital of the reference).
+It is the smallest complete run through the kernel: a reference SCF, an
+orbital-rotation optimization, and one nuclear gradient from automatic
+differentiation.
+
+\subsection{The script}
+
+\begin{lstlisting}[language=Python]
+import os
+os.environ['JAX_PLATFORMS'] = 'cpu'
+for v in ('OMP_NUM_THREADS', 'MKL_NUM_THREADS',
+          'OPENBLAS_NUM_THREADS', 'NUMEXPR_NUM_THREADS',
+          'VECLIB_MAXIMUM_THREADS'):
+    os.environ[v] = '8'
+
+import numpy as np
+import jax
+jax.config.update('jax_enable_x64', True)
+from jax import numpy as jnp
+from pyscfad import gto as pgto, scf as pscf
+
+from diffmrc.core.rotation import block_rotation
+from diffmrc.core.orblib import orbital_pairs
+from diffmrc.core.optimizer import optimize_theta
+from diffmrc.core.grad import (make_energy_fn, make_grad_fn,
+                               solve_theta_star, nuclear_gradient)
+
+mol = pgto.Mole()
+mol.atom = 'O 0 0 0; H 0.7557 0 0.5880; H -0.7557 0 0.5880'
+mol.basis = '6-31g'
+mol.build()
+
+nmo = mol.nao_nr()
+ncore, nact, nele = 4, 2, 2
+pairs = orbital_pairs(ncore, nact, nmo, include_cv=True)
+
+E_cas = make_energy_fn(ncore, nact, nele)
+mf = pscf.RHF(mol)
+mf.kernel()
+C_rhf = jnp.asarray(np.asarray(mf.mo_coeff))
+
+h1e = mol.intor('int1e_kin') + mol.intor('int1e_nuc')
+eri = mol.intor('int2e', aosym='s1')
+
+E_theta = lambda t: E_cas(C_rhf @ block_rotation(t, nmo, pairs), h1e, eri,
+                          mol.energy_nuc())
+th_star, gnorm = solve_theta_star(mol, C_rhf, E_theta, len(pairs),
+                                  optimize_theta, steps=2000,
+                                  g_conv=1e-12)
+g = nuclear_gradient(mol, make_grad_fn(nmo, pairs, th_star, E_cas, pscf))
+print(g)          # shape (natm, 3), in Eh/bohr
+\end{lstlisting}
+
+\subsection{What each piece does}
+
+The reference SCF is an ordinary spin-restricted Hartree--Fock from
+pyscfad, whose MO coefficients are the starting point of the chain.
+The rotation parameter vector \texttt{t} is turned into an orbital
+rotation by \texttt{block\_rotation}; the pair list from
+\texttt{orbital\_pairs} includes the core--virtual rotations, which are
+required for a correct stationary point --- omitting them leaves the
+optimizer stopped at a point that is not stationary.  \texttt{E\_cas}
+is the CASCI energy of the rotated orbitals.
+
+\texttt{solve\_theta\_star} runs the two-stage orbital optimization
+and returns the parameter vector \emph{and} the gradient norm at the
+point it stopped at.  Do not discard \texttt{gnorm}: it is the
+evidence of convergence, and the package reports stationarity from
+this quantity, not from an optimizer status code.
+
+\texttt{nuclear\_gradient} applies automatic differentiation to the
+whole converged chain with respect to the nuclear coordinates, with
+the orbital parameters held at their converged values.  The mathematics
+of that construction is in the Manual (Chapter on the differentiable
+chain); for this tutorial the point is that no derivative expression
+was written anywhere in the package or in this script.
+
+\subsection{Reading the result}
+
+For this geometry the gradient is small but not zero --- the atoms are
+close to, not at, the CASSCF/6-31G equilibrium.  Two checks belong to
+every such run:
+
+\begin{itemize}
+  \item \texttt{gnorm}, the orbital-rotation gradient norm, should sit
+    at or below the threshold that
+    \texttt{solve\_theta\_star} was asked for.  If the refinement
+    stalls above the threshold, the returned point carries the stall
+    in its stopping reason; treat a stalled point as a candidate, not
+    as a result.
+  \item The energy is invariant under rotations within a degenerate
+    orbital pair.  If a molecule has exact degeneracies, small
+    differences between two runs with different rotation orders are a
+    property of the chart, not a failure of the code.
+\end{itemize}
+
+The next chapter moves from the ground state to several states at once
+--- the setting in which the state-averaged machinery and the
+per-state perturbation theory come in.

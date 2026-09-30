@@ -1,0 +1,44 @@
+% diffmrc documentation style, shared by the tutorial and the manual.
+\NeedsTeXFormat{LaTeX2e}
+\ProvidesPackage{diffmrc-manual}[2026/10/01 diffmrc documentation style]
+\RequirePackage[a4paper, margin=2.4cm]{geometry}
+\RequirePackage{fontspec}
+\RequirePackage{amsmath, amssymb}
+\RequirePackage{booktabs}
+\RequirePackage{enumitem}
+\RequirePackage{xcolor}
+\RequirePackage{graphicx}
+\RequirePackage{listings}
+\RequirePackage{fancyhdr}
+\RequirePackage[hidelinks]{hyperref}
+
+\definecolor{codebg}{gray}{0.96}
+\definecolor{kwcolor}{rgb}{0.13,0.29,0.53}
+\definecolor{cmcolor}{rgb}{0.35,0.35,0.35}
+\definecolor{strcolor}{rgb}{0.58,0.20,0.20}
+
+\lstset{
+  basicstyle=\ttfamily\small,
+  backgroundcolor=\color{codebg},
+  frame=single,
+  framerule=0pt,
+  breaklines=true,
+  columns=fullflexible,
+  keepspaces=true,
+  showstringspaces=false,
+  language=Python,
+  keywordstyle=\color{kwcolor}\bfseries,
+  commentstyle=\color{cmcolor}\itshape,
+  stringstyle=\color{strcolor},
+}
+
+\newcommand{\doctitle}{}
+\newcommand{\setdoctitle}[1]{\renewcommand{\doctitle}{#1}}
+
+\pagestyle{fancy}
+\fancyhf{}
+\fancyhead[L]{\small\textit{diffmrc \doctitle}}
+\fancyhead[R]{\small\thepage}
+\renewcommand{\headrulewidth}{0.4pt}
+
+\setlist{itemsep=2pt, topsep=3pt}

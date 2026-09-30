@@ -1,0 +1,33 @@
+\documentclass[11pt]{article}
+\usepackage{../common/diffmrc-manual}
+\setdoctitle{Tutorial}
+
+\title{\textbf{diffmrc Tutorial}\\[4pt]
+  \large A hands-on walkthrough of the differentiable multireference stack}
+\author{}
+\date{Version 0.1}
+
+\begin{document}
+\maketitle
+\begin{center}
+\begin{minipage}{0.85\textwidth}
+\small
+This tutorial follows a user from installation to a complete
+state-averaged calculation with a benchmark comparison.  It is paired
+with the \emph{Manual}, which carries the full reference: the API, the
+methods and implementation chapters, the verification records, and the
+development architecture.  The package is an early-stage research code;
+the tutorial states the limitations where they bite.
+\end{minipage}
+\end{center}
+\tableofcontents
+\clearpage
+\input{chapters/01-introduction}
+\input{chapters/02-installation}
+\input{chapters/03-first-calculation}
+\input{chapters/04-state-averaged}
+\input{chapters/05-active-space}
+\input{chapters/06-convergence}
+\input{chapters/07-benchmark-walkthrough}
+\input{chapters/08-limitations}
+\end{document}

@@ -1,0 +1,66 @@
+\section{Introduction}
+\label{sec:introduction}
+
+\texttt{diffmrc} is an end-to-end differentiable multireference
+electronic structure stack.  It spans configuration interaction
+(CASCI), complete active space self-consistent field (CASSCF),
+state-averaged CASSCF, and second-order N-electron valence perturbation
+theory (NEVPT2).  Every energy, nuclear gradient, and second derivative
+the package produces comes out of the same code path by automatic
+differentiation; there is no hand-derived derivative equation anywhere
+in the source.
+
+The stack is built on \href{https://pyscf.org/}{PySCF} and
+\href{https://github.com/fishjojo/pyscfad}{pyscfad}, with
+\href{https://github.com/jax-ml/jax}{JAX} providing the differentiable
+array operations.  All arithmetic is double precision.  The package
+does not replace PySCF: the Gaussian-basis integrals, the reference
+SCF, and the benchmark comparisons all come from PySCF and pyscfad,
+while the differentiable multireference chain is original to this
+codebase.
+
+\subsection{Who this tutorial is for}
+
+You should be comfortable with the chemistry of active spaces and with
+running a Python quantum-chemistry calculation from a script.  You do
+not need prior exposure to JAX: the tutorial introduces the two
+runtime settings that matter (\texttt{jax\_enable\_x64} and the CPU
+platform pin) right where they are first needed.
+
+\subsection{What this tutorial covers}
+
+\begin{itemize}
+  \item Chapter~\ref{sec:installation}: installing the package and
+    setting up a working environment.
+  \item Chapter~\ref{sec:first-calculation}: a complete CASSCF
+    nuclear-gradient calculation for water, explained line by line.
+  \item Chapter~\ref{sec:state-averaged}: state-averaged CASSCF with
+    per-state NEVPT2, and how to read the root table it produces.
+  \item Chapter~\ref{sec:active-space}: choosing an active space, with
+    the frontier-window rules the benchmark work forced us to write
+    down.
+  \item Chapter~\ref{sec:convergence}: what the convergence
+    diagnostics mean and how to act on them.
+  \item Chapter~\ref{sec:benchmark-walkthrough}: a full benchmark
+    walkthrough on a real target, end to end.
+  \item Chapter~\ref{sec:limitations}: where the method family and the
+    present implementation stop being reliable.
+\end{itemize}
+
+The companion \emph{Manual} carries what a tutorial should not: the
+API reference, protocol tables, the design of the differentiable chain
+and its second derivatives, the verification records, and the
+development architecture.
+
+\subsection{Project status}
+
+This is a research codebase, released to accompany a methods paper and
+to make its results reproducible.  It is not a finished library:
+interfaces may change without notice, test coverage is partial, and
+the numerical behaviour of the orbital-optimization and perturbation
+layers depends on convergence settings that the code reports rather
+than enforces.  Several limitations listed in
+Chapter~\ref{sec:limitations} are properties of the method family and
+will not be removed by further development of this package.  Use it
+for research, read the convergence diagnostics it returns, and do not
+treat it as a black box.

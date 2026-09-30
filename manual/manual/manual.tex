@@ -1,0 +1,38 @@
+\documentclass[11pt]{report}
+\usepackage{../common/diffmrc-manual}
+\setdoctitle{Manual}
+
+\title{\textbf{diffmrc Manual}\\[4pt]
+  \large Reference, methods, and verification records}
+\author{}
+\date{Version 0.1}
+
+\begin{document}
+\maketitle
+\begin{center}
+\begin{minipage}{0.85\textwidth}
+\small
+The reference document for the diffmrc package: installation and
+configuration, the API surface, protocol details, the design of the
+differentiable chain and its second derivatives, the verification
+records, benchmark results, and the development architecture.  The
+companion \emph{Tutorial} covers first use.
+\end{minipage}
+\end{center}
+\tableofcontents
+\clearpage
+\part{User reference}
+\input{chapters/01-overview}
+\input{chapters/02-installation}
+\input{chapters/03-api}
+\input{chapters/04-protocols}
+\part{Methods and records}
+\input{chapters/05-differentiable-chain}
+\input{chapters/06-second-derivatives}
+\input{chapters/07-verification}
+\input{chapters/08-benchmarks}
+\input{chapters/09-limitations}
+\part{Development}
+\input{chapters/10-architecture}
+\input{chapters/11-reproducing}
+\end{document}

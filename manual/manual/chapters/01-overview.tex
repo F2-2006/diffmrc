@@ -1,0 +1,64 @@
+\chapter{Overview and package layout}
+\label{ch:overview}
+
+\section{Design principles}
+
+Three commitments shape the package, and most of its structure follows
+from them.
+
+The first is that derivatives are never written by hand.  Every nuclear
+gradient and second derivative is obtained by differentiating the
+energy code path with JAX.  This is what makes the CASSCF, state-averaged
+CASSCF, and NEVPT2 layers share one implementation of the physics: a
+correction to the energy expression propagates to all of its derivatives
+without a separate derivation.
+
+The second is that the package is layered, and the layer boundaries are
+tested.  The kernel cannot import the layers above it; the analysis
+layer cannot import the kernel at all.  The contract is enforced in the
+test suite (see Chapter~\ref{ch:architecture}), so a violation is a
+failing test rather than a matter of review discipline.
+
+The third is that convergence is reported, not assumed.  Optimizers
+return the gradient norm at the point they stopped at, and the package
+distinguishes ``the optimizer stopped improving'' from ``the point is
+stationary.''  Callers are expected to carry that distinction into
+whatever they claim about a result.
+
+\section{Package layout}
+
+\begin{lstlisting}[language=bash]
+src/diffmrc/
+  core/       numerical kernel: rotations, CASCI, CASSCF, NEVPT2,
+              stationary points, the frozen source of the chain
+  analysis/   post-processing that reads converged objects: entropies,
+              mutual information, spin and state identification,
+              orbital identity and frontier windows; NumPy only
+  policy/     selection rules over analysis output: composition,
+              entropy-based and ranked orbital selection, verification
+  driver/     composition layer: assembles the kernel into the
+              differentiable SCF -> CASSCF -> NEVPT2 pipelines,
+              orbital-point convergence, frozen-geometry factories
+  report/     result objects and rendering
+  cli/        the command-line entry point
+\end{lstlisting}
+
+The dependency direction runs downward only: \texttt{core} at the
+bottom, \texttt{cli} at the top.  A user script may import any layer;
+the layers themselves may not import upward.  This is what allows the
+analysis layer to be tested and used with nothing but NumPy installed.
+
+\section{How the documents are organized}
+
+This manual is the reference.  Part~I covers installation, the API
+surface, and the protocol details that the code reports but does not
+enforce.  Part~II carries the methods: the design of the differentiable
+chain, the second-derivative construction, the verification records
+against independent implementations, the benchmark results, and the
+consolidated limitation list.  Part~III is for development: layer
+contracts, the test architecture, and the reproduction steps for the
+paper.
+
+The companion \emph{Tutorial} is the on-ramp: installation, a first
+CASSCF gradient, state-averaged workflows, active-space selection, and
+a full benchmark walkthrough, each with runnable code.

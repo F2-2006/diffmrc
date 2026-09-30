@@ -1,0 +1,87 @@
+\chapter{Installation and configuration}
+\label{ch:installation}
+
+\section{Supported environment}
+
+The package is developed and verified on Linux and Windows with CPython
+3.11, on CPU.  The Tutorial (Chapter 2) gives the minimal recipe; this
+chapter records the constraints behind it.
+
+\begin{center}
+\begin{tabular}{lll}
+\toprule
+Dependency & Constraint & Why it is pinned \\
+\midrule
+Python & $\geq 3.10$ & \texttt{int.bit\_count} in the determinant tools \\
+numpy & $\geq 1.24$ & analysis layer, reference arithmetic \\
+scipy & $\geq 1.10$ & L-BFGS-B and trust-region stages \\
+pyscfad & $\geq 0.3.3$ & provides the traceable SCF and integral path \\
+pyscf & $\geq 2.5$ & reference energies and comparisons \\
+jax & $\geq 0.4$ & array layer; the exact pin is pyscfad's \\
+matplotlib & any recent & figure sources only \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\texttt{pyscfad} pins a specific JAX version, which is why the package
+should live in its own environment.  Mixing it into an environment with
+a different JAX pin produces failures that look like numerical bugs and
+are not.
+
+\section{Runtime configuration}
+
+Three settings are load-bearing.
+
+\textbf{\texttt{jax\_enable\_x64 = True}.} The package is validated in
+double precision.  With the default single precision the errors are not
+loud: gradients lose several digits and some convergence gates become
+unreachable, while energies look plausible.
+
+\textbf{\texttt{JAX\_PLATFORMS = cpu}.} The CPU platform is the
+verified configuration.  On a machine with a CUDA device, leaving the
+platform unset selects the GPU, where the solver path used by the
+orbital canonicalization raises an error unrelated to the chemistry.
+Set the variable before importing JAX; setting it afterwards has no
+effect.
+
+\textbf{Thread environment variables.} The driver assumes it owns the
+thread budget it was given.  Setting the five BLAS thread variables
+keeps multiple concurrent calculations from oversubscribing a node;
+their absence does not corrupt results, it makes timing meaningless and
+slows everything.
+
+\section{Verifying the installation}
+
+\begin{lstlisting}[language=bash]
+pytest tests/ -v
+lint-imports        # or: pytest tests/test_layer_contracts.py
+\end{lstlisting}
+
+The suite is the primary artifact to look at: it contains the
+first-order and second-order derivative checks against finite
+differences, the cross-validation against PySCF, and the layer
+contracts.  A passing suite on your machine is the intended proof that
+the environment is sound.
+
+\section{Optional: running the figures}
+
+The figure sources under \texttt{figures/} import matplotlib and read
+JSON results produced by the scripts; they require no additional
+configuration.  They are not part of the package tests.
+
+\section{Known environment friction}
+
+\begin{itemize}
+  \item The first evaluation of a freshly built node of the chain
+    triggers XLA compilation that can take minutes.  This is expected;
+    a stopwatch on a single evaluation will mislead.
+  \item pyscfad's \texttt{Mole} objects cannot cross a
+    \texttt{jax.jit} boundary.  The driver layer offers frozen-geometry
+    factories for jitted contexts; the factory docstrings state which
+    is which.
+  \item On shared nodes, leave headroom for the owner of the other
+    processes.  The memory profile of this package is dominated by
+    compilation- and evaluation-time buffers of the differentiated
+    chain, not by the integrals, and it grows steeply with the number
+    of rotation parameters.
+\end{itemize}
