@@ -1,4 +1,93 @@
 \section{State-averaged workflows}
-\label{sec:04-state-averaged}
+\label{sec:state-averaged}
 
-% TODO
+Excited states and vertical excitation energies require the orbitals
+to describe several electronic states at once.  The driver layer
+provides a state-averaged CASSCF construction whose roots are grouped
+into physical states, with per-state NEVPT2 corrections, all in the
+same differentiable chain.
+
+\subsection{A state-averaged calculation}
+
+The smallest complete example is the hydrogen molecule, whose minimal
+active space holds one singlet ground state, one triplet, and higher
+singlets.
+
+\begin{lstlisting}[language=Python]
+import numpy as np
+from jax import numpy as jnp
+from pyscfad import gto, scf
+
+from diffmrc.analysis.states import select_groups
+from diffmrc.core.nevpt2.impl import cas_dets_for2
+from diffmrc.core.orblib import orbital_pairs
+from diffmrc.driver.nevpt2 import (make_nevpt2_sa_theta_fn,
+                                   sa_nevpt2_state_table)
+
+mol = gto.Mole()
+mol.atom = 'H 0 0 0; H 0 0 0.74'
+mol.basis = '6-31g'
+mol.build()
+
+nmo = mol.nao_nr()
+ncore, nact, nele, nroots = 0, 2, 2, 6
+pairs = orbital_pairs(ncore, nact, nmo, include_cv=True)
+builder = lambda m: scf.RHF(m)
+dets = cas_dets_for2(ncore, nact, nele)
+
+comp = make_nevpt2_sa_theta_fn(mol, ncore, nact, nele, nmo, pairs,
+                               builder, nroots=nroots, e2_scale=1.0)
+out = comp(jnp.zeros(len(pairs)))
+
+rows, groups = sa_nevpt2_state_table(out, dets)
+for g in groups:
+    print(g['multiplicity'], g['dE_casscf'], g['dE_nevpt2'])
+\end{lstlisting}
+
+The theta-only factory is the right one whenever the geometry is
+fixed: it builds the reference SCF and the integrals once and returns
+a callable of the rotation parameters alone.  This is also the factory
+that can be wrapped in \texttt{jax.jit} for orbital optimization,
+because it never touches the pyscfad molecule at call time.
+
+\subsection{Reading the root table}
+
+A state-averaged eigensolver returns \emph{roots}, not states, and the
+difference matters twice over.
+
+First, spin components are degenerate.  A triplet contributes three
+degenerate roots (the $M = +1, 0, -1$ components); a call that asks
+for six roots of the hydrogen molecule receives three singlets and the
+three components of one triplet.  \texttt{sa\_nevpt2\_state\_table}
+collapses energy-degenerate roots into one group per physical state,
+labels each group with the multiplicity read from $\langle S^2 \rangle$
+of its members, and flags a group whose members disagree on
+$\langle S^2 \rangle$ rather than guessing.
+
+Second, a per-component contraction can be undefined.  The NEVPT2
+correction of a pure $|M| = 1$ component can come out as \texttt{nan},
+and the representative of the group is then chosen as the lowest
+component whose correction is finite.  Treat a group whose entries are
+all \texttt{nan} as a state this protocol cannot report, not as zero.
+
+\begin{lstlisting}[language=Python]
+triplets = select_groups(groups, multiplicity=3)   # lowest triplet
+singlets = select_groups(groups, multiplicity=1, n=None)
+\end{lstlisting}
+
+\subsection{State weights}
+
+By default the roots enter the state average with equal weights.  When
+the table is to be read per state, a second pass with between-group
+equal weights --- the components of one state share that state's
+weight, states share equally --- stabilizes the orbitals and usually
+tightens the final gradient.  The two-pass pattern is what the
+benchmark scripts run; its effect on the reported excitation energies
+was measured at or below 0.1~eV for the systems in this tutorial's
+benchmark chapter, so a single equal-weight pass is a reasonable first
+look.
+
+The weights are passed as \texttt{state\_weights} to either factory.
+The vector must have one entry per root, in root order; the helper in
+the benchmark chapter shows how the group table from the first pass
+produces it.

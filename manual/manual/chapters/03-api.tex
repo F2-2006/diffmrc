@@ -1,4 +1,105 @@
 \chapter{API reference}
-\label{ch:03-api}
+\label{ch:api}
 
-% TODO
+This chapter lists the entry points a user is expected to reach for,
+layer by layer.  It is a map, not a transcription: the authoritative
+signature of every function is its docstring in the source, and the
+module-level \texttt{\_\_all\_\_} lists are the canonical inventories.
+Entries marked \emph{stable} have been exercised by the verification
+records in Chapter~\ref{ch:verification}; the rest follow the same
+conventions but have lighter coverage.
+
+\section{core: the numerical kernel}
+
+\begin{center}
+\begin{tabular}{ll}
+\toprule
+Entry point & Purpose \\
+\midrule
+\texttt{rotation.block\_rotation(t, nmo, pairs)} & rotation matrix from the parameter vector \\
+\texttt{orblib.orbital\_pairs(ncore, nact, nmo)} & the non-redundant rotation pairs \\
+\texttt{casci.cs\_casci(...)} & CASCI energies; state-averaged branch with
+  \texttt{nroots}, \texttt{return\_ci} \\
+\texttt{optimizer.optimize\_theta\_scipy(...)} & L-BFGS-B stage \\
+\texttt{optimizer.optimize\_theta\_hand(...)} & the fallback when scipy raises \\
+\texttt{grad.make\_energy\_fn / make\_grad\_fn} & energy and nuclear-gradient callables \\
+\texttt{grad.solve\_theta\_star(...)} & the two-stage orbital optimization \\
+\texttt{grad.nuclear\_gradient(mol, grad\_fn)} & the differentiated gradient \\
+\texttt{stationary.refine\_stationary\_point(...)} & damped-Newton refinement (Newton--CG step) \\
+\texttt{stationary.curvature\_report(H)} & the saddle-point check \\
+\texttt{stationary.StopReason / StationaryPoint} & convergence verdict types \\
+\texttt{nevpt2.impl.cas\_dets\_for2(...)} & determinant bitmaps of the active space \\
+\texttt{nevpt2.impl.canonicalize\_jax(...)} & orbital canonicalization on the differentiated path \\
+\texttt{nevpt2.impl.nevpt2\_e2\_full2(...)} & the frozen NEVPT2 contraction \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+The kernel is frozen: later layers build on it and corrections to it
+go through the verification records, not through ad-hoc edits.
+
+\section{analysis: NumPy only}
+
+\begin{center}
+\begin{tabular}{ll}
+\toprule
+Entry point & Purpose \\
+\midrule
+\texttt{states.state\_groups / select\_groups} & roots to physical states; state selection \\
+\texttt{states.spin\_square / det\_abs\_sz} & exact $\langle S^2 \rangle$ and $|M|$ of determinants \\
+\texttt{orbitals.frontier\_report / classify\_orbital} & frontier identities; window suggestion \\
+\texttt{orbitals.heavy\_atoms / p\_axis\_profile} & atom keys; per-axis p profiles \\
+\texttt{ci.occupations\_from\_ci / entropy\_from\_ci} & occupations and entropies from a CI vector \\
+\texttt{ci.pair\_density / mutual\_information} & two-orbital reductions and their correlations \\
+\texttt{rdm.entropy\_from\_rdms} & the density-matrix route to the same quantities \\
+\texttt{diagnostics.is\_single\_reference / zs1} & multireference diagnostics \\
+\texttt{plateau.detect\_plateaus} & entropic plateaus of an orbital set \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+This layer imports nothing from the kernel; it operates on the
+determinant-bitmap convention and on arrays, and its tests run with
+NumPy alone.
+
+\section{policy: selection rules}
+
+The policy layer turns analysis output into selections: composition-based
+rules, entropy-based ordering, the ranked orbital selection with its
+singly-occupied and virtual-removal options, and the verification
+helpers.  The module names are the inventory
+(\texttt{policy.composition}, \texttt{policy.entropy},
+\texttt{policy.ranking}, \texttt{policy.rules}, and their siblings);
+the docstrings state the conventions each rule follows.
+
+\section{driver: the differentiable pipelines}
+
+\begin{center}
+\begin{tabular}{ll}
+\toprule
+Entry point & Purpose \\
+\midrule
+\texttt{nevpt2.make\_nevpt2\_joint\_fn(...)} & $\mathrm{(mol,\theta)}$ SCF$\to$CASSCF$\to$NEVPT2, geometry-differentiable \\
+\texttt{nevpt2.make\_nevpt2\_theta\_fn(...)} & frozen geometry, $\theta$ only; jit-safe \\
+\texttt{nevpt2.make\_nevpt2\_sa\_fn(...)} & state-averaged joint factory \\
+\texttt{nevpt2.make\_nevpt2\_sa\_theta\_fn(...)} & state-averaged, frozen geometry, jit-safe \\
+\texttt{nevpt2.sa\_cas\_solution(...)} & state-averaged CAS solution and CI vectors \\
+\texttt{nevpt2.sa\_nevpt2\_state\_table(out, dets)} & grouped physical-state table \\
+\texttt{nevpt2.sa\_vertical\_excitations(states)} & per-state vertical excitation energies \\
+\texttt{orbitals.converge\_orbital\_point(E\_theta, npar)} & two-stage convergence with refinement and polish \\
+\texttt{orbitals.hessp\_of(E\_theta)} & Hessian-vector product for the trust-region stage \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+The two factory families exist because of a pyscfad constraint: the
+\texttt{Mole}-based factories cannot be traced inside
+\texttt{jax.jit}, and the theta-only factories are built for exactly
+that context.  When in doubt about which to call, ask whether the
+geometry is fixed; if it is, use the theta-only factory.
+
+\section{cli}
+
+\texttt{python -m diffmrc.cli} runs an end-to-end calculation from a
+geometry file; \texttt{--help} lists the options.  The command-line
+entry is the least settled surface of the package.

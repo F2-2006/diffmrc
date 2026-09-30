@@ -1,4 +1,109 @@
 \chapter{Protocols and options}
-\label{ch:04-protocols}
+\label{ch:protocols}
 
-% TODO
+The package reports convergence and protocol evidence; it does not
+enforce it.  This chapter collects the settings that decide whether a
+number is trustworthy, with the values the benchmark records were
+produced under.  Where a default can be changed by a caller, the
+change belongs next to the number it produced, because several of the
+gates below are reachable at more than one tolerance and the results
+differ at the margins.
+
+\section{Orbital-point convergence}
+
+The two-stage protocol separates two different failure modes: the
+optimizer that can no longer lower the energy, and a point that is not
+stationary.  The stages and their defaults:
+
+\begin{center}
+\begin{tabular}{lll}
+\toprule
+Setting & Value & Meaning \\
+\midrule
+\texttt{optimize\_tol} & $10^{-6}$ & L-BFGS-B target; loose on purpose \\
+\texttt{refine\_target} & $10^{-11}$ & the Newton target, and the verdict \\
+\texttt{max\_steps} & $2000$ & L-BFGS-B iteration cap \\
+\texttt{refine\_max\_iter} & $80$ & damped-Newton iteration cap \\
+\texttt{\_CG\_tol} / \texttt{\_CG\_maxiter} & $10^{-6}$ / $40$ & Newton--CG budget for the step solve \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+The verdict is the gradient norm at the point the chain stopped at,
+classified by the stop reason:
+
+\begin{center}
+\begin{tabular}{ll}
+\toprule
+\texttt{StopReason} & Reading \\
+\midrule
+\texttt{CONVERGED} & gradient below the refine target \\
+\texttt{STALLED\_GRADIENT} & a step no longer reduced the gradient \\
+\texttt{GUARD\_STOPPED} & no damped step lowered the energy \\
+\texttt{ITERATION\_CAP} & budget exhausted; re-check before claiming convergence \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+Two details of the Newton stage are load-bearing and easy to lose when
+reimplementing.  The Hessian enters only through Hessian-vector
+products --- the explicit \texttt{jax.hessian} broadcasts every
+intermediate over $n_\mathrm{par}^2$ tangent pairs and was killed by a
+402~GB allocation at $n_\mathrm{par} \approx 500$ --- and the
+downhill acceptance test is not optional: an unguarded refinement
+moved an energy from $-76.07$ to $+1.04$~Ha in this project's history
+and printed no error.
+
+\section{State averaging}
+
+The state-averaged factories take \texttt{nroots} and
+\texttt{state\_weights}; the weights are normalized and must have one
+entry per root.  The measured effect of between-group equal weights
+(the second pass) on the reported excitation energies was at or below
+$0.1$~eV for the benchmark systems, while the second pass usually
+tightens the final orbital gradient by orders of magnitude.  The
+benchmark records quote which pass each number came from.
+
+Two root-table facts belong with every state-averaged number.  The
+eigensolver returns roots, so a triplet travels as three degenerate
+roots; and a per-component NEVPT2 correction can be undefined
+(\texttt{nan}) for a pure $|M| = 1$ component, in which case the
+group's representative is the lowest component with a finite value.
+\texttt{sa\_nevpt2\_state\_table} performs both bookkeeping and
+returns the evidence.
+
+\section{Active-space windows}
+
+The frontier-window rules are stated in the Tutorial (its chapter on
+choosing an active space).  The part that belongs to a protocol table
+is the bookkeeping: the electron count follows the window,
+
+\begin{equation}
+  n_\mathrm{ele} = N_\mathrm{ele} - 2\, n_\mathrm{core},
+\end{equation}
+
+and a window that widens to three orbitals for the linear two-pi and
+amide patterns therefore carries four active electrons, not two.  A
+hard-coded two here produces a wrong ground state that the energy
+alone will not flag.
+
+\section{The e2\_scale switch}
+
+Both NEVPT2 factories accept \texttt{e2\_scale}.  With
+\texttt{e2\_scale = 0} the perturbation correction is switched off and
+the call reduces to the CASSCF energy of the same chain --- the
+identity used by the test suite to pin the joint and state-averaged
+factories against the validated single-root path.  With the default
+value of $1.0$ the correction is included.  There is no other
+intermediate value with a physical meaning; the switch exists for
+verification.
+
+\section{Differentiation settings}
+
+The theta-only factories are safe inside \texttt{jax.jit}; the
+\texttt{Mole}-based ones are not, and the failure mode is a tracing
+error at compile time rather than a wrong number.  The second-order
+paths (the refinement, the trust-region polish) differentiate the
+gradient with forward-mode \texttt{jvp} calls; a caller wrapping the
+whole convergence in \texttt{jit} should expect the compile of those
+nodes to dominate the first evaluation.

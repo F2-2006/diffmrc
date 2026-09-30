@@ -1,4 +1,112 @@
 \section{Choosing an active space}
-\label{sec:05-active-space}
+\label{sec:active-space}
 
-% TODO
+The smallest useful active space for a vertical excitation is the
+frontier pair: the highest occupied orbital and the lowest unoccupied
+one, two electrons in two orbitals (or more, when the window must
+widen; see below).  This chapter is about the cases where that default
+silently selects the wrong orbitals, how to detect them, and what to
+do instead.  The detection rules live in
+\texttt{diffmrc.analysis.orbitals} and cost one SCF to apply.
+
+\subsection{The default, and its three failure modes}
+
+The default window takes the frontier pair in energy order.  It is
+correct for the common chromophores: the carbonyl $n \to \pi^*$ pair
+of aldehydes and ketones, and the $\pi \to \pi^*$ pair of a simple
+alkene.  Widening it is unnecessary there, and this tutorial's
+benchmark sets it as the baseline.
+
+Two patterns break it.
+
+\textbf{A linear molecule with two pi systems.}  In a nitrile, a
+diyne, or cyanogen, the occupied pi orbitals and the virtual pi
+orbitals each come as degenerate perpendicular components ($x$ and
+$y$).  An energy-ordered window can pair the $x$ component of the
+occupied set with the $y$ component of the virtual set.  That
+excitation is symmetry-forbidden, its exchange integral vanishes, and
+the computed excitation energy is systematically off --- measured at
+up to 2~eV for the molecules in this tutorial's benchmark set.
+
+\textbf{An amide.}  In formamide the conjugated $\pi/\pi^*$ pair
+sits on top of the frontier, while the lone pair that gives the
+characteristic $n \to \pi^*$ transition lies one orbital lower.  The
+default window computes a $\pi \to \pi^*$ state and compares it to an
+$n \to \pi^*$ reference: a mismatch of more than 2~eV in the state
+that was supposed to be reproduced.
+
+\subsection{Auditing a window in one SCF}
+
+The audit is a per-axis decomposition of the frontier orbitals' $p$
+weight.  A delocalized single-axis orbital is a pi; an atom-centred
+single-axis orbital is a lone pair; a window whose HOMO and LUMO sit
+on different axes while the occupied frontier is degenerate is a
+cross-component pair.
+
+\begin{lstlisting}[language=Python]
+import numpy as np
+from diffmrc.analysis.orbitals import heavy_atoms, frontier_report
+
+labels = mol.ao_labels()
+C = np.asarray(mf.mo_coeff)
+e = np.asarray(mf.mo_energy)
+nocc = mol.nelectron // 2
+
+rep = frontier_report(C, labels, e, nocc, heavy_atoms(labels),
+                      target='npi', nelectron=mol.nelectron)
+print(rep['homo']['kind'], rep['cross_component'],
+      rep['suggested_window'])
+\end{lstlisting}
+
+\texttt{frontier\_report} returns everything that entered the
+suggestion --- the HOMO-1/HOMO/LUMO identities, the degeneracy map of
+the occupied frontier, the index of a lone pair below the HOMO when
+the target needs one --- so that the suggestion can be checked rather
+than trusted.  For formamide it reports that the HOMO is a
+delocalized pi, finds the lone pair two orbitals below, and suggests
+a three-orbital window spanning lone pair, pi, and pi$^*$.
+
+\subsection{The corrected windows}
+
+For the two failure modes the recipe is the same three-orbital
+frontier window, three orbitals instead of two:
+
+\begin{itemize}
+  \item \textbf{Linear two-pi molecules}: start the window one orbital
+    lower than the default, so that both components of each degenerate
+    pair are inside and the CI can pick the in-component combinations.
+  \item \textbf{Amides}: start the window at the lone pair, three
+    orbitals wide, so that the lone pair, the pi system, and
+    pi$^*$ are all active.
+\end{itemize}
+
+One bookkeeping rule travels with the wider window: the electron
+count must follow the window, not be hard-coded.  The scripts in this
+project use
+
+\begin{equation}
+  n_\mathrm{ele} = N_\mathrm{ele} - 2\, n_\mathrm{core},
+\end{equation}
+
+which is what the three-orbital windows above need (four active
+electrons for the linear two-pi molecules, not two).
+
+The effect on the numbers, from this project's benchmark records:
+
+\begin{center}
+\begin{tabular}{lccc}
+\toprule
+System & State & default window & corrected window \\
+\midrule
+Cyanogen, $\Sigma_u^-$ singlet & $\pi\pi^*$ & $+1.05$ & $+0.62$ \\
+Cyanogen, $\Sigma_u^+$ triplet & $\pi\pi^*$ & $+1.95$ & $+1.20$ \\
+Formamide, $A''$ singlet & $n\pi^*$ & $+2.12$ & $+0.11$ \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+The deviations are against the reference set's best estimates (eV).
+The corrected formamide window reproduces the reference
+\textsc{sc}-NEVPT2 value to $0.02$~eV.  The residual deviations of the
+linear two-pi systems are a separate story --- they survive every
+window fix and are discussed in Chapter~\ref{sec:limitations}.
