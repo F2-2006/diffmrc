@@ -175,3 +175,20 @@ def test_a_failed_self_check_is_not_reported_as_success(tmp_path):
     finally:
         main_mod._compute = original
     assert rc != 0
+
+
+def test_parser_accepts_the_vee_mode():
+    from diffmrc.cli.main import build_parser
+
+    args = build_parser().parse_args(['mol.xyz', '--vee', 'npi'])
+    assert args.vee == 'npi'
+    assert args.nroots == 6
+
+
+def test_parser_rejects_an_unknown_excitation_family():
+    import pytest
+
+    from diffmrc.cli.main import build_parser
+
+    with pytest.raises(SystemExit):
+        build_parser().parse_args(['mol.xyz', '--vee', 'banana'])

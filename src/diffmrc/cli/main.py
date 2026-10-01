@@ -63,6 +63,15 @@ def build_parser():
                    help='print every parameter and its default, then exit')
     p.add_argument('--check', action='store_true',
                    help='validate the input without computing anything')
+    p.add_argument('--vee', choices=('npi', 'ppi'), default=None,
+                   help='vertical-excitation mode: report the states of one '
+                        'excitation family (npi = lone pair to pi*, '
+                        'ppi = pi to pi*) from a state-averaged CASSCF '
+                        'with per-state NEVPT2, on a window suggested by '
+                        'the frontier identity rules')
+    p.add_argument('--nroots', type=int, default=6,
+                   help='number of state-averaged roots in --vee mode '
+                        '(default: 6)')
 
     # Every numeric and choice parameter is exposed, generated from the
     # table so no default is written twice. Which kind a flag is comes
@@ -275,6 +284,9 @@ def main(argv=None):
         sys.stdout.write(f'{args.geometry}: ok\n')
         return EXIT_OK
 
+    if args.vee:
+        return _run_vee(args)
+
     return _run(args)
 
 
@@ -325,6 +337,68 @@ def _run(args):
         # and returning 0 would let a caller quote it. The escalation
         # still prints; it is just not a success.
         return EXIT_FAILED
+    return EXIT_OK
+
+
+def _run_vee(args):
+    """Execute the vertical-excitation mode and write its reports.
+
+    A separate path from ``_run`` because the checks machinery of the
+    ground-state state machine does not apply: the table's trust
+    carriers are the orbital-gradient norm and the frontier report,
+    both of which travel in the output.
+    """
+    from ..report.vee import (VeeReportData, render_vee_json,
+                              render_vee_text)
+
+    try:
+        from ..driver.run import vertical_excitations_from_geometry
+    except ImportError as exc:
+        sys.stderr.write(
+            f'diffmrc: the numerical kernel is not available ({exc}).\n'
+            f'  install it with: pip install -e ".[core]"\n'
+        )
+        return EXIT_FAILED
+
+    try:
+        out = vertical_excitations_from_geometry(
+            geometry_file=args.geometry, family=args.vee,
+            nroots=args.nroots, charge=args.charge, spin=args.spin)
+    except Exception as exc:
+        sys.stderr.write(
+            f'diffmrc: the calculation failed: {type(exc).__name__}: '
+            f'{exc}\n'
+        )
+        return EXIT_FAILED
+
+    data = VeeReportData(
+        geometry=args.geometry,
+        family=args.vee,
+        window=out.get('window', {}),
+        grad_norm=out.get('grad_norm', float('nan')),
+        states=[
+            {
+                'index': i,
+                'multiplicity': g.get('multiplicity'),
+                'szs': list(g.get('szs', [])),
+                'dE_casscf': g.get('dE_casscf'),
+                'dE_nevpt2': g.get('dE_nevpt2'),
+            }
+            for i, g in enumerate(out.get('groups', []))
+        ],
+        frontier=out.get('frontier_report', {}),
+        provenance={'basis': '6-31g', 'reference': 'RHF',
+                    'protocol': 'equal-weight SA-CASSCF, per-state NEVPT2'},
+    )
+    os.makedirs(args.outdir, exist_ok=True)
+    with open(os.path.join(args.outdir, 'diffmrc_vee.txt'), 'w',
+              encoding='utf-8') as fh:
+        fh.write(render_vee_text(data))
+    with open(os.path.join(args.outdir, 'diffmrc_vee.json'), 'w',
+              encoding='utf-8') as fh:
+        fh.write(render_vee_json(data))
+
+    sys.stdout.write(render_vee_text(data))
     return EXIT_OK
 
 
