@@ -39,7 +39,7 @@ from diffmrc.core.casci import cs_casci_blocked
 from diffmrc.core.optimizer import optimize_theta
 
 # H2O / 6-31G, CAS(2,2). Pre-migration value, confirmed by an A/B run
-# against the original stack/ modules. See tests/core/test_frozen_reference.py
+# against the original flat-layout modules. See tests/core/test_frozen_reference.py
 # for the provenance and for why this differs from the manuscript value.
 H2O_631G_CAS22_E_BASELINE = -75.9848818014
 H2O_ATOM = 'O 0 0 0; H 0.7557 0 0.5880; H -0.7557 0 0.5880'

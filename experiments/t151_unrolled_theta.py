@@ -24,16 +24,15 @@ os.environ["MKL_CBWR"] = "COMPATIBLE"
 os.environ.setdefault("JAX_PLATFORMS", "cpu")
 os.environ.setdefault("XLA_PYTHON_CLIENT_PREALLOCATE", "false")
 
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'stack'))
 import numpy as np                                               # noqa: E402
 import jax; jax.config.update("jax_enable_x64", True)             # noqa: E402
 from jax import numpy as jnp                                     # noqa: E402
 import pyscfad                                                    # noqa: E402
 from pyscfad import gto as pgto, scf as pscf                      # noqa: E402
-from casscf_lih import block_rotation                            # noqa: E402
-from orblib import orbital_pairs                                 # noqa: E402
-from optim_theta import optimize_theta                           # noqa: E402
-from casci_pyscfad import cs_casci_blocked                       # noqa: E402
+from diffmrc.core.rotation import block_rotation                            # noqa: E402
+from diffmrc.core.orblib import orbital_pairs                                 # noqa: E402
+from diffmrc.core.optimizer import optimize_theta                           # noqa: E402
+from diffmrc.core.casci import cs_casci_blocked                       # noqa: E402
 
 ATOM_STR = 'O 0 0 0; H 0.7557 0 0.5880; H -0.7557 0 0.5880'
 BASIS = '6-31g'

@@ -33,8 +33,7 @@ src/diffmrc/    the package
 
 tests/          unit and integration tests
 experiments/    scripts reproducing the results in the paper
-figures/        figure sources
-stack/          the original flat layout, kept so the experiments still run
+manual/         Tutorial and Manual (LaTeX sources and built PDFs)
 ```
 
 ## Layers
@@ -53,11 +52,6 @@ manuscript so that a future edit to the kernel fails loudly.
 `diffmrc.analysis` is independent of the kernel by contract -- it may not
 import `core` or any upper layer. Run `lint-imports` to verify the boundary
 holds. See `docs/analysis_layer.md`.
-
-`stack/` holds the same kernel in its original flat layout. It exists only so
-that the scripts under `experiments/` continue to run as they did when the
-paper's results were produced. New code should use `diffmrc.core`; `stack/`
-will be removed once the experiments have been repointed.
 
 ## Requirements
 
@@ -317,8 +311,8 @@ Scripts in `experiments/` correspond to the results section by section:
 | `t142_layerA_v2.py`, `t156_eu_scf_convergence.py`, `t158_eu_fix_rerun.py` | lanthanide dissociation energies |
 
 Each script sets the thread environment variables internally and writes
-JSON to a `results/` directory. Run them from a directory containing `stack/`
-on `sys.path`, or adjust the path insert at the top of each script.
+JSON to a `results/` directory. The scripts import `diffmrc` directly; make
+it importable first (`pip install -e .`, or `PYTHONPATH=src`).
 
 ## License
 

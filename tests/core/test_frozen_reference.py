@@ -1,7 +1,8 @@
 """Regression baseline for the frozen numerical kernel.
 
-The kernel was moved from a flat ``stack/`` layout into ``diffmrc.core``
-without touching any algorithm, constant, or convergence threshold. This
+The kernel was migrated from a flat, pre-release layout into
+``diffmrc.core`` without touching any algorithm, constant, or convergence
+threshold. This
 test exists to make that claim checkable: it pins the energy the kernel
 produced *before* the migration.
 
@@ -10,7 +11,7 @@ Provenance of the pinned value
 
 Three independent determinations agree:
 
-* the original ``stack/`` modules, run directly:  -75.9848818014
+* the original flat-layout modules, run directly:  -75.9848818014
 * the packaged ``diffmrc.core``:                  -75.9848818014
 * an independent PySCF CASSCF(2,2) run:           -75.9848818017
 
@@ -49,7 +50,7 @@ from diffmrc.core.casci import cs_casci_blocked  # noqa: E402
 from diffmrc.core.optimizer import optimize_theta  # noqa: E402
 
 # H2O / 6-31G, CAS(2,2). Pre-migration value, confirmed by an A/B run
-# against the original stack/ modules.
+# against the original flat-layout modules.
 H2O_631G_CAS22_E_BASELINE = -75.9848818014
 H2O_631G_CAS22_E_TOL = 1e-5
 H2O_ATOM = 'O 0 0 0; H 0.7557 0 0.5880; H -0.7557 0 0.5880'
