@@ -249,11 +249,23 @@ def auto_window(mol, mf, family):
     occupied pi pair or a lone pair below a conjugated pi frontier is
     in play.  The full report is returned -- the suggestion is a
     suggestion, and everything that produced it travels with it.
+
+    The report also carries ``policy_window``: the same facts run
+    through the policy layer's parameterized rule (``policy.windows``),
+    whose default parameters reproduce the analysis suggestion exactly.
+    The window the caller should act on is the policy one; the analysis
+    field stays as the checkable default.
     """
     from ..analysis.orbitals import frontier_report, heavy_atoms
+    from ..policy.windows import suggest_window
 
     labels = mol.ao_labels()
-    return frontier_report(
+    nocc = mol.nelectron // 2
+    rep = frontier_report(
         np.asarray(mf.mo_coeff), labels, np.asarray(mf.mo_energy),
-        mol.nelectron // 2, heavy_atoms(labels),
+        nocc, heavy_atoms(labels),
         target=family, nelectron=int(mol.nelectron))
+    rep['policy_window'] = suggest_window(dict(rep, nocc=nocc),
+                                          family=family,
+                                          nelectron=int(mol.nelectron))
+    return rep
