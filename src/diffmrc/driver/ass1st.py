@@ -509,3 +509,67 @@ def ass1st_noon(h1e_mo, eri_mo, c_ci, dets, eps, ncore=0, nact=2, *,
     evidence.append('external occupations '
                     + np.array2string(w_e, precision=6))
     return NoonProvider(w_i, u_i, w_e, u_e, dens, evidence)
+
+
+def perturbed_densities_sa(h1e_mo, eri_mo, c_cis, dets, eps, ncore=0, nact=2,
+                           *, ipea=True, state_weights=None):
+    """State-averaged perturbed densities (Khedkar & Roemelt 2020).
+
+    The state-averaged variant of :func:`perturbed_densities`: one
+    internal/external block pair per state -- the same eqs. 17/18 form
+    as the single-state case, each block normalized by its own ``N1``
+    -- and the two blocks are then averaged with the SA-CASSCF weights
+    *before* the diagonalization.  The average acts on the normalized
+    blocks; that is what puts one set of quasi-natural orbitals at the
+    service of every target state (the paper's stated motivation: the
+    single-state density reflects the ground-state correlation pattern
+    only, and systematically undershoots excited-state targets).
+
+    ``c_cis`` is ``(ndet, nstates)`` -- the per-state vectors the
+    state-averaged CI solver returns; a 1-D vector is accepted as a
+    single state.  ``state_weights`` defaults to equal weights.  The
+    per-state ``N1`` values and weights travel in the evidence.
+    """
+    c = np.asarray(c_cis, dtype=float)
+    if c.ndim == 1:
+        c = c[:, None]
+    n_states = c.shape[1]
+    if state_weights is None:
+        w = np.full(n_states, 1.0 / n_states)
+    else:
+        w = np.asarray(state_weights, dtype=float)
+        w = w / w.sum()
+    per_state = [perturbed_densities(h1e_mo, eri_mo, c[:, k], dets, eps,
+                                     ncore=ncore, nact=nact, ipea=ipea)
+                 for k in range(n_states)]
+    d_int = sum(w[k] * per_state[k].d_int for k in range(n_states))
+    d_ext = sum(w[k] * per_state[k].d_ext for k in range(n_states))
+    n1 = float(sum(w[k] * per_state[k].n1 for k in range(n_states)))
+    evidence = [
+        f'state-averaged over {n_states} states (weights '
+        + ', '.join(f'{x:.4f}' for x in w) + ')',
+        'per-state N1: ' + ', '.join(f'{d.n1:.6f}' for d in per_state),
+    ]
+    return PerturbedDensities(d_int, d_ext, n1, {}, evidence)
+
+
+def ass1st_noon_sa(h1e_mo, eri_mo, c_cis, dets, eps, ncore=0, nact=2, *,
+                   ipea=True, state_weights=None):
+    """Quasi-natural occupations of the state-averaged densities.
+
+    Same decomposition and conventions as :func:`ass1st_noon`, on the
+    averaged blocks of :func:`perturbed_densities_sa`; the result feeds
+    the same ``policy.rules.noon_selection`` band rule (with the SA
+    naming of the paper, ``^Ns,Ms SA-ASS1ST(n, m)``).
+    """
+    dens = perturbed_densities_sa(h1e_mo, eri_mo, c_cis, dets, eps,
+                                  ncore=ncore, nact=nact, ipea=ipea,
+                                  state_weights=state_weights)
+    w_i, u_i = np.linalg.eigh(dens.d_int)
+    w_e, u_e = np.linalg.eigh(dens.d_ext)
+    evidence = list(dens.evidence)
+    evidence.append('internal occupations '
+                    + np.array2string(w_i, precision=6))
+    evidence.append('external occupations '
+                    + np.array2string(w_e, precision=6))
+    return NoonProvider(w_i, u_i, w_e, u_e, dens, evidence)

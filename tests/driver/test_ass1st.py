@@ -211,3 +211,56 @@ def test_per_pattern_external_trace_equals_the_particle_count():
             (label, key)
         checked += 1
     assert checked > 0
+
+
+def test_the_sa_densities_match_the_single_state_case_for_one_state():
+    """One state, weight 1: the averaged blocks equal the single-state
+    blocks bit for bit (the SA wrapper must be an exact superset)."""
+    from diffmrc.driver.ass1st import (perturbed_densities,
+                                       perturbed_densities_sa)
+
+    h1, eri = _two_det_model()
+    dets, c = _two_det_vector()
+    eps = np.array([-0.5, -0.3, 0.4, 1.0])
+    d1 = perturbed_densities(h1, eri, c, dets, eps, ncore=1, nact=2)
+    dsa = perturbed_densities_sa(h1, eri, c, dets, eps, ncore=1, nact=2)
+    assert np.array_equal(dsa.d_int, d1.d_int)
+    assert np.array_equal(dsa.d_ext, d1.d_ext)
+
+
+def test_the_sa_densities_are_the_weighted_mean_of_the_state_blocks():
+    """Two states: D_sa = w1 D1 + w2 D2, blockwise, on the normalized
+    per-state blocks (Khedkar & Roemelt 2020: average, then
+    diagonalize)."""
+    from diffmrc.driver.ass1st import (perturbed_densities,
+                                       perturbed_densities_sa)
+
+    h1, eri = _two_det_model()
+    dets, c = _two_det_vector()
+    eps = np.array([-0.5, -0.3, 0.4, 1.0])
+    c_open = np.array([np.sqrt(0.4), -np.sqrt(0.6)])
+    c2 = np.column_stack([c, c_open])
+    w = [0.7, 0.3]
+    d1 = perturbed_densities(h1, eri, c, dets, eps, ncore=1, nact=2)
+    d2 = perturbed_densities(h1, eri, c_open, dets, eps, ncore=1, nact=2)
+    dsa = perturbed_densities_sa(h1, eri, c2, dets, eps, ncore=1, nact=2,
+                                 state_weights=w)
+    ref_i = 0.7 * d1.d_int + 0.3 * d2.d_int
+    ref_e = 0.7 * d1.d_ext + 0.3 * d2.d_ext
+    assert np.allclose(dsa.d_int, ref_i, rtol=0, atol=1e-14)
+    assert np.allclose(dsa.d_ext, ref_e, rtol=0, atol=1e-14)
+
+
+def test_sa_noon_produces_occupations_for_every_block():
+    from diffmrc.driver.ass1st import ass1st_noon_sa
+
+    h1, eri = _two_det_model()
+    dets, c = _two_det_vector()
+    eps = np.array([-0.5, -0.3, 0.4, 1.0])
+    c2 = np.column_stack([c, np.array([np.sqrt(0.4), -np.sqrt(0.6)])])
+    noon = ass1st_noon_sa(h1, eri, c2, dets, eps, ncore=1, nact=2)
+    assert noon.noon_internal.shape == (2,)
+    assert noon.noon_external.shape == (1,)
+    assert np.isfinite(noon.noon_internal).all()
+    assert np.isfinite(noon.noon_external).all()
+    assert 'state-averaged' in ' '.join(noon.evidence)
