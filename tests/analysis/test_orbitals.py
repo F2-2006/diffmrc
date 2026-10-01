@@ -101,3 +101,38 @@ def test_a_lone_pair_homo_keeps_the_two_orbital_window():
                           target='npi', nelectron=4)
     assert rep['homo']['kind'] == 'lone'
     assert rep['suggested_window'] == {'ncore': 1, 'nact': 2, 'nele': 2}
+
+
+def test_a_mixed_degenerate_frontier_also_widens():
+    """The linear two-pi case where the solver returned rotated mixtures:
+    HOMO and HOMO-1 are degenerate but read as 'other' (each carries
+    both x and y weight), so no axis mismatch is visible -- the window
+    must still widen to three orbitals."""
+    C = _C([{0: .35, 1: .35, 3: .35, 4: .35},   # MO0 (HOMO-1): x+y mix
+            {0: .35, 1: -.35, 3: .35, 4: -.35},  # MO1 (HOMO):   x-y mix
+            {0: .5, 3: .5},                      # MO2 (LUMO):   x pi*
+            {1: .5, 4: .5}])                     # MO3:          y pi*
+    e = np.array([-0.5, -0.5, 0.1, 0.1])
+    rep = frontier_report(C, _LABELS, e, nocc=2, atoms=heavy_atoms(_LABELS),
+                          target='ppi', nelectron=8)
+    assert rep['homo']['axis'] is None
+    assert rep['homo_in_degenerate_pair']
+    assert rep['cross_component']
+    assert rep['suggested_window'] == {'ncore': 0, 'nact': 3, 'nele': 8}
+
+
+def test_a_far_lone_pair_is_not_reached():
+    """A lone pair five orbitals below the HOMO (beyond _LONE_REACH)
+    must not be dragged into the window: for a frontier that
+    misclassifies its own lone pair, the bounded search returns None
+    and the plain two-orbital window stands."""
+    cols = [{8: 1.0}]                            # MO0: O lone pair (z)
+    cols += [{0: .5, 3: .5}] * 4                 # MO1-4: x pi-like
+    cols += [{1: .5, 4: .5},                     # MO5 (HOMO):  y pi
+             {1: .5, 4: -.5}]                    # MO6 (LUMO):  y pi*
+    C = _C(cols)
+    e = np.array([-0.9, -0.7, -0.6, -0.5, -0.45, -0.4, 0.1])
+    rep = frontier_report(C, _LABELS, e, nocc=6, atoms=heavy_atoms(_LABELS),
+                          target='npi', nelectron=12)
+    assert rep['lone_below_homo'] is None
+    assert rep['suggested_window'] == {'ncore': 5, 'nact': 2, 'nele': 2}

@@ -26,6 +26,7 @@ __all__ = ['heavy_atoms', 'p_axis_profile', 'classify_orbital',
 _AXIS_TOL = 0.9
 _CENTRE_TOL = 0.8
 _DEGENERATE_TOL = 1e-6
+_LONE_REACH = 3      # lone-pair search depth below the HOMO, in orbitals
 
 
 def heavy_atoms(labels):
@@ -116,7 +117,8 @@ def frontier_report(C, labels, mo_energy, nocc, atoms, *,
     ('ppi' or 'npi').  Returns a dict with the HOMO-1/HOMO/LUMO
     identities, whether the occupied frontier is a degenerate pi pair,
     whether the naive window crosses components, the index of a lone
-    pair below the HOMO when the target needs one, and the suggested
+    pair within ``_LONE_REACH`` orbitals below the HOMO when the target
+    needs one, and the suggested
     ``(ncore, nact, nele)`` triple -- a suggestion for the caller, not
     a decision: everything that entered it is returned alongside.
     ``nele`` follows the scripts' general rule ``nelectron - 2*ncore``
@@ -128,9 +130,14 @@ def frontier_report(C, labels, mo_energy, nocc, atoms, *,
            for k in (max(0, nocc - 2), homo, lumo)}
     occ_pairs = degenerate_pairs(e, nocc=nocc)
     homo_pair = any(homo in p for p in occ_pairs)
-    cross = bool(homo_pair and ids[homo]['axis'] is not None
-                 and ids[lumo]['axis'] is not None
-                 and ids[homo]['axis'] != ids[lumo]['axis'])
+    # A degenerate occupied frontier defeats the two-orbital window even
+    # without an axis mismatch: when either partner resists the axis
+    # classification (the solver returned a rotated mixture of the two
+    # components, as it may for linear two-pi systems), the naive pair
+    # holds one arbitrary component of a two-component manifold.
+    cross = bool(homo_pair and (ids[homo]['axis'] is None
+                                or ids[lumo]['axis'] is None
+                                or ids[homo]['axis'] != ids[lumo]['axis']))
     report = {
         'homo_minus_1': ids[max(0, nocc - 2)],
         'homo': ids[homo],
@@ -141,8 +148,12 @@ def frontier_report(C, labels, mo_energy, nocc, atoms, *,
         'lone_below_homo': None,
     }
     if target == 'npi' and ids[homo]['kind'] != 'lone':
-        # walk down until an atom-centred single-axis orbital shows up
-        for k in range(nocc - 2, -1, -1):
+        # walk down a bounded distance until an atom-centred single-axis
+        # orbital shows up; beyond the reach, a misclassified frontier
+        # (a lone pair that reads as a pi or as 'other') would hand back
+        # a core orbital and an absurdly wide window
+        lo = max(nocc - 2 - _LONE_REACH, -1)
+        for k in range(nocc - 2, lo, -1):
             idk = classify_orbital(p_axis_profile(C, labels, k, atoms))
             if idk['kind'] == 'lone':
                 report['lone_below_homo'] = k
