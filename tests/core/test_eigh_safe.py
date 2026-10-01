@@ -73,3 +73,34 @@ def test_the_safe_reverse_pass_survives_an_exact_degeneracy():
     A2 = jnp.asarray(A2)
     g_safe = np.asarray(jax.grad(_scalar(eigh_safe, 6))(A2))
     assert np.isfinite(g_safe).all()
+
+
+def test_cluster_ift_differentiates_to_the_frozen_cluster_formula():
+    """The eigenvector derivative of the implicit correction must equal
+    the standard frozen-cluster perturbation formula.  The sign is what
+    the distinct-spectrum case pins, with a finite difference of the
+    function's own value path as the independent reference: measured on
+    2026-10-01, the expression differentiated to exactly minus that
+    reference (t327), and the implicit-correction tests in
+    ``test_lanczos`` never saw it because they check finiteness and
+    self-consistency, not the absolute derivative."""
+    from diffmrc.core.eigh import eigh_cluster_ift
+
+    rng = np.random.default_rng(3)
+    Q, _ = np.linalg.qr(rng.normal(size=(3, 3)))
+    A0 = jnp.asarray(Q @ np.diag([1.0, 2.5, 4.0]) @ Q.T)
+    Bs = [jnp.asarray(0.5 * (b + b.T)) for b in rng.normal(size=(3, 3, 3))]
+    t = rng.normal(size=3)
+    t = jnp.asarray(t / np.linalg.norm(t))
+
+    def loss(th):
+        _, u = eigh_cluster_ift(A0 + sum(th[k] * Bs[k] for k in range(3)))
+        return u[:, 0] @ t
+
+    th0 = jnp.zeros(3)
+    g = np.asarray(jax.grad(loss)(th0))
+    d = 1e-6
+    fd = np.array([
+        (float(loss(th0.at[k].add(d))) - float(loss(th0.at[k].add(-d))))
+        / (2 * d) for k in range(3)])
+    assert np.abs(g - fd).max() < 1e-6

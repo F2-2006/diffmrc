@@ -186,7 +186,13 @@ def eigh_cluster_ift(a, tol=1e-8):
         Pi = (u_sg * close[i][None, :]) @ u_sg.T          # projector of cluster(i)
         Ii = eye - Pi
         M = Ii @ (a - wi * eye) @ Ii + Pi
-        xi = jnp.linalg.solve(M, Ii @ (a @ ui))
+        # The minus sign is the derivative direction: the first-order
+        # eigenvector equation is (A - w_i) du = -(I - P) dA u_i, so the
+        # live expression must differentiate to -(I - P) M^-1 (I - P) dA u_i.
+        # The value is untouched either way (x is identically zero at the
+        # solution); measured on 2026-10-01, the positive sign returned the
+        # whole vector derivative reversed (AD = -FD exactly, t327).
+        xi = -jnp.linalg.solve(M, Ii @ (a @ ui))
         u_new.append(ui + Ii @ xi)
     u_out = jnp.stack(u_new, axis=1)
     # Rayleigh quotient of the *live* matrix at the stopped vectors: equals
