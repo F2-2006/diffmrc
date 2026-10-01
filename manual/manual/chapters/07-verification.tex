@@ -1,4 +1,105 @@
 \chapter{Verification records}
-\label{ch:07-verification}
+\label{ch:verification}
 
-% TODO
+Every claim this package makes about itself rests on a recorded
+comparison.  This chapter lists the records by the question they
+answer, with the measured deviation and the test or script that holds
+it.  Where a check is an equality that must hold by construction, the
+deviation is quoted at machine precision; where it is a comparison
+against an independent implementation or an external reference, the
+deviation is quoted with its protocol.
+
+\section{Energy chain}
+
+\begin{center}
+\begin{tabular}{p{0.34\textwidth}p{0.20\textwidth}p{0.38\textwidth}}
+\toprule
+Question & Measured & Where \\
+\midrule
+CASCI/CASSCF against PySCF, same geometry, basis and window &
+$10^{-12}$ to $10^{-10}$~Ha (LiH, HF, NH$_3$) &
+\texttt{t305}; driver kernels \\
+NEVPT2 correction against an independent implementation &
+$4\times 10^{-7}$ on the large-core test after the block-loop fix &
+the frozen-contraction tests \\
+State-averaged solution at one root against the ground-state path &
+bit-for-bit ($10^{-12}$) &
+\texttt{tests/driver/test\_sa\_pipeline.py} \\
+Joint and theta-only factories at fixed geometry &
+$10^{-10}$~Ha &
+the same suite \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\section{First derivatives}
+
+The nuclear gradient is validated by invariance rather than by
+agreement with a single reference, and then by a regression against
+an independent derivative-free route:
+
+\begin{itemize}
+  \item the CASSCF gradient is invariant under coordinate
+    transformations at the $10^{-14}$ level, and reproduces the
+    finite-difference reference to its own noise on smooth systems;
+  \item the regression against the analytic reference reproduces the
+    reference to the level at which both are converged; departures
+    appear at points where the reference geometry was not stationary,
+    which is a property of the comparison, not of the gradient;
+  \item a near-zero mixed derivative is a known trap for finite
+    differences: measured errors of over one hundredfold on a
+    derivative whose value sits near zero, growing as the difference
+    step shrinks.  Such checks use invariances instead.
+\end{itemize}
+
+\section{Second derivatives}
+
+\begin{center}
+\begin{tabular}{p{0.34\textwidth}p{0.20\textwidth}p{0.38\textwidth}}
+\toprule
+Question & Measured & Where \\
+\midrule
+Implicit route against the unrolled construction &
+$1.6\times 10^{-11}$ &
+\texttt{t154}; the implicit-Hessian tests \\
+Harmonic frequency against an external anchor (CO, 6-31G) &
+$2294.2$ and $2293.5$~cm$^{-1}$ from the two routes, against
+$2293.5$~cm$^{-1}$ &
+frequency tests \\
+Hessian-vector product against the explicit Hessian &
+$10^{-10}$ on a non-quadratic fixture &
+\texttt{tests/driver/test\_orbitals.py} \\
+Damped-Newton step solver (CG) against a dense solve &
+$10^{-8}$ on SPD fixtures &
+\texttt{tests/core/test\_stationary.py} \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\section{External-data cross-checks}
+
+Two independent data lines were used to check layers that have no
+internal ground truth:
+
+\begin{itemize}
+  \item \textbf{A published selection-protocol data set} (DVS-APC,
+    Zenodo record, CC-BY-4.0): the energy layer reproduces three
+    reference state energies to $10^{-11}$~Ha; a port of the
+    published entropy-based selection formula, evaluated on all 116
+    orbitals of every record, agrees with the published values to
+    exactly zero difference; the singly-occupied rule of the protocol
+    is confirmed on the full set rather than on a sample.
+  \item \textbf{An external benchmark database} (QUEST): the
+    state-averaged excitation pipeline is checked over fourteen
+    states of seven molecules; the records and the family split are
+    in Chapter~\ref{ch:benchmarks} and the Tutorial.
+\end{itemize}
+
+\section{The layer contracts}
+
+The six-layer architecture is itself under test:
+\texttt{tests/test\_layer\_contracts.py} (or the
+\texttt{lint-imports} entry point) parses the import graph and fails
+on any upward import.  The check is structural, not conventional: an
+import performed lazily inside a function body is still reported,
+because the contract is parsed from the syntax tree.

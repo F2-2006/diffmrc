@@ -1,4 +1,72 @@
 \chapter{Architecture and contracts}
-\label{ch:10-architecture}
+\label{ch:architecture}
 
-% TODO
+\section{The six layers}
+
+\begin{center}
+\begin{tabular}{ll}
+\toprule
+Layer & Responsibility \\
+\midrule
+\texttt{core} & the numerical kernel: rotations, CASCI, CASSCF,
+  NEVPT2, stationary points.  Frozen: corrections go through the
+  verification records. \\
+\texttt{analysis} & post-processing of converged objects; NumPy only;
+  no kernel import. \\
+\texttt{policy} & selection rules over analysis output. \\
+\texttt{driver} & composition: the differentiable SCF--CASSCF--NEVPT2
+  pipelines, orbital-point convergence, frozen-geometry factories. \\
+\texttt{report} & result objects and rendering. \\
+\texttt{cli} & the command-line entry point. \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+Dependencies point downward only.  A user script may import any layer;
+the layers themselves may not import upward.  The most consequential
+of these rules is the analysis layer's isolation: it must run with
+nothing but NumPy installed, which is what keeps its diagnostics
+usable inside any environment.
+
+\section{Contracts are tests}
+
+The import direction is enforced mechanically, not by review:
+\texttt{tests/test\_layer\_contracts.py} parses the syntax tree of
+every module and fails on any upward import.  The check has a
+deliberate property --- an import hidden inside a function body is
+still reported, because the contract is structural.  The
+\texttt{lint-imports} configuration in the package metadata encodes
+the same rules for environments where the import-linter tool is
+available.
+
+\section{How the test suite is organized}
+
+The suite mirrors the layers: \texttt{tests/core/},
+\texttt{tests/analysis/}, \texttt{tests/policy/},
+\texttt{tests/driver/}, \texttt{tests/report/}, plus cross-layer
+integration tests.  Two conventions are worth knowing before adding
+tests:
+
+\begin{itemize}
+  \item The analysis tests run on synthetic fixtures with hand-built
+    numbers and no chemistry package import; this is what keeps the
+    layer's tests runnable anywhere.  The conventions under test
+    (determinant bitmaps, AO labels) are stated in the fixtures
+    themselves.
+  \item The driver tests bind the layer against the kernel: the
+    frozen factories are pinned against the joint ones, the
+    state-averaged solution against the single-root path, and the
+    Hessian-vector product against the explicit Hessian.  When a
+    change touches the chain, one of these bindings is the test that
+    should notice.
+\end{itemize}
+
+\section{Development workflow}
+
+Non-trivial additions start as a plan under
+\texttt{docs/superpowers/plans/}, are implemented test-first, and
+land with the verification record that justifies them.  The plans are
+kept: several numerical facts in Chapters~\ref{ch:differentiable-chain}
+and~\ref{ch:second-derivatives} are traceable to the plan that found
+them.  Bug fixes follow the same rule --- the record is the fix's
+justification, and the test is the record made executable.

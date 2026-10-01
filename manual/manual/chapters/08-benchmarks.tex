@@ -1,4 +1,85 @@
 \chapter{Benchmarks}
-\label{ch:08-benchmarks}
+\label{ch:benchmarks}
 
-% TODO
+Two benchmark lines exercise the package end to end.  The first is a
+ground-state line against direct PySCF runs at matched settings; the
+second is the excited-state line against the QUEST reference set,
+whose protocol and reading are walked through in the Tutorial
+(Chapter on the benchmark walkthrough).  This chapter records both
+with their conventions, so that a quoted number can be traced back to
+its run.
+
+\section{Ground-state line (M5-A)}
+
+Three closed-shell molecules at matched geometry, basis, and active
+window, chain against PySCF:
+
+\begin{center}
+\begin{tabular}{lrl}
+\toprule
+System & Deviation (Ha) & Note \\
+\midrule
+LiH & $-3.5\times 10^{-12}$ & active window [4,5], 6-31G \\
+HF & $-3.6\times 10^{-13}$ & active window [1,2], 6-31G \\
+NH$_3$ & $-1.9\times 10^{-10}$ & active window [1,2], 6-31G \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+The agreement is at the level where the two codes' convergence
+tolerances meet.  The chain's end-to-end entry reports the energy and
+the stationarity diagnostics; nuclear gradients on this line come
+from the lower-level interface and are covered by the first-derivative
+records of Chapter~\ref{ch:verification}.
+
+\section{Excited-state line (QUEST subset)}
+
+Fourteen vertical excitation energies over seven molecules, 6-31G,
+the frontier-window protocol with its corrections, against the QUEST
+database's best estimates and its own \textsc{sc}-NEVPT2 column.  The
+full table sits in the Tutorial; the summary by family:
+
+\begin{center}
+\begin{tabular}{lrr}
+\toprule
+Family & MAD vs best estimate & MAD vs \textsc{sc}-NEVPT2 \\
+\midrule
+$n \to \pi^*$ (8 states) & $0.31$~eV & $0.36$~eV \\
+$\pi \to \pi^*$ (6 states) & $1.14$~eV & $1.08$~eV \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+Two protocol facts belong to these numbers.  The basis is 6-31G while
+the reference set's values are near the complete-basis limit, so part
+of every deviation is basis, not method; and the window corrections
+of the Tutorial's active-space chapter move individual entries by up
+to a factor of two in deviation before the family statistics are
+computed.  The residual $\pi\pi^*$ deviation --- uniform in sign
+across five chemically different systems --- is recorded as a
+capability boundary of the minimal-space protocol at this basis, not
+as a molecule-specific error.
+
+\section{Selection-protocol cross-check (DVS-APC)}
+
+The entropy-based active-space selection layer was checked against a
+published automated-selection data set on its own terms: a port of
+the published formula evaluated on every orbital of every record
+agrees with the published entropy values to exactly zero difference,
+the energy layer reproduces reference state energies to
+$10^{-11}$~Ha, and the protocol's singly-occupied rule is confirmed
+on the full data set.  The cross-check also fixed a defect this
+package had carried: the published protocol includes a
+virtual-removal correction of order $N$ that the port initially
+lacked; with the correction, the selection statistics move from the
+high-0.5 range to the 0.6--0.7 range in agreement with the source.
+When the two selections disagree, the record says so; the report of
+that campaign is stored with the data.
+
+\section{What is not benchmarked}
+
+Large-active-space behaviour, GPU execution, spin--orbit coupled
+targets, and relativistic Hamiltonians have no benchmark here because
+they are outside the present scope
+(Chapter~\ref{ch:limitations}).  A number produced by this package on
+those targets has no verification record behind it.

@@ -1,4 +1,95 @@
 \chapter{Known limitations}
-\label{ch:09-limitations}
+\label{ch:limitations}
 
-% TODO
+This is the consolidated list.  Each entry states the limitation, the
+measurement behind it where one exists, and the check a user can run.
+The Tutorial has the same material in shorter form; the entries here
+carry the numbers.
+
+\section{Method-family limits}
+
+\textbf{Contracted NEVPT2 accuracy.}  The perturbation layer inherits
+the standard contracted-NEVPT2 approximations; the reference set's own
+MAE for the method is the accuracy band claimed here, not a target
+this package improves on.
+
+\textbf{Valence--Rydberg mixing.}  $\pi\pi^*$ states near Rydberg
+states move by up to an electron volt when diffuse functions enter
+the basis.  Measured on ethylene at a fixed geometry: the singlet
+$\pi\pi^*$ vertical excitation moves from $9.27$ to $8.09$~eV between
+6-31G and 6-31+G* in the same three-orbital window, while the triplet
+moves the opposite way ($4.83$ to $5.68$~eV); the singlet--triplet
+gap, which the reference fixes near $3.4$~eV, collapses from $4.44$
+to $2.41$~eV.  A gap collapse in the wrong direction is the signature
+of a mixed-in state, not a converged one.  Check: re-run with and
+without diffuse functions.
+
+\textbf{Minimal-window limits for multiconfigurational
+$\pi\pi^*$ states.}  The benchmark record shows a uniform positive
+deviation of the $\pi\pi^*$ family ($+0.6$ to $+1.5$~eV) that
+survives every window correction tried.  Check: widen the window by
+one occupied orbital; a deviation that shrinks is window-limited.
+
+\textbf{No spin--orbit coupling; scalar-relativistic with ECPs only.}
+Fine structure is out of scope.
+
+\section{Implementation limits}
+
+\textbf{Dense diagonalization.}  The CI step materializes and
+diagonalizes the full determinant space; the practical ceiling is a
+few thousand determinants per root calculation.  A differentiable
+iterative eigensolver is future work.
+
+\textbf{Second-derivative cost.}  The implicit route requires the
+orbital Hessian in memory and does not exploit sparsity; the unrolled
+route scales with the iteration count.  Neither is competitive with
+analytic second derivatives of single-reference methods.
+
+\textbf{Memory and compile profiles of the differentiated chain.}
+Intermediates are broadcast over the rotation-parameter count.  The
+measured record that shaped the current design: an explicit Hessian
+at about five hundred parameters requested a 402~GB allocation in a
+single request; the Hessian-vector-product stages that replaced it
+carry one tangent per pass, and their first evaluation still spends
+minutes in XLA compilation at that size.  Check: watch resident
+memory during the first optimization step, and leave headroom on
+shared machines.
+
+\subsection{Degenerate pairs at a stationary point}
+
+The eigensolver's cluster tolerance must separate two scales: the
+floating-point noise that splits symmetry-degenerate pairs at a
+rotated stationary point (measured between $10^{-8}$ and
+$1.2\times10^{-5}$ on the systems in this work) and the physical gaps
+of the same spectrum ($1.9\times10^{-2}$ and above).  A tolerance
+below the noise exposes the first and second derivatives to a bare
+inverse gap; one above the physical gaps merges distinct states.  The
+window measured here spans $10^{-5}$ to $10^{-2}$, and there is no
+admissible value when a physical gap falls inside the noise band ---
+the fallback for that case is the decomposition-free Lanczos kernel.
+Check: if a linear or otherwise degenerate system returns unstable
+derivatives, this tolerance is the first knob to inspect.
+
+\section{Protocol limits}
+
+\textbf{Multiple stationary points.}  The orbital energy is
+non-convex; different starting points reach different stationary
+points, and the selection is not stable even at fixed settings ---
+water at 6-31G has two minima $13$~kcal/mol apart, and the
+reference-orbital start reaches a saddle.  Report the stationarity
+certificate and the stationary-point spread with every multireference
+number.
+
+\textbf{NEVPT2 convergence sensitivity.}  The correction depends on
+the orbitals more sensitively than the energy; energy-based gates are
+insufficient when the target is the correction.  Measured: orbital
+stalls that move the correction by several kcal/mol across runs whose
+energies agree to the microhartree.  Use the stability of the
+correction across independent runs together with a tightened
+orbital-gradient gate.
+
+\textbf{Window rules and bookkeeping.}  The frontier audit covers the
+patterns met so far; the electron count follows the window
+($n_\mathrm{ele} = N_\mathrm{ele} - 2 n_\mathrm{core}$) and a
+hard-coded count produces a wrong ground state that the energy alone
+does not flag.

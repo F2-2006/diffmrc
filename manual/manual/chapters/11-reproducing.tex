@@ -1,4 +1,72 @@
 \chapter{Reproducing the paper}
-\label{ch:11-reproducing}
+\label{ch:reproducing}
 
-% TODO
+\section{Environment}
+
+Every reproduction script sets its own runtime environment at the top:
+the five BLAS thread variables and \texttt{JAX\_PLATFORMS=cpu} before
+the first JAX import, and \texttt{jax\_enable\_x64} immediately after.
+A script run outside this convention may produce different timings and,
+in the single-precision case, wrong numbers; the settings are quoted in
+Chapter~\ref{ch:installation}.
+
+The scripts write JSON results next to themselves (or into a
+\texttt{results/} directory); the figure sources read those JSON files.
+Run them from a directory with the package importable, or adjust the
+path insert at the top of the script.
+
+\section{The paper's figures and tables}
+
+\begin{center}
+\begin{tabular}{ll}
+\toprule
+Script & Result \\
+\midrule
+\texttt{t157\_grad\_gold\_fix.py} & nuclear-gradient validation; invariance conditions \\
+\texttt{t155\_grad\_regression.py} & gradient regression against an analytic reference \\
+\texttt{t150\_gold\_refine.py} & golden-standard Hessian by re-optimizing at each displaced geometry \\
+\texttt{t149\_mix\_AD\_vs\_FD.py} & why finite differences fail for the mixed derivative \\
+\texttt{t151\_unrolled\_theta.py} & response term by unrolled iteration \\
+\texttt{t152\_generalize.py} & unrolled route on CO and N$_2$ \\
+\texttt{t154\_implicit\_hessian.py} & response term by implicit differentiation \\
+\texttt{t153\_hessian\_to\_freq.py} & harmonic frequencies from the mass-weighted Hessian \\
+\texttt{t159\_basis\_active\_space.py} & frequency dependence on basis set and active space \\
+\texttt{t160\_collect\_freq.py} & frequency summary \\
+\texttt{t142\_layerA\_v2.py}, \texttt{t156}, \texttt{t158} & lanthanide dissociation energies \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\section{The later result lines}
+
+The state-averaged and benchmark lines that postdate the paper's
+first draft live under the project's \texttt{code/} directory:
+
+\begin{center}
+\begin{tabular}{ll}
+\toprule
+Script & Result \\
+\midrule
+\texttt{t315 / t317 / t321} & the QUEST-subset excitation runs (with \texttt{t320} the window audit) \\
+\texttt{t316} & the assembled benchmark table (reads the recorded JSON) \\
+\texttt{t318} & the large-molecule single-stage protocol \\
+\texttt{t306} & the first state-averaged targets, with the two-pass weights \\
+\texttt{t300}--\texttt{t302} & the external selection-protocol cross-check \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+Each of these carries its conventions in its docstring: basis,
+geometry source, window rule, state-weighting pass.  A number quoted
+from one of them without those four facts is a number that will not
+survive being compared with the others.
+
+\section{Building this documentation}
+
+The Tutorial and the Manual are xelatex documents under
+\texttt{manual/}; compile each twice:
+
+\begin{lstlisting}[language=bash]
+cd manual/tutorial && xelatex tutorial.tex && xelatex tutorial.tex
+cd ../manual    && xelatex manual.tex    && xelatex manual.tex
+\end{lstlisting}
