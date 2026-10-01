@@ -24,7 +24,7 @@ $4\times 10^{-7}$ on the large-core test after the block-loop fix &
 the frozen-contraction tests \\
 State-averaged solution at one root against the ground-state path &
 bit-for-bit ($10^{-12}$) &
-\texttt{tests/driver/test\_sa\_pipeline.py} \\
+\texttt{tests/driver/\allowbreak test\_sa\_\allowbreak pipeline.py} \\
 Joint and theta-only factories at fixed geometry &
 $10^{-10}$~Ha &
 the same suite \\
@@ -98,7 +98,7 @@ internal ground truth:
 \section{The layer contracts}
 
 The six-layer architecture is itself under test:
-\texttt{tests/test\_layer\_contracts.py} (or the
+\texttt{tests/\allowbreak test\_layer\_\allowbreak contracts.py} (or the
 \texttt{lint-imports} entry point) parses the import graph and fails
 on any upward import.  The check is structural, not conventional: an
 import performed lazily inside a function body is still reported,

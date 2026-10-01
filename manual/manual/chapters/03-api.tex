@@ -12,7 +12,7 @@ conventions but have lighter coverage.
 \section{core: the numerical kernel}
 
 \begin{center}
-\begin{tabular}{ll}
+\begin{tabularx}{\textwidth}{lX}
 \toprule
 Entry point & Purpose \\
 \midrule
@@ -32,7 +32,7 @@ Entry point & Purpose \\
 \texttt{nevpt2.impl.canonicalize\_jax(...)} & orbital canonicalization on the differentiated path \\
 \texttt{nevpt2.impl.nevpt2\_e2\_full2(...)} & the frozen NEVPT2 contraction \\
 \bottomrule
-\end{tabular}
+\end{tabularx}
 \end{center}
 
 The kernel is frozen: later layers build on it and corrections to it
@@ -41,7 +41,7 @@ go through the verification records, not through ad-hoc edits.
 \section{analysis: NumPy only}
 
 \begin{center}
-\begin{tabular}{ll}
+\begin{tabularx}{\textwidth}{lX}
 \toprule
 Entry point & Purpose \\
 \midrule
@@ -55,7 +55,7 @@ Entry point & Purpose \\
 \texttt{diagnostics.is\_single\_reference / zs1} & multireference diagnostics \\
 \texttt{plateau.detect\_plateaus} & entropic plateaus of an orbital set \\
 \bottomrule
-\end{tabular}
+\end{tabularx}
 \end{center}
 
 This layer imports nothing from the kernel; it operates on the
@@ -68,14 +68,14 @@ The policy layer turns analysis output into selections: composition-based
 rules, entropy-based ordering, the ranked orbital selection with its
 singly-occupied and virtual-removal options, and the verification
 helpers.  The module names are the inventory
-(\texttt{policy.composition}, \texttt{policy.entropy},
-\texttt{policy.ranking}, \texttt{policy.rules}, and their siblings);
+(\texttt{policy.\allowbreak composition}, \texttt{policy.\allowbreak entropy},
+\texttt{policy.\allowbreak ranking}, \texttt{policy.\allowbreak rules}, and their siblings);
 the docstrings state the conventions each rule follows.
 
 \section{driver: the differentiable pipelines}
 
 \begin{center}
-\begin{tabular}{ll}
+\begin{tabularx}{\textwidth}{lX}
 \toprule
 Entry point & Purpose \\
 \midrule
@@ -89,7 +89,7 @@ Entry point & Purpose \\
 \texttt{orbitals.converge\_orbital\_point(E\_theta, npar)} & two-stage convergence with refinement and polish \\
 \texttt{orbitals.hessp\_of(E\_theta)} & Hessian-vector product for the trust-region stage \\
 \bottomrule
-\end{tabular}
+\end{tabularx}
 \end{center}
 
 The two factory families exist because of a pyscfad constraint: the

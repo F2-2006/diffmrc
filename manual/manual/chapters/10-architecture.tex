@@ -4,7 +4,7 @@
 \section{The six layers}
 
 \begin{center}
-\begin{tabular}{ll}
+\begin{tabularx}{\textwidth}{lX}
 \toprule
 Layer & Responsibility \\
 \midrule
@@ -19,7 +19,7 @@ Layer & Responsibility \\
 \texttt{report} & result objects and rendering. \\
 \texttt{cli} & the command-line entry point. \\
 \bottomrule
-\end{tabular}
+\end{tabularx}
 \end{center}
 
 Dependencies point downward only.  A user script may import any layer;

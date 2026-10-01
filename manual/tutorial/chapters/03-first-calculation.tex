@@ -67,7 +67,7 @@ required for a correct stationary point --- omitting them leaves the
 optimizer stopped at a point that is not stationary.  \texttt{E\_cas}
 is the CASCI energy of the rotated orbitals.
 
-\texttt{solve\_theta\_star} runs the two-stage orbital optimization
+\texttt{solve\_\allowbreak theta\_\allowbreak star} runs the two-stage orbital optimization
 and returns the parameter vector \emph{and} the gradient norm at the
 point it stopped at.  Do not discard \texttt{gnorm}: it is the
 evidence of convergence, and the package reports stationarity from
@@ -89,7 +89,7 @@ every such run:
 \begin{itemize}
   \item \texttt{gnorm}, the orbital-rotation gradient norm, should sit
     at or below the threshold that
-    \texttt{solve\_theta\_star} was asked for.  If the refinement
+    \texttt{solve\_\allowbreak theta\_\allowbreak star} was asked for.  If the refinement
     stalls above the threshold, the returned point carries the stall
     in its stopping reason; treat a stalled point as a candidate, not
     as a result.
