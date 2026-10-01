@@ -9,7 +9,7 @@ silently selects the wrong orbitals, how to detect them, and what to
 do instead.  The detection rules live in
 \texttt{diffmrc.analysis.orbitals} and cost one SCF to apply.
 
-\subsection{The default, and its three failure modes}
+\subsection{The default window, and the cases that break it}
 
 The default window takes the frontier pair in energy order.  It is
 correct for the common chromophores: the carbonyl $n \to \pi^*$ pair
@@ -47,6 +47,7 @@ cross-component pair.
 import numpy as np
 from diffmrc.analysis.orbitals import heavy_atoms, frontier_report
 
+# mol and mf from a plain pyscfad SCF (see the first-calculation chapter)
 labels = mol.ao_labels()
 C = np.asarray(mf.mo_coeff)
 e = np.asarray(mf.mo_energy)

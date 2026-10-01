@@ -33,7 +33,8 @@ numerical kernel.
 
 \subsection{Runtime settings that are not optional}
 
-Two settings must be established before the first JAX import.
+The platform and thread settings must be in place before the first
+JAX import; the double-precision switch immediately after it.
 
 \begin{lstlisting}[language=Python]
 import os

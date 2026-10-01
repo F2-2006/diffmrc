@@ -4,7 +4,7 @@
 The package differentiates its energy chain twice, so that harmonic
 frequencies and curvature checks come out of the same code path that
 produced the gradients.  This chapter records the construction and the
-three numerical facts that forced their design.
+numerical facts that forced their design.
 
 \section{The nuclear Hessian by implicit differentiation}
 
@@ -40,8 +40,9 @@ those products, and the trust-region stage consumes them through the
 optimizer's \texttt{hessp} interface.  The budgets are deliberately
 shallow (tolerance $10^{-6}$, forty iterations): an inexact Newton
 step feeds a damping ladder and a downhill acceptance test that
-correct it, and the deep solver cost hours of product evaluations per
-molecule for no change in the converged point.
+correct it.  The deep solver cost hours of product evaluations per
+molecule, and the shallow budget passes the same refinement
+regressions.
 
 \section{Degenerate pairs and the derivative basis}
 

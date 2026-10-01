@@ -83,9 +83,9 @@ equal weights --- the components of one state share that state's
 weight, states share equally --- stabilizes the orbitals and usually
 tightens the final gradient.  The two-pass pattern is what the
 benchmark scripts run; its effect on the reported excitation energies
-was measured at or below 0.1~eV for the systems in this tutorial's
-benchmark chapter, so a single equal-weight pass is a reasonable first
-look.
+stayed within a few tenths of an eV for the systems in this
+tutorial's benchmark chapter, so a single equal-weight pass is a
+reasonable first look.
 
 The weights are passed as \texttt{state\_weights} to either factory.
 The vector must have one entry per root, in root order; the helper in
