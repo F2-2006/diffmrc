@@ -1,4 +1,75 @@
 \section{Limitations and how to check them}
-\label{sec:08-limitations}
+\label{sec:limitations}
 
-% TODO
+The limitations below are grouped by where they come from, because the
+grouping decides what to do about them: method-family limits will not
+be removed by further development of this package, implementation
+limits are measured and tracked, and protocol limits are the user's to
+manage.  Each item comes with the check that detects it.
+
+\subsection{Method-family limits}
+
+\textbf{The perturbation layer inherits the standard contracted-NEVPT2
+approximations.}  Excitation energies are reproduced at the accuracy
+band the reference set assigns to \textsc{sc}-NEVPT2
+(Chapter~\ref{sec:benchmark-walkthrough}), and not better.  Check:
+compare against a second implementation or the reference set's own
+NEVPT2 column before attributing a deviation to anything else.
+
+\textbf{Valence--Rydberg mixing is not resolved at small bases.}
+$\pi \to \pi^*$ states that sit near Rydberg states --- ethylene is the
+textbook case --- shift by around an electron volt when diffuse
+functions enter the basis, and move again when the active window
+includes the diffuse pi orbitals.  Check: run the target once with and
+once without diffuse functions; if the excitation moves by more than
+the claimed accuracy, the number is basis-limited, not converged.
+
+\textbf{Multiconfigurational $\pi\pi^*$ states exceed a two-orbital
+window.}  The uniform positive deviation of the $\pi \to \pi^*$ family
+in the benchmark chapter survives every window correction tried here.
+Check: widen the window by one occupied orbital and re-run; a
+deviation that shrinks is window-limited, one that does not is a
+method-family limit for this protocol.
+
+\textbf{No spin--orbit coupling and no relativistic Hamiltonian.}  The
+package works in a scalar-relativistic world with ECPs; fine
+structure and heavy-element spin physics are out of scope.  Check:
+nothing to check --- if the target needs SOC, this is the wrong tool.
+
+\subsection{Implementation limits}
+
+\textbf{Dense diagonalization bounds the active space.}  The CI step
+builds and diagonalizes the full determinant space; spaces beyond a
+few thousand determinants become impractical, and iterative
+eigensolvers are future work.
+
+\textbf{Memory and compile time grow steeply with the parameter
+count.}  The differentiated chain broadcasts intermediates over the
+rotation parameters; at around five hundred parameters a single node
+of the Hessian path once requested a 402~GB allocation, which is why
+the second-order stages now run on Hessian-vector products.  Expect
+the first evaluation of a large system to spend most of its time in
+XLA compilation.  Check: watch the resident memory of the first
+optimization step, not the steady state.
+
+\textbf{CPU-only validation.}  The GPU path is not claimed; the
+platform must be pinned to CPU (Chapter~\ref{sec:installation}).
+
+\subsection{Protocol limits}
+
+\textbf{The convergence gate is the gradient.}  Review
+Chapter~\ref{sec:convergence} before quoting any number; the
+stationary-point spread is part of the result.
+
+\textbf{The window rules cover the patterns met so far.}  The frontier
+audit of Chapter~\ref{sec:active-space} catches the two failure modes
+this project hit; it is a rule set, not a guarantee, and a chemistry
+outside the covered patterns should be audited with the same tools
+rather than assumed correct.
+
+\textbf{Residual deviations carry protocol, not just method.}  The
+benchmark protocol fixes the basis at 6-31G and the geometry at the
+reference set's; a number quoted without those two facts travels
+badly.  Check: every table in this documentation states basis,
+geometry source, window rule, and state-weighting pass --- keep that
+habit when exporting numbers.

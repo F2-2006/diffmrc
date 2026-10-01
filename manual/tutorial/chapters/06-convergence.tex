@@ -1,4 +1,73 @@
 \section{Convergence and diagnostics}
-\label{sec:06-convergence}
+\label{sec:convergence}
 
-% TODO
+A multireference calculation is only as good as the stationary point
+it was evaluated at, and the failure modes here are quiet ones.  This
+chapter collects what the package reports and how to read it.
+
+\subsection{The criterion is the gradient, not the energy}
+
+The orbital optimization returns both a point and the gradient norm at
+that point, and the norm is the verdict.  The energy alone cannot
+serve: this project measured a run in which the energy kept descending
+while the parameters walked to magnitudes of $10^{13}$ --- the model
+had no stationary point in the direction it was sliding along, and an
+energy-only stopping rule called it a success.  Treat a convergence
+claim without a gradient norm as no claim at all.
+
+The stopping reason distinguishes the ways a run can end:
+
+\begin{itemize}
+  \item \texttt{CONVERGED}: the gradient reached the refinement
+    target.  This is the only reason that is a stationarity claim.
+  \item \texttt{STALLED\_GRADIENT}: the iteration stopped because a
+    step no longer reduced the gradient.  The point may still be
+    useful, but it is a candidate, not a certificate.
+  \item \texttt{GUARD\_STOPPED}: no damped step lowered the energy.
+    On a converged point this is the normal way to finish a Newton
+    pass.
+  \item \texttt{ITERATION\_CAP}: the budget ran out.  Re-check the
+    gradient before using the point.
+\end{itemize}
+
+\subsection{Multiple stationary points}
+
+The CASSCF energy is not convex in the orbital parameters.  Different
+starting points can reach different stationary points whose energies
+differ by more than a bond energy; the water molecule at 6-31G has two
+minima separated by 13~kcal/mol from the same molecule and basis.
+Nothing in the eigensolver signals this: both points are stationary.
+
+Practical consequences:
+
+\begin{itemize}
+  \item Report the stationary-point spread alongside any
+    multireference number, or run several starts and keep the lowest.
+  \item A point with zero gradient can still be a saddle.  The kernel
+    exposes a curvature check over the Hessian
+    (\texttt{stationary.curvature\_report}); when a number matters,
+    run it.  The orbitals obtained straight from the reference SCF
+    ($\theta = 0$) are, for the water example in this tutorial, a
+    saddle rather than a minimum.
+  \item Treat the spread as protocol, not error: fixed settings can
+    still select different stationary points on different machines,
+    and the package reports the choice it made rather than
+    normalizing it away.
+\end{itemize}
+
+\subsection{The perturbation layer is the more sensitive one}
+
+NEVPT2 depends on the orbitals more sensitively than the CASSCF energy
+does.  Convergence gates set for the energy can leave the correction
+unstable: this project measured orbital-gradient stalls that moved the
+correction by several kcal/mol between runs whose energies agreed to
+the microhartree.  When the target quantity is the correction,
+
+\begin{itemize}
+  \item tighten the orbital-gradient gate rather than the energy
+    gate, and read the gradient norm the run reports;
+  \item confirm the correction's stability across independent runs
+    (different starting parameters, or the two state-averaging passes
+    of Chapter~\ref{sec:state-averaged}), instead of trusting a
+    single converged number.
+\end{itemize}

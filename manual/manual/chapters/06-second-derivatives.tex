@@ -1,4 +1,75 @@
 \chapter{Second derivatives}
-\label{ch:06-second-derivatives}
+\label{ch:second-derivatives}
 
-% TODO
+The package differentiates its energy chain twice, so that harmonic
+frequencies and curvature checks come out of the same code path that
+produced the gradients.  This chapter records the construction and the
+three numerical facts that forced their design.
+
+\section{The nuclear Hessian by implicit differentiation}
+
+Differentiating through a converged orbital optimization naively ---
+differentiating the unrolled iteration --- scales with the number of
+iterations and inherits every numerical accident of the solver.  The
+production route instead treats the optimized orbital parameters as an
+implicit function of the geometry, $\theta^*(R)$, and assembles the
+second derivative from the partial derivatives of the energy at the
+converged point plus a response term built from the orbital Hessian.
+
+Two implementation facts came out of the verification work.  The
+response solve must use a pseudoinverse rather than a plain solve:
+the orbital Hessian at a converged point is singular in the
+directions the optimizer is free to ignore, and the plain solve
+either fails or returns noise.  And the implicitly assembled Hessian
+must be pinned against the alternative construction: the two routes
+agree to $1.6 \times 10^{-11}$ on the validation systems, with the
+implicit route costing about a third of the unrolled one.
+
+\section{The second-order stages never materialize the Hessian}
+
+The orbital refinement (damped Newton) and the trust-region polish
+need the Hessian only through its action on vectors.  The earlier
+implementation built it explicitly with \texttt{jax.hessian}, which is
+forward-over-forward: every intermediate of the chain is broadcast
+over the square of the parameter count.  At five hundred parameters
+that construction requested a single 402~GB allocation and died.  Both
+stages now receive Hessian-vector products --- a forward-mode
+derivative of the gradient --- which carry one tangent per reverse
+pass: the refinement solves its Newton step by conjugate gradients on
+those products, and the trust-region stage consumes them through the
+optimizer's \texttt{hessp} interface.  The budgets are deliberately
+shallow (tolerance $10^{-6}$, forty iterations): an inexact Newton
+step feeds a damping ladder and a downhill acceptance test that
+correct it, and the deep solver cost hours of product evaluations per
+molecule for no change in the converged point.
+
+\section{Degenerate pairs and the derivative basis}
+
+A symmetry-degenerate pair of orbitals has no canonical derivative
+basis: the eigenvectors inside the degenerate subspace are arbitrary,
+so a naive derivative of a decomposition returns a quantity that
+depends on the solver's internal ordering.  For a linear molecule
+this is not an edge case --- the $\pi$ pairs are exactly degenerate,
+and a gradient assembled through an unguarded decomposition returns
+NaN.  The kernels use degeneracy-safe eigensolvers throughout the
+differentiated path, and the second-order routes avoid differentiating
+decompositions where the response construction allows it.
+
+\section{From the Hessian to frequencies, and one cautionary record}
+
+Harmonic frequencies follow from the mass-weighted Hessian by the
+standard normal-mode analysis, using PySCF's driver on a Hessian this
+package assembles.  The conversion has a layout trap that cost this
+project a wrong number: the Hessian must be handed over in the
+(atom, coordinate) block layout the thermodynamics module expects,
+not as a plain reshape.  The wrong layout comes out plausible and
+silent --- for CO at 6-31G it produced $1501.8$~cm$^{-1}$ against the
+correct $2293.5$~cm$^{-1}$.
+
+The frequency route is anchored against an independent value: the CO
+molecule at 6-31G gives $2294.2$ and $2293.5$~cm$^{-1}$ from the two
+assembly routes, against an external anchor at $2293.5$~cm$^{-1}$.
+When a validation target sits near zero, do not reach for finite
+differences: this project measured finite-difference errors of over
+one hundredfold on a near-zero mixed derivative, growing as the step
+shrank.  Use an invariance or an analytic cross-check instead.

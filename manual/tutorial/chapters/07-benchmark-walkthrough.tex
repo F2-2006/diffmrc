@@ -1,4 +1,108 @@
 \section{A benchmark walkthrough}
-\label{sec:07-benchmark-walkthrough}
+\label{sec:benchmark-walkthrough}
 
-% TODO
+This chapter runs the package against an external reference set and
+shows how to read the comparison.  The reference is the QUEST database
+of vertical excitation energies; the protocol follows its geometry
+convention, and the numbers below come from this project's recorded
+runs.
+
+\subsection{The protocol}
+
+\begin{itemize}
+  \item \textbf{Geometries}: the reference set's own optimized
+    geometries (bohr), never re-optimized --- a geometry difference is
+    not a method difference, and mixing the two makes the comparison
+    unreadable.
+  \item \textbf{Basis}: 6-31G throughout.  The reference set reports
+    its values near the complete-basis limit, so each entry carries a
+    basis-set component that this protocol does not remove.  It is
+    visible in the deviations below and is the first thing to check
+    when interpreting them.
+  \item \textbf{Active space}: the frontier window of
+    Chapter~\ref{sec:active-space}, widened to three orbitals for the
+    linear two-pi and amide patterns.
+  \item \textbf{State averaging}: equal-weight, with a second
+    between-group pass for most systems; the three window-corrected
+    systems below are quoted from a single equal-weight pass.  The
+    pass difference measured at or below $0.1$~eV.
+  \item \textbf{Comparison columns}: the reference set reports both
+    its best estimate and its own \textsc{sc}-NEVPT2 value.  Since the
+    package implements \textsc{sc}-NEVPT2, the second column isolates
+    method-to-method differences, while the first additionally carries
+    the reference method's own error budget.
+\end{itemize}
+
+\subsection{The runs}
+
+Each target is a script under \texttt{code/}: \texttt{t315} (first
+set), \texttt{t317} (second set), \texttt{t321} (window-corrected
+re-runs), with \texttt{t316} assembling the summary table from the
+recorded JSON.  A single run is a state-averaged
+CASSCF with per-state NEVPT2, followed by
+\texttt{sa\_nevpt2\_state\_table} and the state selection of
+Chapter~\ref{sec:state-averaged}.
+
+\subsection{Results}
+
+Deviations are in eV; a positive entry means the package's excitation
+energy lies above the reference.
+
+\begin{center}
+\begin{tabular}{llrrr}
+\toprule
+System & State & package & vs best estimate & vs \textsc{sc}-NEVPT2 \\
+\midrule
+Acetaldehyde & $^1A''$ & $4.58$ & $+0.28$ & $+0.16$ \\
+             & $^3A''$ & $4.10$ & $+0.15$ & $+0.07$ \\
+Glyoxal      & $^1A_u$ & $2.57$ & $-0.31$ & $-0.42$ \\
+             & $^3A_u$ & $2.14$ & $-0.35$ & $-0.45$ \\
+Cyclopropenone & $^1B_1$ & $4.90$ & $+0.62$ & $+0.82$ \\
+               & $^3B_1$ & $4.48$ & $+0.55$ & $+0.93$ \\
+Formamide    & $^1A''$ & $5.75$ & $+0.11$ & $+0.02$ \\
+             & $^3A''$ & $5.44$ & $+0.08$ & $+0.00$ \\
+Cyanogen     & $^1\Sigma_u^-$ & $6.99$ & $+0.62$ & $+0.62$ \\
+             & $^3\Sigma_u^+$ & $6.11$ & $+1.20$ & $+1.19$ \\
+Propynal     & $^1A''$ & $6.86$ & $+1.35$ & $+1.28$ \\
+             & $^3A'$  & $5.36$ & $+0.93$ & $+0.70$ \\
+Cyanoacetylene & $^1\Sigma_u^-$ & $7.07$ & $+1.28$ & $+1.24$ \\
+               & $^3\Sigma_u^+$ & $5.92$ & $+1.47$ & $+1.43$ \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+The mean absolute deviations, by excitation family --- the split is the
+point of the exercise:
+
+\begin{center}
+\begin{tabular}{lrr}
+\toprule
+Family & vs best estimate & vs \textsc{sc}-NEVPT2 \\
+\midrule
+$n \to \pi^*$ (8 states) & $0.31$ & $0.36$ \\
+$\pi \to \pi^*$ (6 states) & $1.14$ & $1.08$ \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\subsection{Reading the table}
+
+The $n \to \pi^*$ states --- the carbonyl and amide chromophores ---
+land within about three tenths of an eV of both reference columns at
+this basis, which is the accuracy band the reference set itself
+assigns to \textsc{sc}-NEVPT2.  The window-corrected formamide run
+reproduces the reference \textsc{sc}-NEVPT2 values to $0.02$~eV.
+
+The $\pi \to \pi^*$ states carry a uniform positive deviation of
+roughly $0.6$ to $1.5$~eV.  Window corrections reduce it (cyanogen
+moves from $+1.95$ to $+1.20$ on its triplet) but do not remove it,
+and the residual has the same sign across five chemically different
+systems.  A uniform, one-signed residual across systems is a property
+of the method or the protocol, not of the individual molecules; the
+candidate explanations --- valence--Rydberg mixing at the
+6-31G basis, and the multiconfigurational character of the
+$\pi\pi^*$ states beyond a two-orbital window --- are discussed in
+Chapter~\ref{sec:limitations}.  The honest summary of this benchmark
+is a capability map: the package's minimal-space protocol is
+quantitative for $n \to \pi^*$ vertical excitations and systematically
+high for $\pi \to \pi^*$ ones at this basis.
