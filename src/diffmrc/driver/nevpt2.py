@@ -732,3 +732,48 @@ def nevpt2_relaxed_hessian(mol, theta, E_casscf, E_nevpt2, rcond=None):
         dtheta_dR_max=float(np.abs(D).max()) if D.size else 0.0,
         rcond=float(rcond),
     )
+
+
+def sa_nevpt2_table_from_mol(mol, family, scf_builder, *, nroots,
+                             max_steps=400, refine_max_iter=40,
+                             e2_scale=1.0):
+    """State-averaged CASSCF + per-state NEVPT2 from a molecule, one call.
+
+    The window comes from ``driver.orbitals.auto_window`` (the frontier
+    identity rules); the rest is the validated composition the M5-C
+    driver scripts otherwise assemble by hand: equal-weight SA for the
+    orbital point, per-state NEVPT2 on it, the physical-state table by
+    ``sa_nevpt2_state_table``.  A single equal-weight pass is used; the
+    between-group second pass changes tables by tenths of an eV at this
+    level of theory and can be added by the caller by re-running the
+    factory with ``state_weights``.
+
+    Returns a dict with the window triple, the frontier report that
+    suggested it, the space dimensions, the orbital-point gradient norm,
+    the table rows and groups, and the raw ``out`` for further analysis.
+    """
+    from ..core.nevpt2.impl import cas_dets_for2
+    from ..core.orblib import orbital_pairs
+    from .orbitals import auto_window, converge_orbital_point
+
+    nmo = mol.nao_nr()
+    mf = scf_builder(mol).run(verbose=0)
+    report = auto_window(mol, mf, family)
+    ncore = int(report['suggested_window']['ncore'])
+    nact = int(report['suggested_window']['nact'])
+    nele = int(mol.nelectron - 2 * ncore)
+
+    pairs = orbital_pairs(ncore, nact, nmo, include_cv=True)
+    dets = cas_dets_for2(ncore, nact, nele)
+    comp = make_nevpt2_sa_theta_fn(mol, ncore, nact, nele, nmo, pairs,
+                                   scf_builder, nroots=nroots,
+                                   e2_scale=e2_scale)
+    point = converge_orbital_point(lambda th: comp(th)['E_sa'],
+                                   len(pairs), max_steps=max_steps,
+                                   refine_max_iter=refine_max_iter)
+    out = comp(point.theta)
+    rows, groups = sa_nevpt2_state_table(out, dets)
+    return {'window': {'ncore': ncore, 'nact': nact, 'nele': nele},
+            'frontier_report': report, 'nmo': nmo, 'npar': len(pairs),
+            'ndet': len(dets), 'grad_norm': float(point.grad_norm),
+            'rows': rows, 'groups': groups, 'out': out}

@@ -236,3 +236,24 @@ def converge_orbital_point(E_theta, npar, theta0=None,
         refinement=sp,
         polished=polished,
     )
+
+
+def auto_window(mol, mf, family):
+    """Frontier identity and a suggested active window for one family.
+
+    ``mol`` is a built Mole; ``mf`` its converged mean-field solution
+    (anything carrying ``mo_energy`` and ``mo_coeff``).  ``family`` is
+    ``'npi'`` or ``'ppi'``.  The suggestion logic lives in
+    ``analysis.orbitals.frontier_report``: the (HOMO, LUMO) pair for a
+    standard frontier, widened to three orbitals when a degenerate
+    occupied pi pair or a lone pair below a conjugated pi frontier is
+    in play.  The full report is returned -- the suggestion is a
+    suggestion, and everything that produced it travels with it.
+    """
+    from ..analysis.orbitals import frontier_report, heavy_atoms
+
+    labels = mol.ao_labels()
+    return frontier_report(
+        np.asarray(mf.mo_coeff), labels, np.asarray(mf.mo_energy),
+        mol.nelectron // 2, heavy_atoms(labels),
+        target=family, nelectron=int(mol.nelectron))
