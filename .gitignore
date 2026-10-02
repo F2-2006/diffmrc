@@ -38,3 +38,6 @@ Thumbs.db
 .import_linter_cache/
 .coverage
 htmlcov/
+
+# generated LaTeX tables (rebuildable via code/t332)
+manual/manual/generated/
