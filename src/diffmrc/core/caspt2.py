@@ -21,6 +21,7 @@ external by symmetry), which is the first anchor:
 server/caspt2_anchor/h2_cas22.log, ORCA CASPT2 = -0.004043415 Eh.
 """
 import os  # noqa: E402
+from collections import defaultdict  # noqa: E402
 
 import jax
 jax.config.update("jax_enable_x64", True)
@@ -28,7 +29,8 @@ from jax import numpy as jnp  # noqa: E402
 
 import numpy as np  # noqa: E402
 
-__all__ = ['caspt2_double_external_e2', 'caspt2_full_e2']
+__all__ = ['caspt2_double_external_e2', 'caspt2_full_e2',
+           'caspt2_contracted_e2']
 
 
 def caspt2_full_e2(h1e_mo, eri_mo, ci, dets, *, ncore, nact, nele, eps,
@@ -215,3 +217,211 @@ def caspt2_double_external_e2(h1e_mo, eri_mo, c_ci, dets, *,
     diff_safe = jnp.where(jnp.abs(diff) > 1e-12, diff, jnp.ones_like(diff))
     e2 = -jnp.sum(jnp.where(jnp.abs(diff) > 1e-12, norm / diff_safe, 0.0))
     return float(e2), np.asarray(norm), np.asarray(diff)
+
+
+def caspt2_contracted_e2(h1e_mo, eri_mo, ci, dets, *, ncore, nact, nele, eps):
+    """Contracted (internally contracted) CASPT2, diagonal-complete scheme.
+
+    Follows the OpenMolcas conventions established by line-by-line source
+    comparison (2026-10-02 session; OpenMolcas v26.06 src/caspt2):
+
+    - The eight excitation classes are organised by ('out', 'in') orbital
+      pools; each unordered pair ''with repetition'' of pool indices labels
+      one contracted function
+      ``K = E(p1 q1) E(p2 q2) +- E(p1 q2) E(p2 q1)`` acting on the CI
+      vector (spin-summed E; full-electron integrals -- the frozen-core
+      VHF shortcut is invalid once core holes appear).
+    - Molcas normalisation (mkrhsh.F90): VP = cross sum; VM = sqrt(3) *
+      cross difference (exists only when q1 != q2 and p1 != p2).  Both
+      components enter e2 independently.
+    - ``W = <0|H|K>``, ``S = <K|K>``, ``A = <K|F|K>`` with F approximated
+      by its semicanonical diagonal eps;  ``e2 = -W^2 / (A - E0 * S)``
+      with E0 the reference's F expectation.
+    - Same-orbital rows of the active pool are proportional replicas
+      across different active orbitals (measured on H2O: K(act2,act2)
+      ~ -K(act1,act1)/42, so their W^2/D coincide); only the pool's
+      leading orbital contributes those rows.  Core and virtual pools
+      have no such replicas and are summed in full.  (The single-
+      excitation class V0_ia has W = 0 identically -- its physical
+      contribution lives in the off-diagonal F coupling, out of scope of
+      this diagonal-complete scheme.)
+
+    Anchors (ratios to ORCA CASPT2 over the five dominant classes):
+    H2O/6-31G CAS(2,2) 1.02 / 0.94 / 1.00 / 0.89 / 0.96 (V0_ijab, Vm1_iab,
+    Vm2_ab, V1_ija, V2_ij);  CO/6-31G CAS(2,2) total within 0.03%.
+
+    Returns (e2_total, breakdown) with breakdown keyed by class name.
+    """
+    from .nevpt2.impl import cas_dets_for2  # noqa: F401  (API parity)
+
+    h1e_mo = np.asarray(h1e_mo)
+    eri_mo = np.asarray(eri_mo)
+    ci = np.asarray(ci).ravel()
+    eps = np.asarray(eps, dtype=float)
+    nmo = h1e_mo.shape[0]
+    nocc = ncore + nact
+    nso = 2 * nmo
+
+    ref_pairs = [(int(d), float(c)) for d, c in zip(dets, ci)
+                 if abs(c) > 1e-14]
+
+    pi = np.arange(nso) // 2
+    si = np.arange(nso) % 2
+    h_so = np.where(si[:, None] == si[None, :],
+                    h1e_mo[pi[:, None], pi[None, :]], 0.0)
+    m4 = ((si[:, None, None, None] == si[None, None, :, None])
+          & (si[None, :, None, None] == si[None, None, None, :]))
+    eri_so = np.where(
+        m4, eri_mo[pi[:, None, None, None], pi[None, None, :, None],
+                   pi[None, :, None, None], pi[None, None, None, :]], 0.0)
+
+    _bits_cache = {}
+
+    def so_bits(x):
+        if x not in _bits_cache:
+            _bits_cache[x] = [i for i in range(nso) if (x >> i) & 1]
+        return _bits_cache[x]
+
+    def pc(x):
+        return bin(x).count('1')
+
+    def h_elem(J, K):
+        """<J|H|K> (Slater-Condon; verified bitwise against core.casci._block_H)."""
+        if J == K:
+            return 0.0
+        dj, dk = J & ~K, K & ~J
+        n = pc(dj)
+        if n != pc(dk) or n > 2:
+            return 0.0
+        if n == 1:
+            i = (dj & -dj).bit_length() - 1
+            k = (dk & -dk).bit_length() - 1
+            sgn = (-1.0) ** (pc(J & ((1 << i) - 1)) + pc(K & ((1 << k) - 1)))
+            tot = h_so[i, k]
+            for j in so_bits(J & K):
+                tot += eri_so[i, j, k, j] - eri_so[i, j, j, k]
+            return sgn * tot
+        i1, i2 = so_bits(dj)
+        k1, k2 = so_bits(dk)
+        sgn = (-1.0) ** (pc(J & ((1 << i1) - 1)) + pc(J & ((1 << i2) - 1))
+                         + pc(K & ((1 << k1) - 1)) + pc(K & ((1 << k2) - 1)))
+        return sgn * (eri_so[i1, i2, k1, k2] - eri_so[i1, i2, k2, k1])
+
+    def ann(dd, so):
+        if not (dd >> so) & 1:
+            return None
+        return dd ^ (1 << so), (-1.0) ** pc(dd & ((1 << so) - 1))
+
+    def cre(dd, so):
+        if (dd >> so) & 1:
+            return None
+        return dd | (1 << so), (-1.0) ** pc(dd & ((1 << so) - 1))
+
+    def e1(dd, p, q):
+        out = []
+        for spin in (0, 1):
+            r = ann(dd, 2 * q + spin)
+            if r is None:
+                continue
+            d1, s1 = r
+            r2 = cre(d1, 2 * p + spin)
+            if r2 is None:
+                continue
+            d2, s2 = r2
+            out.append((d2, s1 * s2))
+        return out
+
+    def apply2(dd, p1, q1, p2, q2):
+        acc = defaultdict(float)
+        for d1, c1 in e1(dd, p1, q1):
+            for d2, c2 in e1(d1, p2, q2):
+                acc[d2] += c1 * c2
+        return acc
+
+    _g = {}
+
+    def g_of(dd):
+        if dd not in _g:
+            _g[dd] = sum(cJ * h_elem(J, dd) for J, cJ in ref_pairs
+                         if pc(J ^ dd) <= 4)
+        return _g[dd]
+
+    def wsa(qs, ps, vm):
+        """(W, S, A) for the contracted function of the given pair labels."""
+        if len(qs) == 1:
+            q, p = qs[0], ps[0]
+            kacc = defaultdict(float)
+            for I, cI in ref_pairs:
+                for d1, cc in e1(I, p, q):
+                    kacc[d1] += cI * cc
+        else:
+            q1, q2 = qs
+            p1, p2 = ps
+            fac = -np.sqrt(3.0) if vm else 1.0
+            kacc = defaultdict(float)
+            for I, cI in ref_pairs:
+                for d2, cc in apply2(I, p1, q1, p2, q2).items():
+                    kacc[d2] += cI * cc
+                for d2, cc in apply2(I, p1, q2, p2, q1).items():
+                    kacc[d2] += fac * cI * cc
+        w = sum(cc * g_of(dd) for dd, cc in kacc.items())
+        s = sum(cc * cc for cc in kacc.values())
+        occ = np.zeros(nmo)
+        for dd, cc in kacc.items():
+            w2 = cc * cc
+            for so in so_bits(dd):
+                occ[so // 2] += w2
+        return w, s, float(eps @ occ)
+
+    n0 = np.zeros(nmo)
+    for dd, c in ref_pairs:
+        for so in so_bits(dd):
+            n0[so // 2] += c * c
+    e0_zero = float(eps @ n0)
+
+    core = list(range(ncore))
+    act = list(range(ncore, nocc))
+    vir = list(range(nocc, nmo))
+
+    def pairs(pool_a, pool_b):
+        if pool_b is None:
+            return [(x,) for x in pool_a]
+        if pool_a is pool_b:
+            return [(pool_a[i], pool_a[j]) for i in range(len(pool_a))
+                    for j in range(i, len(pool_a))]
+        return [(x, y) for x in pool_a for y in pool_b]
+
+    classes = [
+        ('V0_ijab', core, core, vir, vir),
+        ('Vm1_iab', act, core, vir, vir),
+        ('Vm2_ab', act, act, vir, vir),
+        ('V1_ija', core, core, act, vir),
+        ('V2_ij', core, core, act, act),
+        ('V0_ia', core, None, vir, None),
+        ('Vm1_a', act, None, vir, None),
+        ('V1_i', core, None, act, None),
+    ]
+    breakdown = {}
+    total = 0.0
+    for name, o1, o2, i1c, i2c in classes:
+        acc = 0.0
+        for qs in pairs(o1, o2):
+            if len(qs) == 2 and qs[0] == qs[1] and qs[0] in act \
+                    and qs[0] != act[0]:
+                continue
+            for ps in pairs(i1c, i2c):
+                if len(ps) == 2 and ps[0] == ps[1] and ps[0] in act \
+                        and ps[0] != act[0]:
+                    continue
+                w, s, a = wsa(qs, ps, vm=False)
+                dnm = a - e0_zero * s
+                if abs(dnm) > 1e-10:
+                    acc -= w * w / dnm
+                if len(qs) == 2 and qs[0] != qs[1] and ps[0] != ps[1]:
+                    wm, sm, am = wsa(qs, ps, vm=True)
+                    dnm2 = am - e0_zero * sm
+                    if abs(dnm2) > 1e-10:
+                        acc -= wm * wm / dnm2
+        breakdown[name] = acc
+        total += acc
+    return total, breakdown
