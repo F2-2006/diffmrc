@@ -40,6 +40,8 @@ __all__ = [
     "eot_integrand",
     "eot_energy",
     "mcpdft_eot",
+    "pbe_exc",
+    "pbe_eval_xc",
 ]
 
 
@@ -111,7 +113,13 @@ def eot_integrand(rho_a, g_a, rho_b, g_b, Pi, eval_xc, otxc='tPBE'):
     gtot = (g_a + g_b).T                      # (3, ngr)
     safe = rho_avg >= 0.5e-15
     den = jnp.where(safe, rho_avg ** 2, 1.0)
-    R = jnp.where(safe, Pi / den, jnp.where(Pi == 0, 0.0, 1.0))
+    # The pair density is non-negative; a value below zero is float noise
+    # (measured -4e-19 on a real grid, t384d). Fed through the ratio it
+    # makes R < 0, hence zeta = sqrt(1 - R) > 1 and one translated density
+    # negative at the 1e-18 level -- which the kernel's fractional powers
+    # cannot take.
+    Pi_pos = jnp.maximum(Pi, 0.0)
+    R = jnp.where(safe, Pi_pos / den, jnp.where(Pi_pos == 0, 0.0, 1.0))
     zeta_raw = jnp.sqrt(jnp.where(R < 1.0, 1.0 - R, 1.0))
     zeta = jnp.where(R < 1.0, zeta_raw, 0.0)
     up = rho_avg * (1 + zeta)
@@ -141,3 +149,144 @@ def mcpdft_eot(c_ci, dets, ncas, ncore, rho_a, g_a, rho_b, g_b,
     W = w_sigma(c_ci, dets, ncas, ncore)
     Pi = pi_active(W, acas) + (rho_a * rho_b - rho_a_act * rho_b_act)
     return eot_energy(rho_a, g_a, rho_b, g_b, Pi, weights, eval_xc, otxc)
+
+
+# ---------------------------------------------------------------------------
+# The PBE energy density in jnp: the kernel the translated functional needs.
+#
+# Reusing pyscfad's libxc wrapper pins the whole chain to eager mode -- the
+# wrapper is jax.custom_jvp over the C library, and under jit its primal is
+# traced, which the C call cannot take (t384 measured it). The driver's
+# optimizer jits its gradient and the curvature check runs jax.hessian, so
+# the on-top kernel has to be traceable; PBE is closed-form algebra, so it
+# is written out here. Validated pointwise against pyscf's libxc
+# ``eval_xc('PBE', rho, spin=1, deriv=0)`` (t385).
+#
+# Conventions: ``rho_t`` is the (2, 4, ngrids) channel layout of the chain
+# -- ``rho_t[s, 0]`` the spin density, ``rho_t[s, 1:4]`` its gradient --
+# and the return value is the energy density per unit volume (the sum over
+# spins), which is what libxc returns under ``spin=1, deriv=0``.
+
+_PI = jnp.pi
+# PBE exchange: F(s) = 1 + kappa - kappa / (1 + mu s^2 / kappa).
+_PBE_KAPPA = 0.804
+_PBE_BETA = 0.06672455060314922
+_PBE_GAMMA = 0.031090690869654895          # (1 - ln 2) / pi^2
+_PBE_MU = _PBE_BETA * _PI ** 2 / 3.0
+_EX_PREF = -1.5 * (3.0 / (4.0 * _PI)) ** (1.0 / 3.0)
+_TWO_43 = 2.0 ** (4.0 / 3.0)
+_FZZ0 = 8.0 / (9.0 * (_TWO_43 - 2.0))      # f''(0) of the zeta interpolation
+
+# PW92 parameters: (A, alpha1, beta1..beta4) for eps_c(rs, 0), eps_c(rs, 1)
+# and the spin stiffness alpha_c(rs). The A values are the original PW92
+# ones, not the rounded values of the PBE paper appendix -- libxc's
+# GGA_C_PBE carries the original (its LDA part differs from LDA_C_PW,
+# which rounds A_0 to 0.031091, by ~5e-6 relative at small rs; measured
+# in t385c).
+_PW92_UNPOL = (0.0310907, 0.21370, 7.5957, 3.5876, 1.6382, 0.49294)
+_PW92_POL = (0.01554535, 0.20548, 14.1189, 6.1977, 3.3662, 0.62517)
+_PW92_ALPHA = (0.0168869, 0.11125, 10.357, 3.6231, 0.88026, 0.49671)
+
+# Spin-polarized PBE exchange: libxc evaluates the enhancement on the
+# doubled spin density (the unpolarized-form exchange scaled per spin),
+# i.e. s_libxc^2 = s^2 / 2^(2/3) with s^2 = |grad rho_s|^2/(4 kF^2 rho_s^2)
+# and kF = (3 pi^2 rho_s)^(1/3). Measured to ten digits against
+# eval_xc('GGA_X_PBE') at s = 0.5/1/2 (t385c).
+_EX_S2_FACTOR = 2.0 ** (-2.0 / 3.0)
+
+
+def _pw92(rs, params):
+    """One PW92 term: -2A(1 + a1 rs) ln(1 + 1/(2A Q(rs))), p = 1."""
+    A, a1, b1, b2, b3, b4 = params
+    q = b1 * jnp.sqrt(rs) + b2 * rs + b3 * rs ** 1.5 + b4 * rs ** 2
+    return -2.0 * A * (1.0 + a1 * rs) * jnp.log1p(1.0 / (2.0 * A * q))
+
+
+def _pbe_exchange_density(rho_a, ga, rho_b, gb):
+    """PBE exchange energy density (per volume); spin-scaled LDA times
+    the enhancement F(s) = 1 + kappa - kappa / (1 + mu s^2 / kappa)."""
+    def _channel(rho_s, g_s):
+        safe = jnp.where(rho_s > 1e-30, rho_s, 1.0)
+        kf = (3.0 * _PI ** 2 * safe) ** (1.0 / 3.0)
+        s2 = (g_s / (2.0 * kf * safe)) ** 2 * _EX_S2_FACTOR
+        s2 = jnp.where(rho_s > 1e-30, s2, 0.0)
+        fx = 1.0 + _PBE_KAPPA - _PBE_KAPPA / (1.0 + _PBE_MU * s2 / _PBE_KAPPA)
+        return _EX_PREF * safe ** (4.0 / 3.0) * fx * jnp.where(
+            rho_s > 1e-30, 1.0, 0.0)
+
+    return _channel(rho_a, ga) + _channel(rho_b, gb)
+
+
+def _pbe_correlation_density(rho_a, rho_b, gp):
+    """PBE correlation energy density (per volume): PW92 LDA plus the
+    gradient term H(rs, zeta, t). ``gp`` is the gradient vector of the
+    total density, shape (3, ngrids)."""
+    rho = rho_a + rho_b
+    rho_safe = jnp.where(rho > 1e-30, rho, 1.0)
+    rs = (3.0 / (4.0 * _PI * rho_safe)) ** (1.0 / 3.0)
+    zeta = jnp.where(rho > 1e-30, (rho_a - rho_b) / rho_safe, 0.0)
+    # |zeta| <= 1 physically; a translation noise of order 1e-18 in one
+    # spin density can push it past +-1, and (1 -+ zeta)**(4/3) of a
+    # negative number is NaN. Clamping at zero restores the exact
+    # boundary value (the powers vanish there).
+    one_p = jnp.maximum(1.0 + zeta, 0.0)
+    one_m = jnp.maximum(1.0 - zeta, 0.0)
+    phi = 0.5 * (one_p ** (2.0 / 3.0) + one_m ** (2.0 / 3.0))
+    fz = (one_p ** (4.0 / 3.0) + one_m ** (4.0 / 3.0) - 2.0) / (_TWO_43 - 2.0)
+    ec0 = _pw92(rs, _PW92_UNPOL)
+    ec1 = _pw92(rs, _PW92_POL)
+    # The spin stiffness uses the opposite sign convention: it is positive
+    # and raises the energy as zeta grows.
+    ac = -_pw92(rs, _PW92_ALPHA)
+    ec_lda = (ec0 + ac * fz / _FZZ0 * (1.0 - zeta ** 4)
+              + (ec1 - ec0) * fz * zeta ** 4)
+    phi_safe = jnp.where(phi > 1e-30, phi, 1.0)
+    kf_tot = (3.0 * _PI ** 2 * rho_safe) ** (1.0 / 3.0)
+    ks = jnp.sqrt(4.0 * kf_tot / _PI)
+    gt = jnp.sqrt((gp ** 2).sum(axis=0))
+    t2 = (gt / (2.0 * phi_safe * ks * rho_safe)) ** 2
+    t2 = jnp.where(rho > 1e-30, t2, 0.0)
+    a_g = (_PBE_BETA / _PBE_GAMMA) / (
+        jnp.exp(-ec_lda / (_PBE_GAMMA * phi_safe ** 3)) - 1.0)
+    h = _PBE_GAMMA * phi_safe ** 3 * jnp.log1p(
+        (_PBE_BETA / _PBE_GAMMA) * t2 * (1.0 + a_g * t2)
+        / (1.0 + a_g * t2 + a_g ** 2 * t2 ** 2))
+    return rho_safe * (ec_lda + h) * jnp.where(rho > 1e-30, 1.0, 0.0)
+
+
+def pbe_exc(rho_t):
+    """The PBE exchange-correlation energy per particle, in jnp.
+
+    ``rho_t`` has the (2, 4, ngrids) channel layout of the translated
+    densities; the return matches pyscf libxc
+    ``eval_xc('PBE', rho_t, spin=1, deriv=0)[0]`` -- the per-particle
+    energy, which the chain multiplies by the total density. Validated
+    pointwise against libxc (t385). Differentiable and jit-safe at every
+    order: no C call, no custom derivative.
+    """
+    rho_a, rho_b = rho_t[0, 0], rho_t[1, 0]
+    ga = jnp.sqrt((rho_t[0, 1:4] ** 2).sum(axis=0))
+    gb = jnp.sqrt((rho_t[1, 1:4] ** 2).sum(axis=0))
+    rho = rho_a + rho_b
+    rho_safe = jnp.where(rho > 1e-30, rho, 1.0)
+    eps = (_pbe_exchange_density(rho_a, ga, rho_b, gb)
+           + _pbe_correlation_density(rho_a, rho_b,
+                                      rho_t[0, 1:4] + rho_t[1, 1:4]))
+    exc = eps / rho_safe
+    return jnp.where(rho > 1e-30, exc, 0.0)
+
+
+def pbe_eval_xc(xc_code, rho, spin=0, relativity=0, deriv=0, omega=None,
+                verbose=None):
+    """``eval_xc``-compatible adapter around :func:`pbe_exc`.
+
+    Same call signature and return convention as the pyscf/pyscfad kernels
+    the chain accepts (``exc`` first), but restricted to the channel the
+    translated functional actually asks for: ``'PBE'``, ``spin=1``,
+    ``deriv=0``. Unlike the pyscfad wrapper this is jit- and hessian-safe.
+    """
+    if xc_code != 'PBE' or spin != 1 or deriv != 0:
+        raise ValueError(
+            f"the jnp PBE kernel implements eval_xc('PBE', spin=1, deriv=0) "
+            f"only, got ({xc_code!r}, spin={spin}, deriv={deriv})")
+    return (pbe_exc(rho), None, None, None)

@@ -126,3 +126,52 @@ def test_eot_differentiable_in_ci():
         cm[i] -= eps
         fd = (float(f(jnp.asarray(cp))) - float(f(jnp.asarray(cm)))) / (2 * eps)
         assert abs(fd - g[i]) < 1e-5
+
+
+def _random_points(seed, n, rho_lo, rho_hi, smax):
+    """Translated-layout points: log-uniform spin densities, reduced
+    gradients up to smax (|grad rho_s| = s * 2 kF rho_s)."""
+    rng = np.random.default_rng(seed)
+    rho_t = np.zeros((2, 4, n))
+    for s in (0, 1):
+        rho_s = 10.0 ** rng.uniform(np.log10(rho_lo), np.log10(rho_hi), n)
+        kf = (3 * np.pi ** 2 * rho_s) ** (1.0 / 3.0)
+        gmag = rng.uniform(0.0, smax, n) * 2 * kf * rho_s
+        direc = rng.normal(size=(3, n))
+        direc /= np.sqrt((direc ** 2).sum(0))
+        rho_t[s, 0] = rho_s
+        rho_t[s, 1:4] = direc * gmag
+    return rho_t
+
+
+def test_pbe_kernel_matches_libxc_pointwise():
+    """t385: the jnp PBE kernel against libxc over the physical domain.
+
+    Machine precision for densities from 1e-8 up, at reduced gradients up
+    to 3. Below about 1e-13 libxc's internal low-density guards differ
+    from the closed-form evaluation (up to ~1e-4 absolute there, where
+    grid weights put the on-top integral contribution below 1e-25; the
+    deviation and its domain are recorded by the runner t385/f).
+    """
+    from pyscf.dft import libxc as pyscf_libxc
+
+    rho_t = _random_points(seed=7, n=4000, rho_lo=1e-8, rho_hi=1e1, smax=3.0)
+    ref = np.asarray(pyscf_libxc.eval_xc('PBE', rho_t, spin=1, deriv=0)[0])
+    ours = np.asarray(mcpmod.pbe_exc(jnp.asarray(rho_t)))
+    assert np.abs(ours - ref).max() < 1e-12
+
+
+def test_pbe_kernel_is_jit_and_grad_safe():
+    """The property the driver's optimizer and hessian need -- and the
+    reason the kernel exists: pyscfad's libxc wrapper traces into a C
+    call and cannot be jitted (t384)."""
+    rho_t = jnp.asarray([[0.3, 0.01, 0.0, 0.0],
+                         [0.2, -0.02, 0.01, 0.0]])[:, :, None]
+    v_eager = mcpmod.pbe_exc(rho_t)
+    v_jit = jax.jit(mcpmod.pbe_exc)(rho_t)
+    assert abs(float(v_eager[0]) - float(v_jit[0])) < 1e-14
+    g = jax.grad(lambda r: jnp.sum(mcpmod.pbe_exc(r)))(rho_t)
+    assert np.isfinite(np.asarray(g)).all()
+    with pytest.raises(ValueError):
+        mcpmod.pbe_eval_xc('PBE', rho_t, spin=0)
+

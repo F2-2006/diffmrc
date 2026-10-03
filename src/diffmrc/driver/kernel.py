@@ -18,7 +18,8 @@ import numpy as np
 from .orbitals import converge_orbital_point
 
 __all__ = ['ActiveSpace', 'partition_from_occupations', 'energy_function',
-           'search_point']
+           'search_point', 'FrozenGrid', 'frozen_grid',
+           'mcpdft_energy_function', 'mcpdft_terms_function']
 
 
 @dataclass
@@ -153,6 +154,231 @@ def energy_function(mol, C0, space, enuc=None):
                                 nele_act=n_elec)[0] + enuc
 
     return E_theta, len(pairs)
+
+
+@dataclass
+class FrozenGrid:
+    """The quadrature the on-top energy is evaluated on, frozen.
+
+    ``ao`` is ``(ngrids, nao)`` AO values, ``ao_grad`` is
+    ``(ngrids, 3, nao)`` gradient rows, ``weights`` is ``(ngrids,)``.
+    """
+
+    ao: object
+    ao_grad: object
+    weights: object
+
+
+def frozen_grid(mol, level=3):
+    """Build the frozen quadrature from a pyscf-like molecule.
+
+    One-time and outside every differentiated path by construction: a
+    later geometry still evaluates the on-top energy on this grid, so
+    the grid-velocity term is left out of the derivative. The
+    calibration (t382/t383) bounds that term at 7.3e-5 Eh/bohr on
+    CO/6-31G at level 3, falling to 2.5e-5 at level 4 -- about three
+    orders of magnitude below the wavefunction response the derivative
+    is made of, and convergent with the level.
+
+    ``eval_ao(deriv=1)`` returns the deterministic ``(4, ngrids, nao)``
+    layout; it is asserted, not inferred -- a dimension-matching
+    heuristic transposed it silently for nao = 4 (t348--t355).
+    """
+    import numpy as np
+    from pyscf.dft import numint
+    from pyscf.dft.gen_grid import Grids
+
+    grid = Grids(mol)
+    grid.level = int(level)
+    grid.build()
+    coords = np.asarray(grid.coords)
+    ngr = int(coords.shape[0])
+    nao = int(mol.nao_nr())
+    raw = np.asarray(numint.eval_ao(mol, coords, deriv=1))
+    if raw.shape != (4, ngr, nao):
+        raise ValueError(
+            f'eval_ao(deriv=1) returned {raw.shape}, expected '
+            f'(4, {ngr}, {nao})')
+    return FrozenGrid(ao=raw[0].copy(),
+                      ao_grad=raw[1:4].transpose(1, 0, 2).copy(),
+                      weights=np.asarray(grid.weights).copy())
+
+
+def _mcpdft_chain(mol, C0, space, grid, grid_level, eval_xc, enuc):
+    """Assemble the on-top theta chain; shared by the two factories.
+
+    Everything independent of the rotation parameters is computed here,
+    once -- the integrals, the frozen grid, the determinant list. The
+    returned closure evaluates ``(E_total, E_ot, E_mcwfn, E_cas)`` at
+    one parameter vector.
+    """
+    import jax
+    jax.config.update('jax_enable_x64', True)
+    from jax import numpy as jnp
+
+    from ..core.casci import cs_casci_blocked
+    from ..core.mcpdft import eot_energy, pi_active, w_sigma
+    from ..core.nevpt2.impl import cas_dets_for2
+    from ..core.orblib import orbital_pairs
+    from ..core.rotation import block_rotation
+
+    C0 = jnp.asarray(np.asarray(C0, dtype=float))
+    nmo = C0.shape[1]
+    C0o = C0[:, space.mo_order]
+    ncore, ncas = int(space.ncore), int(space.ncas)
+    n_elec = int(space.n_elec)
+    h1e = mol.intor('int1e_kin') + mol.intor('int1e_nuc')
+    eri = mol.intor('int2e', aosym='s1')
+    if enuc is None:
+        enuc = mol.energy_nuc()
+    if grid is None:
+        grid = frozen_grid(mol, level=grid_level)
+    if eval_xc is None:
+        # The package's own jnp PBE kernel: closed-form, jit- and
+        # hessian-safe. The pyscfad/libxc wrapper is custom_jvp over the
+        # C library and cannot be traced under jit (t384), which the
+        # driver's optimizer and curvature check both need.
+        from ..core.mcpdft import pbe_eval_xc
+        eval_xc = pbe_eval_xc
+    pairs = orbital_pairs(ncore, ncas, nmo, include_cv=True)
+    # The determinant list must be the one cs_casci_blocked builds
+    # internally (combinations over the active spin orbitals, in
+    # itertools order) or every RDM below would be indexed against a
+    # different basis. Both come from the same generator.
+    dets = cas_dets_for2(ncore, ncas, n_elec)
+
+    h1j, erij = jnp.asarray(h1e), jnp.asarray(eri)
+    enuc_j = jnp.asarray(enuc)
+    ao, ao_grad = jnp.asarray(grid.ao), jnp.asarray(grid.ao_grad)
+    weights = jnp.asarray(grid.weights)
+
+    def gd(D):
+        return (jnp.einsum('gr,rs,gs->g', ao, D, ao),
+                2.0 * jnp.einsum('gxr,rs,gs->gx', ao_grad, D, ao))
+
+    def terms(t):
+        C = C0o @ block_rotation(t, nmo, pairs)
+        nm = ncore + ncas
+        Cs = C[:, :nm]
+        h1m = Cs.T @ h1j @ Cs
+        e1m = jnp.einsum('pi,qj,rk,sl,pqrs->ijkl', Cs, Cs, Cs, Cs, erij)
+        E_cas, ci = cs_casci_blocked(h1m, e1m, ncore=ncore, nact=ncas,
+                                     nele_act=n_elec)
+        # Spin-resolved active 1-RDM: W[s, p, q, :] = M[(2p+s, 2q+s)]^T ci,
+        # so W . ci is the spin density matrix <a^dag_p,s a_q,s> directly.
+        W = w_sigma(ci, dets, ncas, ncore)
+        dm1s = jnp.einsum('spqI,I->spq', W, ci)
+        Cact = C[:, ncore:nm]
+        Ccore = C[:, :ncore]
+        Dact = jnp.einsum('rp,spq,tq->srt', Cact, dm1s, Cact)
+        # Per spin: the core contributes one electron per spin per core
+        # orbital, the active block its own spin density.
+        Dfull = Ccore @ Ccore.T + Dact
+        rho_a, g_a = gd(Dfull[0])
+        rho_b, g_b = gd(Dfull[1])
+        rho_aa, _ = gd(Dact[0])
+        rho_bb, _ = gd(Dact[1])
+        acas = jnp.einsum('gr,rp->gp', ao, Cact)
+        Pi = pi_active(W, acas) + (rho_a * rho_b - rho_aa * rho_bb)
+        E_ot = eot_energy(rho_a, g_a, rho_b, g_b, Pi, weights, eval_xc)
+        D = Dfull[0] + Dfull[1]
+        E_mcwfn = (enuc_j + jnp.einsum('ab,ab->', h1j, D)
+                   + 0.5 * jnp.einsum('abcd,ab,cd->', erij, D, D))
+        return E_mcwfn + E_ot, E_ot, E_mcwfn, E_cas
+
+    return terms, len(pairs)
+
+
+def mcpdft_energy_function(mol, C0, space, grid=None, grid_level=3,
+                           eval_xc=None, enuc=None):
+    """The differentiable MC-PDFT (tPBE) energy under orbital rotations.
+
+    The on-top companion of ``energy_function``: the same rotation
+    chart and the same blockwise CI, with the CASCI energy replaced by
+    the split the engine uses,
+
+        E = E_mcwfn + E_ot,
+        E_mcwfn = Vnn + <h | D> + 1/2 <J | D>     (full density D),
+        E_ot    = the on-top functional of the translated spin densities
+                  on the frozen grid.
+
+    The conventions that took the M1/M2 measurements to pin down live in
+    ``core.mcpdft``: the translation uses gradient rows
+    ``(grad rho / 2)(1 +- zeta)`` with no ``grad zeta`` term (Li Manni
+    et al. 2014; pyscf ``get_rho_translated``), and the on-top pair
+    density is the factorized active-space form plus
+    ``rho_a rho_b - rho_aa rho_bb``.
+
+    Verified against pyscf.mcpdft (t384): H2/STO-3G CAS(2,2) reproduces
+    the engine's ``e_tot``/``e_ot``/``e_mcwfn`` to 1e-16 (golden
+    -1.156628479816); H2O/STO-3G with a four-orbital core to 1.6e-9;
+    H2/6-31G to 1.3e-8, which is the engine's own FCI convergence floor
+    -- its davidson vector converges to ~1e-7 and the on-top energy is
+    first order in that density error, while our ci comes from a full
+    block decomposition. The engine's ``mcpdft.CASSCF`` is the one-step
+    protocol (CASSCF-driven orbitals, a single on-top evaluation; the
+    DVS paper's protocol); the theta chain here minimizes the on-top
+    energy itself, so its converged point is stationary for the MC-PDFT
+    surface and lies below the one-step value. AD vs FD on the rotation
+    gradient measures 1e-10, and the optimized point reaches
+    |grad| = 1e-14 on the production pyscfad path.
+
+    tPBE only; the tPBE0 hybrid and excited-state tables are separate
+    registered work. The size of the active space is the size
+    ``cs_casci_blocked`` can diagonalize -- the same limit as
+    ``energy_function``.
+
+    Parameters
+    ----------
+    mol : object
+        Anything with ``nao_nr()``, ``intor(name)`` and ``energy_nuc()``
+        that pyscf's grid machinery accepts -- a pyscfad Mole in
+        production.
+    C0 : array_like
+        Reference orbital coefficients, shape ``(nao, nmo)``.
+    space : ActiveSpace
+        The partition to use.
+    grid : FrozenGrid, optional
+        A frozen quadrature; built from `mol` at `grid_level` when
+        omitted.
+    grid_level : int
+        Grid density for the automatic build (pyscf's scale; 3 is the
+        pyscf mcpdft default).
+    eval_xc : callable, optional
+        The xc kernel, called as ``eval_xc('PBE', rho_t, spin=1,
+        deriv=0)[0]``; defaults to the package's jnp PBE kernel
+        (``core.mcpdft.pbe_eval_xc``, validated against libxc in t385).
+        ``pyscfad.dft.libxc.eval_xc`` can be injected for cross-checks,
+        but it is not jit-safe (its custom_jvp traces into the C
+        library), so the driver's optimizer cannot use it.
+    enuc : float, optional
+        Nuclear repulsion; taken from `mol` when omitted.
+
+    Returns
+    -------
+    (E_theta, npar) : (callable, int)
+        The energy as a function of the rotation parameters, and how
+        many parameters there are.
+    """
+    terms, npar = _mcpdft_chain(mol, C0, space, grid, grid_level,
+                                eval_xc, enuc)
+
+    def E_theta(t):
+        return terms(t)[0]
+
+    return E_theta, npar
+
+
+def mcpdft_terms_function(mol, C0, space, grid=None, grid_level=3,
+                          eval_xc=None, enuc=None):
+    """The MC-PDFT theta chain with its components exposed.
+
+    Same chain as ``mcpdft_energy_function``; the closure returns
+    ``(E_total, E_ot, E_mcwfn, E_cas)`` from one forward pass, so an
+    anchor script or a report can show each component against the
+    engine's ``e_tot``, ``e_ot`` and ``e_mcwfn``.
+    """
+    return _mcpdft_chain(mol, C0, space, grid, grid_level, eval_xc, enuc)
 
 
 def search_point(E_theta, npar, tries=1, seed=0, **kwargs):
