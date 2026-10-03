@@ -346,3 +346,40 @@ def test_sa_pipeline_smoke_on_an_actinide_ecp_system():
     assert np.isfinite(E_sa) and np.isfinite(Ek).all() and np.isfinite(e2).all()
     assert (e2 <= 1e-9).all()
     assert -600.0 < E_sa < -400.0      # ThO/ECP energy scale
+
+
+def test_sa_mcpdft_table_matches_the_engine_per_state():
+    """H2CO/STO-3G, npi window, two roots (the second is the triplet
+    npi*, S^2 = 2): the table's per-state one-step tPBE column against
+    pyscf mcpdft.CASCI evaluated at the table's own canonical orbitals.
+    The engine sits at exactly our point, so the comparison isolates the
+    table's densities and on-top evaluation -- measured 3e-14 (t387).
+    """
+    from pyscf import gto, mcpdft
+
+    from diffmrc.driver.nevpt2 import sa_mcpdft_table_from_mol
+
+    mol = gto.M(atom='C 0 0 0; O 0 0 1.205; H 0.9425 0 -0.5875; '
+                     'H -0.9425 0 -0.5875',
+                basis='sto-3g')
+    table = sa_mcpdft_table_from_mol(mol, 'npi', lambda m: scf.RHF(m),
+                                     nroots=2)
+    e_tpbe = np.asarray(table['e_tpbe'])
+    assert e_tpbe.shape == (2,)
+    assert np.all(np.isfinite(e_tpbe))
+    assert e_tpbe[0] < e_tpbe[1]
+    assert 'dE_mcpdft' in table['groups'][0]
+
+    mf = scf.RHF(mol).run(verbose=0)
+    mcp_casci = getattr(mcpdft, 'CASCI', None)
+    if mcp_casci is None:
+        from pyscf.mcpdft.casci import CASCI as mcp_casci
+    nele = int(table['window']['nele'])
+    eng = mcp_casci(mf, 'tPBE', int(table['window']['nact']),
+                    (nele // 2, nele // 2))
+    eng.mo_coeff = np.asarray(table['out']['C'], dtype=float)
+    eng.fcisolver.nroots = 2
+    eng.kernel()
+    e_eng = np.atleast_1d(np.asarray(
+        eng.e_states if hasattr(eng, 'e_states') else eng.e_tot, dtype=float))
+    assert np.abs(e_tpbe[:2] - e_eng[:2]).max() < 1e-7

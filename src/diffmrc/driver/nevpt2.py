@@ -468,7 +468,10 @@ def _sa_components_from(C0_, h_, e_, enuc, th_, *, ncore, nact, nele, nmo,
                                  nocc=ncore + nact, links_a=links_a,
                                  links_b=links_b)
         states.append((Ek_list[k] + enuc, e2_scale * e2k))
-    return {'E_sa': E_sa + enuc, 'states': states, 'cis': CIs}
+    # ``C`` is the canonical-basis orbital set the ``cis`` are expressed
+    # in; the on-top columns (sa_mcpdft_table_from_mol) evaluate their
+    # densities on exactly these orbitals.
+    return {'E_sa': E_sa + enuc, 'states': states, 'cis': CIs, 'C': C_can}
 
 
 def make_nevpt2_sa_theta_fn(mol, ncore, nact, nele, nmo, pairs, scf_builder,
@@ -777,3 +780,103 @@ def sa_nevpt2_table_from_mol(mol, family, scf_builder, *, nroots,
             'frontier_report': report, 'nmo': nmo, 'npar': len(pairs),
             'ndet': len(dets), 'grad_norm': float(point.grad_norm),
             'rows': rows, 'groups': groups, 'out': out}
+
+
+def sa_mcpdft_table_from_mol(mol, family, scf_builder, *, nroots,
+                             max_steps=400, refine_max_iter=40,
+                             e2_scale=1.0, grid=None, grid_level=3,
+                             eval_xc=None):
+    """State-averaged CASSCF + per-state one-step MC-PDFT table.
+
+    The orbital point is the equal-weight SA-CASSCF solution of
+    ``sa_nevpt2_table_from_mol`` -- same window rules, same convergence
+    -- and on it every root gets one tPBE evaluation from its own
+    density: the one-step MC-PDFT protocol of the DVS paper, whose
+    tables carry exactly these mcscf/nevpt2/tpbe columns.  The per-state
+    NEVPT2 corrections ride along (the SA machinery computes them for
+    the orbital point anyway), so the result is the complete
+    three-column table.
+
+    The densities are evaluated on the canonical-basis orbitals the
+    components return (``out['C']``), through the same primitives the
+    ground-state chain uses (``core.mcpdft``; the jnp PBE kernel by
+    default); the frozen grid comes from ``kernel.frozen_grid``.
+
+    Returns the dict of ``sa_nevpt2_table_from_mol`` plus ``e_tpbe``
+    (per-root one-step energies); the groups gain ``dE_mcpdft`` (the
+    representative's vertical excitation, relative to root 0 like the
+    other two columns).
+    """
+    import numpy as np
+    from jax import numpy as jnp
+
+    from ..core.mcpdft import eot_energy, pbe_eval_xc, pi_active, w_sigma
+    from ..core.nevpt2.impl import cas_dets_for2
+    from ..core.orblib import orbital_pairs
+    from .kernel import frozen_grid
+    from .orbitals import auto_window, converge_orbital_point
+
+    nmo = mol.nao_nr()
+    mf = scf_builder(mol).run(verbose=0)
+    report = auto_window(mol, mf, family)
+    ncore = int(report['suggested_window']['ncore'])
+    nact = int(report['suggested_window']['nact'])
+    nele = int(mol.nelectron - 2 * ncore)
+
+    pairs = orbital_pairs(ncore, nact, nmo, include_cv=True)
+    dets = cas_dets_for2(ncore, nact, nele)
+    comp = make_nevpt2_sa_theta_fn(mol, ncore, nact, nele, nmo, pairs,
+                                   scf_builder, nroots=nroots,
+                                   e2_scale=e2_scale)
+    point = converge_orbital_point(lambda th: comp(th)['E_sa'],
+                                   len(pairs), max_steps=max_steps,
+                                   refine_max_iter=refine_max_iter)
+    out = comp(point.theta)
+    rows, groups = sa_nevpt2_state_table(out, dets)
+
+    if grid is None:
+        grid = frozen_grid(mol, level=grid_level)
+    if eval_xc is None:
+        eval_xc = pbe_eval_xc
+
+    C_can = np.asarray(out['C'], dtype=float)
+    cis = np.asarray(out['cis'])
+    Cact = jnp.asarray(C_can[:, ncore:ncore + nact])
+    Ccore = jnp.asarray(C_can[:, :ncore])
+    h1e = jnp.asarray(mol.intor('int1e_kin') + mol.intor('int1e_nuc'))
+    eri = jnp.asarray(mol.intor('int2e', aosym='s1'))
+    enuc = float(mol.energy_nuc())
+    ao = jnp.asarray(grid.ao)
+    ao_grad = jnp.asarray(grid.ao_grad)
+    wts = jnp.asarray(grid.weights)
+    acas = ao @ Cact
+
+    def gd(D):
+        return (jnp.einsum('gr,rs,gs->g', ao, D, ao),
+                2.0 * jnp.einsum('gxr,rs,gs->gx', ao_grad, D, ao))
+
+    e_tpbe = []
+    for k in range(cis.shape[1]):
+        ci_k = jnp.asarray(cis[:, k])
+        W = w_sigma(ci_k, dets, nact, ncore)
+        dm1s = jnp.einsum('spqI,I->spq', W, ci_k)
+        Dact = jnp.einsum('rp,spq,tq->srt', Cact, dm1s, Cact)
+        Dfull = Ccore @ Ccore.T + Dact
+        rho_a, g_a = gd(Dfull[0])
+        rho_b, g_b = gd(Dfull[1])
+        rho_aa, _ = gd(Dact[0])
+        rho_bb, _ = gd(Dact[1])
+        Pi = pi_active(W, acas) + (rho_a * rho_b - rho_aa * rho_bb)
+        E_ot = eot_energy(rho_a, g_a, rho_b, g_b, Pi, wts, eval_xc)
+        D = Dfull[0] + Dfull[1]
+        E_mcwfn = (enuc + jnp.einsum('ab,ab->', h1e, D)
+                   + 0.5 * jnp.einsum('abcd,ab,cd->', eri, D, D))
+        e_tpbe.append(float(E_mcwfn + E_ot))
+    e_tpbe = np.asarray(e_tpbe)
+    for g in groups:
+        g['dE_mcpdft'] = float(e_tpbe[g['representative']] - e_tpbe[0])
+    return {'window': {'ncore': ncore, 'nact': nact, 'nele': nele},
+            'frontier_report': report, 'nmo': nmo, 'npar': len(pairs),
+            'ndet': len(dets), 'grad_norm': float(point.grad_norm),
+            'rows': rows, 'groups': groups, 'out': out,
+            'e_tpbe': e_tpbe}
