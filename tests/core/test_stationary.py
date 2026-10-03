@@ -250,6 +250,17 @@ def test_curvature_report_counts_near_zero_eigenvalues():
     assert r.n_near_zero == 1
 
 
+def test_curvature_report_of_an_empty_hessian_is_a_minimum():
+    """No rotation directions at all: H2/STO-3G CAS(2,2) fills the whole
+    basis, so the orbital Hessian is 0x0. Vacuously a minimum; the
+    summary has to stay finite (t386 found the crash)."""
+    r = curvature_report(np.zeros((0, 0)))
+    assert r.n_negative == 0
+    assert r.is_minimum
+    assert r.smallest == 0.0
+    assert r.largest == 0.0
+
+
 def test_curvature_report_condition_number():
     r = curvature_report(np.diag([1e-4, 1.0]))
     assert r.condition_number == pytest.approx(1e4)

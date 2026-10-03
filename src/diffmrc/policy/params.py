@@ -88,7 +88,13 @@ _PARAM_LIST = [
           'basis set for the end-to-end path; the released list is what '
           'this package was validated on, and extending it is a one-line '
           'change once the new basis has a reference number',
-          'driver', choices=('6-31g', 'cc-pvdz', 'ano')),
+          'driver', choices=('sto-3g', '6-31g', 'cc-pvdz', 'ano')),
+    Param('method', 'casci',
+          'reported energy: the CASCI/CASSCF value, or the on-top tPBE '
+          'evaluation at the CASSCF-converged orbitals -- the one-step '
+          'MC-PDFT protocol of the DVS paper (A. Wardzala, B. King, '
+          'L. Gagliardi, JPCA 2025, doi 10.1021/acs.jpca.4c08597)',
+          'driver', choices=('casci', 'mcpdft')),
     Param('multistart_tries', 4,
           'starting points tried at the robust level; the variationally '
           'lowest point is kept. A single start from the reference '

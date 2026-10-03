@@ -129,3 +129,54 @@ def test_production_path_jit_hessian_and_relaxation():
                          refine_target=1e-11)
     assert float(point.grad_norm) < 1e-8
     assert point.energy < E0 - 1e-6
+
+
+def _params(**over):
+    from diffmrc.policy.params import effective
+    return effective(over)
+
+
+def test_ground_state_reports_the_one_step_mcpdft_energy():
+    """Integration: method='mcpdft' through compute_ground_state.
+
+    H2/STO-3G has no virtual inside the CAS(2,2) window, so the orbital
+    point is the reference itself and the one-step value must be the
+    stored golden, with the CASSCF value and the on-top component next
+    to it in the result.
+    """
+    from diffmrc.driver.kernel import compute_ground_state
+
+    out = compute_ground_state('H 0 0 0; H 0 0 0.74', 0, 0, '0,1',
+                               _params(method='mcpdft', basis='sto-3g'),
+                               level='fast')
+    assert abs(out['energy'] - H2_STO3G_E_TOT) < 1e-9
+    assert abs(out['e_casscf'] - (-1.137283834489)) < 1e-9
+    assert abs(out['algorithm_data']['e_ot'] - (-0.733794563942)) < 1e-9
+    assert out['algorithm_data']['method'] == 'mcpdft'
+    assert 'one-step' in out['algorithm_data']['protocol']
+
+
+def test_ground_state_one_step_sits_above_the_relaxed_point():
+    """The reported number is the one-step protocol's (on-top energy at
+    the CASSCF orbitals; engine value -1.166431248858, t384), not the
+    theta-relaxed minimum three tenths of a millihartree below it."""
+    from diffmrc.driver.kernel import compute_ground_state
+
+    out = compute_ground_state('H 0 0 0; H 0 0 0.74', 0, 0, '0,1',
+                               _params(method='mcpdft'), level='fast')
+    assert out['e_casscf'] > out['energy']          # tPBE below CASSCF
+    assert abs(out['energy'] - (-1.166431248858)) < 1e-6
+    assert out['energy'] > -1.1666
+
+
+def test_run_from_geometry_mcpdft_decides_on_the_wavefunction(tmp_path):
+    from diffmrc.driver import run as run_mod
+
+    geom = tmp_path / 'h2.xyz'
+    geom.write_text('2\nh2\nH 0 0 0\nH 0 0 0.74\n', encoding='utf-8')
+    result = run_mod.run_from_geometry(
+        str(geom), level='fast', active_space='0,1',
+        params=_params(method='mcpdft', basis='sto-3g'))
+    assert result.trustworthy
+    assert abs(result.energy - H2_STO3G_E_TOT) < 1e-9
+    assert 'variational' in [c.name for c in result.decision.checks]

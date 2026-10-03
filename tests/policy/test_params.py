@@ -158,6 +158,10 @@ def test_the_basis_and_multistart_parameters_exist():
     assert PARAMS['basis'].default == '6-31g'
     assert 'ano' in PARAMS['basis'].choices
     assert PARAMS['multistart_tries'].default == 4
+    # The on-top method is a choice too: the one-step MC-PDFT protocol
+    # differs from the CASSCF value by construction.
+    assert PARAMS['method'].default == 'casci'
+    assert 'mcpdft' in PARAMS['method'].choices
 
 
 def test_parse_active_space_accepts_ranges_and_lists():

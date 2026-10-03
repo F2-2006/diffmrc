@@ -169,6 +169,13 @@ def curvature_report(H, negative_tol=1e-8):
         raise ValueError(f'H must be square, got shape {H.shape}')
     H = 0.5 * (H + H.T)
     w = np.linalg.eigvalsh(H)
+    if w.size == 0:
+        # No rotation directions at all (e.g. an active space that
+        # already spans the whole basis, H2/STO-3G CAS(2,2)): there is
+        # no curvature that could be negative, and the condition number
+        # is undefined -- one keeps the report finite.
+        return CurvatureReport(n_negative=0, smallest=0.0, largest=0.0,
+                               condition_number=1.0, n_near_zero=0)
     smallest = float(w[0])
     largest = float(w[-1])
     scale = max(abs(largest), abs(smallest), 1e-30)

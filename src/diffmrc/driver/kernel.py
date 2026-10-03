@@ -504,6 +504,12 @@ def compute_ground_state(atoms, charge, spin, active_space, params,
     step that can refuse does, so a bad input costs a parse rather than
     a calculation.
 
+    The reported quantity follows the ``method`` parameter: the CASSCF
+    value (default), or the one-step MC-PDFT energy -- tPBE evaluated
+    once at the CASSCF-converged orbitals, the protocol of the DVS
+    paper. The self-checks certify the wavefunction either way, so
+    ``e_casscf`` is carried next to ``energy`` in the result.
+
     Raises
     ------
     ElectronicStructureFailure
@@ -569,8 +575,30 @@ def compute_ground_state(atoms, charge, spin, active_space, params,
 
     curvature = curvature_report(np.asarray(jax.hessian(E_theta)(point.theta)))
     n_doubly = sum(1 for i in space.active if occ[i] > 1.5)
+    energy = float(point.energy)
+    e_casscf = energy
+    method_data = {'method': 'casci'}
+    if str(_value('method', 'casci')) == 'mcpdft':
+        # One-step MC-PDFT (the DVS paper's protocol): the orbitals are
+        # the CASSCF-driven ones just converged, and the on-top energy
+        # is evaluated once at that point. The self-checks below still
+        # certify the wavefunction -- the on-top energy is not a
+        # variational expectation value, so `variational` runs on
+        # `e_casscf`, which is reported alongside.
+        terms, _ = mcpdft_terms_function(mol, C, space)
+        E_tot, E_ot, E_mcwfn, _ = (float(x) for x in terms(point.theta))
+        energy = E_tot
+        method_data = dict(
+            method='mcpdft',
+            protocol='one-step: CASSCF-driven orbitals, one on-top '
+                     'evaluation (tPBE)',
+            e_casscf=e_casscf,
+            e_ot=E_ot,
+            e_mcwfn=E_mcwfn,
+        )
     return dict(
-        energy=float(point.energy),
+        energy=energy,
+        e_casscf=e_casscf,
         grad_norm=float(point.grad_norm),
         n_negative=int(curvature.n_negative),
         e_reference=float(mf.e_tot),
@@ -593,5 +621,6 @@ def compute_ground_state(atoms, charge, spin, active_space, params,
             level=level,
             multistart_tries=int(tries),
             n_doubly_active=int(n_doubly),
+            **method_data,
         ),
     )

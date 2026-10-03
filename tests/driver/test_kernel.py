@@ -2,7 +2,12 @@
 import numpy as np
 import pytest
 
-from diffmrc.driver.kernel import ActiveSpace, partition_from_occupations
+# Importing driver.kernel pulls driver.orbitals and core.optimizer, which
+# import jax at module level; on a machine without jax the rest of the
+# suite still has to run.
+pytest.importorskip("jax")
+
+from diffmrc.driver.kernel import ActiveSpace, partition_from_occupations  # noqa: E402
 
 
 def test_partition_splits_around_the_active_set():

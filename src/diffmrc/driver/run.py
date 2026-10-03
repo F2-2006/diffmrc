@@ -282,7 +282,10 @@ def run_from_geometry(geometry_file, charge=0, spin=0, level='robust',
     checks = checks_from_result(
         grad_norm=computed['grad_norm'],
         n_negative=computed['n_negative'],
-        e_casscf=computed['energy'],
+        # The variational check certifies the wavefunction layer; for
+        # the one-step on-top method the reported energy is the on-top
+        # value, and the CASSCF value rides next to it.
+        e_casscf=computed.get('e_casscf', computed['energy']),
         e_reference=computed['e_reference'],
         n_elec_active=computed['n_elec_active'],
         n_elec_expected=computed['n_elec_expected'],
