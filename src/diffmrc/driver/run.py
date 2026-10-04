@@ -343,10 +343,11 @@ def vertical_excitations_from_geometry(geometry_file, family, *, nroots=6,
     that suggested the window is returned with the table so the
     suggestion can be checked.
 
-    ``method='mcpdft'`` switches the table factory to
-    ``sa_mcpdft_table_from_mol``: the same SA-CASSCF orbital point,
-    with the per-state one-step MC-PDFT column added (the groups gain
-    ``dE_mcpdft``); the default keeps the NEVPT2 table only.
+    ``method='mcpdft'`` (or ``'mcpdft0'`` for the 0.25 hybrid) switches
+    the table factory to ``sa_mcpdft_table_from_mol``: the same
+    SA-CASSCF orbital point, with the per-state one-step on-top column
+    added (the groups gain ``dE_mcpdft``); the default keeps the NEVPT2
+    table only.
 
     The reference is a closed-shell RHF; ``spin`` must be 0.  All
     excitation energies in the returned tables are in Hartree; the
@@ -368,11 +369,12 @@ def vertical_excitations_from_geometry(geometry_file, family, *, nroots=6,
     def builder(m):
         return pscf.RHF(m)
 
-    if method == 'mcpdft':
+    if method in ('mcpdft', 'mcpdft0'):
         from .nevpt2 import sa_mcpdft_table_from_mol
         return sa_mcpdft_table_from_mol(
             mol, family, builder, nroots=nroots, max_steps=max_steps,
-            refine_max_iter=refine_max_iter)
+            refine_max_iter=refine_max_iter,
+            hyb=(0.25 if method == 'mcpdft0' else 0.0))
     from .nevpt2 import sa_nevpt2_table_from_mol
     return sa_nevpt2_table_from_mol(
         mol, family, builder, nroots=nroots, max_steps=max_steps,

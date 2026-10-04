@@ -403,13 +403,17 @@ def _run_vee(args):
             'dE_casscf': _ev(g.get('dE_casscf')),
             'dE_nevpt2': _ev(g.get('dE_nevpt2')),
         }
-        if method == 'mcpdft':
+        if method in ('mcpdft', 'mcpdft0'):
             state['dE_mcpdft'] = _ev(g.get('dE_mcpdft'))
         states.append(state)
-    protocol = ('equal-weight SA-CASSCF, per-state NEVPT2'
-                if method != 'mcpdft' else
-                'equal-weight SA-CASSCF, per-state one-step MC-PDFT (tPBE) '
-                'and NEVPT2')
+    if method == 'mcpdft0':
+        protocol = ('equal-weight SA-CASSCF, per-state NEVPT2 with the '
+                    'one-step tPBE0 column (0.25-mixed)')
+    elif method == 'mcpdft':
+        protocol = ('equal-weight SA-CASSCF, per-state one-step MC-PDFT '
+                    '(tPBE) and NEVPT2')
+    else:
+        protocol = 'equal-weight SA-CASSCF, per-state NEVPT2'
 
     data = VeeReportData(
         geometry=args.geometry,
@@ -469,6 +473,11 @@ def _to_report(args, params, result):
             suggestions=list(decision.suggestions),
         )
 
+    on_top = {}
+    if algo.get('method') in ('mcpdft', 'mcpdft0'):
+        on_top = {k: algo.get(k) for k in
+                  ('method', 'protocol', 'hyb', 'e_casscf', 'e_ot',
+                   'e_mcwfn')}
     checks = []
     if decision is not None:
         checks = [dict(name=c.name, passed=bool(c.passed), detail=c.detail)
@@ -486,6 +495,7 @@ def _to_report(args, params, result):
                           n_electrons=space.get('n_elec_active'),
                           evidence=list(algo.get('evidence', []))),
         checks=checks, decision=decision_dict,
+        on_top=on_top,
         provenance=dict(params=dict(params.values),
                         sources=dict(params.sources),
                         versions=versions,

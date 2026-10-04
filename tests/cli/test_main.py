@@ -268,3 +268,36 @@ def test_the_vee_report_omits_the_on_top_column_by_default(tmp_path):
     assert 'dE_mcpdft' not in payload['states'][0]
     text = (tmp_path / 'diffmrc_vee.txt').read_text(encoding='utf-8')
     assert 'MC-PDFT' not in text
+
+
+def test_the_vee_path_carries_the_hybrid_protocol_with_mcpdft0(tmp_path):
+    import json
+
+    import diffmrc.cli.main as main_mod
+    from diffmrc.driver import run as run_mod
+
+    captured = {}
+
+    def _fake(**k):
+        captured.update(k)
+        return {
+            'window': {'ncore': 7, 'nact': 2, 'nele': 2},
+            'grad_norm': 1e-10,
+            'groups': [{'multiplicity': 1, 'szs': [0.0], 'dE_casscf': 0.0,
+                        'dE_nevpt2': 0.0, 'dE_mcpdft': 0.0}],
+            'frontier_report': {},
+        }
+
+    p = _write(tmp_path)
+    original = run_mod.vertical_excitations_from_geometry
+    run_mod.vertical_excitations_from_geometry = _fake
+    try:
+        rc = main_mod.main([str(p), '--vee', 'npi', '--method', 'mcpdft0',
+                            '--outdir', str(tmp_path)])
+    finally:
+        run_mod.vertical_excitations_from_geometry = original
+    assert rc == 0
+    assert captured.get('method') == 'mcpdft0'
+    payload = json.loads(
+        (tmp_path / 'diffmrc_vee.json').read_text(encoding='utf-8'))
+    assert 'tPBE0' in payload['provenance']['protocol']

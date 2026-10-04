@@ -128,3 +128,21 @@ def test_an_empty_check_list_is_stated_not_hidden():
     """No checks is not the same as all checks passing."""
     out = render_text(_data(checks=[]))
     assert 'no self-check' in out.lower() or 'none' in out.lower()
+
+
+def test_the_on_top_block_renders_only_when_present():
+    d = _data()
+    assert 'E_ot' not in render_text(d)
+
+    d.on_top = {'method': 'mcpdft0',
+                'protocol': 'one-step: CASSCF-driven orbitals, one on-top '
+                            'evaluation (tPBE), 0.25-mixed (tPBE0)',
+                'hyb': 0.25, 'e_casscf': -1.137283834489,
+                'e_ot': -0.733794563942, 'e_mcwfn': -0.422833915874}
+    text = render_text(d)
+    assert 'on-top decomposition' in text
+    assert '-0.7337945639' in text
+    assert 'hybrid lambda' in text
+    payload = json.loads(render_json(d))
+    assert payload['on_top']['method'] == 'mcpdft0'
+    assert payload['on_top']['hyb'] == 0.25

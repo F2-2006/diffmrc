@@ -33,6 +33,7 @@ class ReportData:
     checks: list = field(default_factory=list)
     decision: dict = field(default_factory=dict)
     provenance: dict = field(default_factory=dict)
+    on_top: dict = field(default_factory=dict)
 
     def is_refusal(self):
         return str(self.decision.get('level', '')).lower() == _REFUSED
@@ -144,6 +145,24 @@ def _render_provenance(data):
     return lines
 
 
+def _render_on_top(data):
+    if not data.on_top:
+        return []
+    o = data.on_top
+    lines = ['on-top decomposition:',
+             '  method            {}'.format(o.get('method')),
+             '  protocol          {}'.format(o.get('protocol')),
+             '  E_mcwfn / Eh      {}'.format(_fmt(o.get('e_mcwfn'),
+                                                 '+.10f')),
+             '  E_ot    / Eh      {}'.format(_fmt(o.get('e_ot'), '+.10f')),
+             '  E_CASSCF / Eh     {}'.format(_fmt(o.get('e_casscf'),
+                                                 '+.10f'))]
+    if o.get('hyb'):
+        lines.append('  hybrid lambda     {}'.format(o.get('hyb')))
+    lines.append('')
+    return lines
+
+
 def render_text(data):
     """Render a run as a human-readable report.
 
@@ -159,6 +178,7 @@ def render_text(data):
     lines.extend(_render_verdict(data))
     if not data.is_refusal():
         lines.extend(_render_result(data))
+    lines.extend(_render_on_top(data))
     lines.extend(_render_active_space(data))
     lines.extend(_render_checks(data))
     lines.extend(_render_params(data))
@@ -188,5 +208,6 @@ def render_json(data, indent=1):
         checks=[dict(c) for c in (data.checks or [])],
         decision=dict(data.decision or {}),
         provenance=dict(data.provenance or {}),
+        on_top=dict(data.on_top or {}),
     )
     return json.dumps(payload, indent=indent, ensure_ascii=False, default=str)
