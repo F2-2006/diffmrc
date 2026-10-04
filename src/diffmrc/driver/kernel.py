@@ -204,7 +204,8 @@ def frozen_grid(mol, level=3):
                       weights=np.asarray(grid.weights).copy())
 
 
-def _mcpdft_chain(mol, C0, space, grid, grid_level, eval_xc, enuc):
+def _mcpdft_chain(mol, C0, space, grid, grid_level, eval_xc, enuc,
+                  hyb=0.0):
     """Assemble the on-top theta chain; shared by the two factories.
 
     Everything independent of the rotation parameters is computed here,
@@ -284,13 +285,19 @@ def _mcpdft_chain(mol, C0, space, grid, grid_level, eval_xc, enuc):
         D = Dfull[0] + Dfull[1]
         E_mcwfn = (enuc_j + jnp.einsum('ab,ab->', h1j, D)
                    + 0.5 * jnp.einsum('abcd,ab,cd->', erij, D, D))
-        return E_mcwfn + E_ot, E_ot, E_mcwfn, E_cas
+        # Hybrid (tPBE0, hybrid = 0.25): the standard RDM split makes the
+        # mixed energy the convex combination of the on-top total and the
+        # CASSCF total at the same orbital point -- E_x + E_c =
+        # E_CASSCF - classical (engine-confirmed to the digit, t390/t391)
+        # -- so no 2-RDM convention appears anywhere.
+        E_tot = (1.0 - hyb) * (E_mcwfn + E_ot) + hyb * (E_cas + enuc_j)
+        return E_tot, E_ot, E_mcwfn, E_cas
 
     return terms, len(pairs)
 
 
 def mcpdft_energy_function(mol, C0, space, grid=None, grid_level=3,
-                           eval_xc=None, enuc=None):
+                           eval_xc=None, enuc=None, hyb=0.0):
     """The differentiable MC-PDFT (tPBE) energy under orbital rotations.
 
     The on-top companion of ``energy_function``: the same rotation
@@ -323,8 +330,13 @@ def mcpdft_energy_function(mol, C0, space, grid=None, grid_level=3,
     gradient measures 1e-10, and the optimized point reaches
     |grad| = 1e-14 on the production pyscfad path.
 
-    tPBE only; the tPBE0 hybrid and excited-state tables are separate
-    registered work. The size of the active space is the size
+    ``hyb=0.0`` is tPBE; ``hyb=0.25`` is the tPBE0 hybrid, whose
+    energy at these orbitals is the convex combination
+    ``(1 - hyb) E_tPBE + hyb E_CASSCF`` (the RDM split collapses the
+    hybrid's E_x + E_c into the wavefunction energy; engine-confirmed to
+    the digit, t390/t391).  The returned components (E_ot, E_mcwfn) stay
+    unscaled; E_total carries the mix.  Excited-state tables are
+    separate registered work. The size of the active space is the size
     ``cs_casci_blocked`` can diagonalize -- the same limit as
     ``energy_function``.
 
@@ -361,7 +373,7 @@ def mcpdft_energy_function(mol, C0, space, grid=None, grid_level=3,
         many parameters there are.
     """
     terms, npar = _mcpdft_chain(mol, C0, space, grid, grid_level,
-                                eval_xc, enuc)
+                                eval_xc, enuc, hyb=hyb)
 
     def E_theta(t):
         return terms(t)[0]
@@ -370,7 +382,7 @@ def mcpdft_energy_function(mol, C0, space, grid=None, grid_level=3,
 
 
 def mcpdft_terms_function(mol, C0, space, grid=None, grid_level=3,
-                          eval_xc=None, enuc=None):
+                          eval_xc=None, enuc=None, hyb=0.0):
     """The MC-PDFT theta chain with its components exposed.
 
     Same chain as ``mcpdft_energy_function``; the closure returns
@@ -378,7 +390,8 @@ def mcpdft_terms_function(mol, C0, space, grid=None, grid_level=3,
     anchor script or a report can show each component against the
     engine's ``e_tot``, ``e_ot`` and ``e_mcwfn``.
     """
-    return _mcpdft_chain(mol, C0, space, grid, grid_level, eval_xc, enuc)
+    return _mcpdft_chain(mol, C0, space, grid, grid_level, eval_xc, enuc,
+                         hyb=hyb)
 
 
 def search_point(E_theta, npar, tries=1, seed=0, **kwargs):
@@ -578,20 +591,29 @@ def compute_ground_state(atoms, charge, spin, active_space, params,
     energy = float(point.energy)
     e_casscf = energy
     method_data = {'method': 'casci'}
-    if str(_value('method', 'casci')) == 'mcpdft':
+    method = str(_value('method', 'casci'))
+    if method in ('mcpdft', 'mcpdft0'):
         # One-step MC-PDFT (the DVS paper's protocol): the orbitals are
         # the CASSCF-driven ones just converged, and the on-top energy
         # is evaluated once at that point. The self-checks below still
         # certify the wavefunction -- the on-top energy is not a
         # variational expectation value, so `variational` runs on
-        # `e_casscf`, which is reported alongside.
-        terms, _ = mcpdft_terms_function(mol, C, space)
+        # `e_casscf`, which is reported alongside.  ``mcpdft0`` is the
+        # 0.25 hybrid: E = 0.75 E_tPBE + 0.25 E_CASSCF at the same
+        # orbitals (the RDM split of the engine's E_x + E_c; anchors
+        # 8.9e-16 on H2/STO-3G, t391).
+        hyb = 0.25 if method == 'mcpdft0' else 0.0
+        terms, _ = mcpdft_terms_function(mol, C, space, hyb=hyb)
         E_tot, E_ot, E_mcwfn, _ = (float(x) for x in terms(point.theta))
         energy = E_tot
         method_data = dict(
-            method='mcpdft',
-            protocol='one-step: CASSCF-driven orbitals, one on-top '
-                     'evaluation (tPBE)',
+            method=method,
+            protocol=('one-step: CASSCF-driven orbitals, one on-top '
+                      'evaluation (tPBE)' if not hyb else
+                      'one-step: CASSCF-driven orbitals, one on-top '
+                      'evaluation (tPBE), 0.25-mixed with the CASSCF '
+                      'energy (tPBE0)'),
+            hyb=hyb,
             e_casscf=e_casscf,
             e_ot=E_ot,
             e_mcwfn=E_mcwfn,

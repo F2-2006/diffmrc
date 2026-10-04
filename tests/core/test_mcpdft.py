@@ -175,3 +175,19 @@ def test_pbe_kernel_is_jit_and_grad_safe():
     with pytest.raises(ValueError):
         mcpmod.pbe_eval_xc('PBE', rho_t, spin=0)
 
+
+
+def test_exchange_energy_matches_the_engine_component():
+    """The E_x of the engine's hybrid decomposition (``energy_mcwfn``):
+    HF-like exchange of the full CAS density, engine value
+    -0.662415341159 on H2/STO-3G (t390; primitive exact to 0.0)."""
+    from diffmrc.core.mcpdft import exchange_energy
+
+    mol = gto.M(atom='H 0 0 0; H 0 0 0.74', basis='sto-3g')
+    mf = scf.RHF(mol).run(verbose=0)
+    mcp = mcpdft.CASSCF(mf, 'tPBE0', 2, 2).run(verbose=0)
+    casdm1s = mcp.make_one_casdm1s(ci=mcp.ci)
+    d1f = _dms.casdm1s_to_dm1s(mcp, casdm1s, mo_coeff=mcp.mo_coeff)
+    eri = jnp.asarray(mol.intor('int2e', aosym='s1'))
+    E = float(exchange_energy(jnp.asarray(d1f[0]), jnp.asarray(d1f[1]), eri))
+    assert abs(E - (-0.662415341159)) < 1e-12

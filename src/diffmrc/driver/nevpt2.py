@@ -802,7 +802,8 @@ def sa_nevpt2_table_from_mol(mol, family, scf_builder, *, nroots,
 def sa_mcpdft_table(mol, scf_builder, *, ncore, nact, nele, nroots,
                     c0=None, max_steps=400, refine_max_iter=40,
                     optimize_tol=None, refine_target=None,
-                    e2_scale=1.0, grid=None, grid_level=3, eval_xc=None):
+                    e2_scale=1.0, grid=None, grid_level=3, eval_xc=None,
+                    hyb=0.0):
     """SA-CASSCF + per-state one-step MC-PDFT on an explicit window.
 
     The window-explicit core of ``sa_mcpdft_table_from_mol``: the
@@ -883,7 +884,12 @@ def sa_mcpdft_table(mol, scf_builder, *, ncore, nact, nele, nroots,
         D = Dfull[0] + Dfull[1]
         E_mcwfn = (enuc + jnp.einsum('ab,ab->', h1e, D)
                    + 0.5 * jnp.einsum('abcd,ab,cd->', eri, D, D))
-        e_tpbe.append(float(E_mcwfn + E_ot))
+        E_k = E_mcwfn + E_ot
+        if hyb:
+            # tPBE0: the convex combination with the state's own CASSCF
+            # energy (the RDM split; see the kernel chain).
+            E_k = (1.0 - hyb) * E_k + hyb * out['states'][k][0]
+        e_tpbe.append(float(E_k))
     e_tpbe = np.asarray(e_tpbe)
     for g in groups:
         g['dE_mcpdft'] = float(e_tpbe[g['representative']] - e_tpbe[0])
@@ -897,7 +903,7 @@ def sa_mcpdft_table(mol, scf_builder, *, ncore, nact, nele, nroots,
 def sa_mcpdft_table_from_mol(mol, family, scf_builder, *, nroots,
                              max_steps=400, refine_max_iter=40,
                              e2_scale=1.0, grid=None, grid_level=3,
-                             eval_xc=None):
+                             eval_xc=None, hyb=0.0):
     """State-averaged CASSCF + per-state one-step MC-PDFT table.
 
     The orbital point is the equal-weight SA-CASSCF solution of
@@ -928,6 +934,7 @@ def sa_mcpdft_table_from_mol(mol, family, scf_builder, *, nroots,
     out = sa_mcpdft_table(mol, scf_builder, ncore=ncore, nact=nact,
                           nele=nele, nroots=nroots, max_steps=max_steps,
                           refine_max_iter=refine_max_iter, e2_scale=e2_scale,
-                          grid=grid, grid_level=grid_level, eval_xc=eval_xc)
+                          grid=grid, grid_level=grid_level, eval_xc=eval_xc,
+                          hyb=hyb)
     out['frontier_report'] = report
     return out

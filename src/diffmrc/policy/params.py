@@ -93,8 +93,9 @@ _PARAM_LIST = [
           'reported energy: the CASCI/CASSCF value, or the on-top tPBE '
           'evaluation at the CASSCF-converged orbitals -- the one-step '
           'MC-PDFT protocol of the DVS paper (A. Wardzala, B. King, '
-          'L. Gagliardi, JPCA 2025, doi 10.1021/acs.jpca.4c08597)',
-          'driver', choices=('casci', 'mcpdft')),
+          'L. Gagliardi, JPCA 2025, doi 10.1021/acs.jpca.4c08597); '
+          'mcpdft0 is its 0.25 hybrid (tPBE0)',
+          'driver', choices=('casci', 'mcpdft', 'mcpdft0')),
     Param('multistart_tries', 4,
           'starting points tried at the robust level; the variationally '
           'lowest point is kept. A single start from the reference '

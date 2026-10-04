@@ -180,3 +180,21 @@ def test_run_from_geometry_mcpdft_decides_on_the_wavefunction(tmp_path):
     assert result.trustworthy
     assert abs(result.energy - H2_STO3G_E_TOT) < 1e-9
     assert 'variational' in [c.name for c in result.decision.checks]
+
+
+def test_ground_state_tpbe0_hybrid_matches_the_engine():
+    """method='mcpdft0': the 0.25 hybrid, which at the one-step orbitals
+    is E = 0.75 E_tPBE + 0.25 E_CASSCF (the RDM split of the engine's
+    E_x + E_c, t390/t391).  H2/STO-3G engine value -1.151792318484,
+    reproduced to 8.9e-16 in t391."""
+    from diffmrc.driver.kernel import compute_ground_state
+
+    out = compute_ground_state('H 0 0 0; H 0 0 0.74', 0, 0, '0,1',
+                               _params(method='mcpdft0', basis='sto-3g'),
+                               level='fast')
+    assert abs(out['energy'] - (-1.151792318484)) < 1e-9
+    assert out['algorithm_data']['hyb'] == 0.25
+    assert 'tPBE0' in out['algorithm_data']['protocol']
+    # the convex combination holds among the reported numbers
+    assert abs(out['energy'] - (0.75 * (-1.156628479816)
+                                + 0.25 * out['e_casscf'])) < 1e-9

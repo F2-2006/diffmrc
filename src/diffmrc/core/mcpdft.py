@@ -42,6 +42,7 @@ __all__ = [
     "mcpdft_eot",
     "pbe_exc",
     "pbe_eval_xc",
+    "exchange_energy",
 ]
 
 
@@ -290,3 +291,27 @@ def pbe_eval_xc(xc_code, rho, spin=0, relativity=0, deriv=0, omega=None,
             f"the jnp PBE kernel implements eval_xc('PBE', spin=1, deriv=0) "
             f"only, got ({xc_code!r}, spin={spin}, deriv={deriv})")
     return (pbe_exc(rho), None, None, None)
+
+
+def exchange_energy(D_a, D_b, eri):
+    """HF-like exchange energy of the full spin-resolved AO densities.
+
+    ``E_x = -1/2 sum_sigma <K[D_sigma] | D_sigma>`` with
+    ``K[D][p,q] = sum_rs (pr|qs) D[r,s]`` -- the engine's ``E_x`` inside
+    ``energy_mcwfn`` (its ``vk`` from ``get_jk`` on the full density).
+    It is *not* the wavefunction's exact exchange: the engine's own
+    comment says as much, and the hybrid tPBE0 mixes exactly this term
+    back into the classical part (t390 pinned the assembly:
+    ``E = classical + lambda (E_x + E_c) + (1 - lambda) E_ot`` with
+    ``lambda = 0.25``).  For the total energy the pair ``E_x + E_c``
+    is obtained without any 2-RDM convention: the standard RDM split
+    gives ``E_x + E_c = <Vee> - E_j = E_CASSCF - classical`` (checked
+    to the digit, t391), which is why the chain carries the hybrid as
+    the convex combination ``(1 - lambda) E_tPBE + lambda E_CASSCF``
+    and this primitive stays a diagnostic.
+    """
+    def _k(D):
+        return jnp.einsum('prqs,rs->pq', eri, D)
+
+    K_a, K_b = _k(D_a), _k(D_b)
+    return -0.5 * ((K_a * D_a).sum() + (K_b * D_b).sum())

@@ -95,7 +95,7 @@ def dvs_scan(mol, *, lam_grid=(0.0, 0.5, 1.0, 1.5, 2.0),
              n_grid=(4, 8), nroots=2, max_size=(12, 12), max_ndet=2000,
              max_steps=400, refine_max_iter=40, optimize_tol=None,
              refine_target=None, grid=None, grid_level=3,
-             eval_xc=None, scf_builder=None):
+             eval_xc=None, scf_builder=None, hyb=0.0):
     """Run the (lambda, N) DVS scan on one molecule.
 
     Every (lambda, N) pair is carried through the one-step protocol:
@@ -150,7 +150,8 @@ def dvs_scan(mol, *, lam_grid=(0.0, 0.5, 1.0, 1.5, 2.0),
                     nroots=nroots, c0=np.asarray(casorbs),
                     max_steps=max_steps, refine_max_iter=refine_max_iter,
                     optimize_tol=optimize_tol, refine_target=refine_target,
-                    grid=grid, grid_level=grid_level, eval_xc=eval_xc)
+                    grid=grid, grid_level=grid_level, eval_xc=eval_xc,
+                    hyb=hyb)
                 e_tpbe = [float(x) for x in np.atleast_1d(table['e_tpbe'])]
                 row.update(npar=int(table['npar']), ndet=int(table['ndet']),
                            grad_norm=float(table['grad_norm']),
