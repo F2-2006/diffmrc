@@ -32,13 +32,18 @@ one occupied orbital; a deviation that shrinks is window-limited.
 
 \textbf{No spin--orbit coupling; scalar-relativistic with ECPs only.}
 Fine structure is out of scope.
+\textbf{Translated functionals beyond tPBE/tPBE0.}  The on-top kernel is a closed-form PBE, written out because the libxc wrapper cannot be traced; tPBE and its 0.25 hybrid tPBE0 are the covered pair.  Another translated functional needs its own closed-form kernel --- a one-line change in principle, a new validation in practice.  Below $\rho$ ~ 1e-13 the kernel differs from libxc internal guards by up to ~1e-4 absolute, where the grid weights put the integral contribution below 1e-25.
+
 
 \section{Implementation limits}
 
 \textbf{Dense diagonalization.}  The CI step materializes and
 diagonalizes the full determinant space; the practical ceiling is a
 few thousand determinants per root calculation.  A differentiable
-iterative eigensolver is future work.
+iterative eigensolver is future work.  The (lambda, N) DVS scan inherits this ceiling: candidate windows are refused with their determinant count recorded once they exceed \texttt{max\_ndet} (default 2000), which places the published (12,12)/(14,14) windows beyond the in-stack CI by design --- those remain engine-side.
+
+\textbf{Frozen on-top quadrature.}  Geometry derivatives of the on-top energy omit the grid-velocity term by construction; the calibration bounds it at 7.3e-5~Eh/bohr on CO/6-31G at grid level~3, falling to 2.5e-5 at level~4.
+
 
 \textbf{Second-derivative cost.}  The implicit route requires the
 orbital Hessian in memory and does not exploit sparsity; the unrolled
@@ -93,3 +98,7 @@ patterns met so far; the electron count follows the window
 ($n_\mathrm{ele} = N_\mathrm{ele} - 2 n_\mathrm{core}$) and a
 hard-coded count produces a wrong ground state that the energy alone
 does not flag.
+\textbf{One-step versus relaxed MC-PDFT.}  The one-step orbitals are not stationary for the on-top functional (measured |grad| ~ 3e-3 at the CASSCF point); a relaxed minimization lies 3.0e-4~Eh below on H2/6-31G.  The two numbers answer different questions --- papers using the one-step protocol must not be compared with relaxed values without saying which is which.
+
+\textbf{On-top columns amplify orbital-point differences.}  The per-state on-top energy reacts to the state-averaged orbital point at first order, where the CASSCF column reacts at second order (slope ~3e-3 per radian at a CASSCF point).  Two runs whose state-averaged energies agree to 1e-7~Eh can differ by ~1e-5~eV in the on-top column; treat that as the column's reproducibility floor, not as noise.
+

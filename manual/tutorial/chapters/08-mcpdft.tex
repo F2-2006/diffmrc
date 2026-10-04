@@ -1,0 +1,91 @@
+\section{MC-PDFT: one-step tPBE and tPBE0}
+\label{sec:mcpdft}
+
+Multiconfiguration pair-density functional theory replaces the
+active-space two-electron energy of a multiconfiguration wavefunction
+by an on-top functional of the translated spin densities.  This
+tutorial chapter covers the one-step protocol the driver implements:
+the orbitals are the CASSCF-driven ones, and the on-top energy is
+evaluated once at that point.  This is also the protocol of the
+published DVS tables (Wardzala, King and Gagliardi, \emph{J. Phys.
+Chem.~A} 2025, \texttt{doi 10.1021/acs.jpca.4c08597}); the manual's
+protocol chapter carries the formulas and the conventions.
+
+\subsection{A one-step calculation from the command line}
+
+\begin{lstlisting}[language=bash]
+$ diffmrc h2.xyz --basis sto-3g --active-space 0,1 --method mcpdft
+$ diffmrc h2.xyz --basis sto-3g --active-space 0,1 --method mcpdft0
+\end{lstlisting}
+
+The reported energy is the on-top total; the report carries the
+decomposition next to it, so the wavefunction layer stays visible:
+
+\begin{lstlisting}
+on-top decomposition:
+  method            mcpdft
+  protocol          one-step: CASSCF-driven orbitals, one on-top
+                    evaluation (tPBE)
+  E_mcwfn / Eh      -0.4228339159
+  E_ot    / Eh      -0.7337945639
+  E_CASSCF / Eh     -1.1372838345
+\end{lstlisting}
+
+\texttt{--method mcpdft} gives the \texttt{tPBE} functional;
+\texttt{--method mcpdft0} gives its 0.25 hybrid, \texttt{tPBE0}, whose
+energy at the same orbitals is the convex combination
+$0.75\,E_{\mathrm{tPBE}} + 0.25\,E_{\mathrm{CASSCF}}$ (see the manual
+for why the hybrid collapses to this form).
+
+The self-checks certify the wavefunction: \texttt{variational} runs on
+the CASSCF value, because the on-top energy is not a variational
+expectation value.  What the checks do not certify is the on-top
+evaluation itself; that is carried by the anchors in the manual's
+verification chapter (the engine cross-check reproduces the pyscf
+\texttt{mcpdft} values to the last digits on H$_2$/STO-3G).
+
+\subsection{The chain, from Python}
+
+The two factories mirror \texttt{energy\_function}: a rotation chart
+over the reference orbitals, the blockwise CI, then the on-top
+evaluation on a frozen grid.
+
+\begin{lstlisting}[language=Python]
+import jax
+jax.config.update('jax_enable_x64', True)
+from jax import numpy as jnp
+from pyscf import gto, scf
+
+from diffmrc.driver.kernel import (partition_from_occupations,
+                                   mcpdft_terms_function)
+
+mol = gto.M(atom='H 0 0 0; H 0 0 0.74', basis='sto-3g')
+mf = scf.RHF(mol).run(verbose=0)
+space = partition_from_occupations(mf.mo_occ, [0, 1])
+
+terms, npar = mcpdft_terms_function(mol, mf.mo_coeff, space)
+E_tot, E_ot, E_mcwfn, E_cas = (float(x) for x in terms(jnp.zeros(npar)))
+print(E_tot, E_ot, E_mcwfn, E_cas)          # -1.1566284798 ...
+\end{lstlisting}
+
+\texttt{terms} returns the four numbers of the report block, from one
+forward pass, and is differentiable in the rotation parameters exactly
+like \texttt{energy\_function} (finite differences agree to
+$10^{-10}$ at the reference point).  Passing \texttt{hyb=0.25} gives
+the tPBE0 combination.
+
+\subsection{Excited states: the on-top column}
+
+The vertical-excitation mode accepts the same method axis, adding a
+per-state one-step column to the state-averaged table:
+
+\begin{lstlisting}[language=bash]
+$ diffmrc h2co.xyz --vee npi --nroots 2 --method mcpdft
+\end{lstlisting}
+
+The table then carries a \texttt{dE(MC-PDFT)} column in eV.  One
+practical number to know before quoting it: the on-top column reacts
+to the state-averaged orbital point at first order, where the CASSCF
+column reacts at second order, so it is the column that notices small
+orbital-point reproducibility differences between runs (the manual's
+limitations chapter quantifies this).

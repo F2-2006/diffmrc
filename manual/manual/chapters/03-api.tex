@@ -31,6 +31,10 @@ Entry point & Purpose \\
 \texttt{nevpt2.impl.cas\_dets\_for2(...)} & determinant bitmaps of the active space \\
 \texttt{nevpt2.impl.canonicalize\_jax(...)} & orbital canonicalization on the differentiated path \\
 \texttt{nevpt2.impl.nevpt2\_e2\_full2(...)} & the frozen NEVPT2 contraction \\
+\texttt{mcpdft.w\_sigma / pi\_active} & on-top densities: spin 1-RDM blocks and the factorized $\Pi$\\
+\texttt{mcpdft.eot\_energy / mcpdft\_eot} & the on-top energy, kernel injected (tPBE)\\
+\texttt{mcpdft.pbe\_exc / pbe\_eval\_xc} & the closed-form PBE kernel (jit-safe)\\
+\texttt{mcpdft.exchange\_energy(...)} & the hybrid\'s HF-like exchange term (diagnostic)\\
 \bottomrule
 \end{tabularx}
 \end{center}
@@ -86,6 +90,12 @@ Entry point & Purpose \\
 \texttt{nevpt2.sa\_cas\_solution(...)} & state-averaged CAS solution and CI vectors \\
 \texttt{nevpt2.sa\_nevpt2\_state\_table(out, dets)} & grouped physical-state table \\
 \texttt{nevpt2.sa\_vertical\_excitations(states)} & per-state vertical excitation energies \\
+\texttt{kernel.mcpdft\_energy\_function(...)} & the differentiable one-step tPBE chain (\texttt{hyb} for tPBE0)\\
+\texttt{kernel.mcpdft\_terms\_function(...)} & the same chain with its four energy components \\
+\texttt{nevpt2.sa\_mcpdft\_table(...)} & SA-CASSCF + per-state one-step on-top column, explicit window \\
+\texttt{nevpt2.sa\_mcpdft\_table\_from\_mol(...)} & the same with the frontier window rules \\
+\texttt{dvs.dvs\_scan(mol, ...)} & the (lambda, N) DVS candidate scan and selection \\
+\texttt{kernel.frozen\_grid(mol)} & the frozen quadrature (AO values, gradients, weights) \\
 \texttt{orbitals.converge\_orbital\_point(E\_theta, npar)} & two-stage convergence with refinement and polish \\
 \texttt{orbitals.hessp\_of(E\_theta)} & Hessian-vector product for the trust-region stage \\
 \bottomrule

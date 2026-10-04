@@ -107,3 +107,90 @@ paths (the refinement, the trust-region polish) differentiate the
 gradient with forward-mode \texttt{jvp} calls; a caller wrapping the
 whole convergence in \texttt{jit} should expect the compile of those
 nodes to dominate the first evaluation.
+
+\section{MC-PDFT on-top functionals (tPBE, tPBE0)}
+\label{sec:protocol-mcpdft}
+
+The reported energy of \texttt{--method mcpdft} is
+
+\begin{equation}
+E_{\mathrm{MC\text{-}PDFT}} \;=\; E_{\mathrm{mcwfn}} \;+\; E_{ot},
+\qquad
+E_{\mathrm{mcwfn}} \;=\; V_{nn} + \langle h | D \rangle
++ \tfrac{1}{2}\,\langle J[D] \,|\, D \rangle ,
+\end{equation}
+
+with $D$ the \emph{full} (core plus active) one-body density and
+$E_{ot}$ the on-top functional of the translated spin densities,
+evaluated on a frozen quadrature grid.  The conventions that the
+validation had to pin down, and that a reimplementation must
+reproduce, live in \texttt{core.mcpdft}:
+
+\begin{itemize}
+  \item the translation uses gradient rows
+    $\rho'_{\sigma} = (\nabla\rho/2)(1 \pm \zeta)$ with \textbf{no}
+    $\nabla\zeta$ term (Li Manni et al.\ 2014; the engine's
+    \texttt{get\_rho\_translated});
+  \item the on-top pair density is the convention-free factorized form
+    $\Pi = \tfrac{1}{2}\sum \phi^4 (A - B_{ss})
+    + (\rho_f\rho_f - \rho_a\rho_a)$, with $A$ the M-block product
+    identical to the stack's spin-summed 2-RDM mechanism;
+  \item the xc kernel is the package's own closed-form PBE
+    (\texttt{core.mcpdft.pbe\_exc}), because the pyscfad/libxc wrapper
+    cannot be traced under \texttt{jit}; it matches libxc to
+    $2\times10^{-15}$ in the physical domain and deviates only below
+    $\rho \sim 10^{-13}$ (libxc's internal guards), where the grid
+    weights put the integral contribution below $10^{-25}$.
+\end{itemize}
+
+\paragraph{The frozen grid.}
+The quadrature is built once and shared by every evaluation, so
+geometry derivatives omit the grid-velocity term.  The calibration on
+CO/6-31G bounds that term at $7.3\times10^{-5}$~Eh/bohr at grid
+level~3, falling to $2.5\times10^{-5}$ at level~4 -- three orders of
+magnitude below the wavefunction response it rides on.
+
+\paragraph{One-step protocol and the relaxed variant.}
+The orbitals are the CASSCF-driven ones and the on-top energy is
+evaluated once; this is the DVS paper's protocol.  The orbital point
+is \emph{not} stationary for the on-top functional (measured
+$|\nabla E| \approx 3\times10^{-3}$ there).  The theta chain can also
+minimize the on-top energy itself, which converges to a fully relaxed
+stationary point below the one-step value by
+$3.0\times10^{-4}$~Eh on H$_2$/6-31G; the two numbers answer different
+questions and the reports say which one they carry.
+
+\paragraph{The tPBE0 hybrid.}
+\texttt{--method mcpdft0} is the 0.25 hybrid.  Its engine
+decomposition is $E = E_{\mathrm{classical}} + \lambda (E_x + E_c)
++ (1-\lambda) E_{ot}$ with $\lambda = 0.25$, $E_x$ the HF-like
+exchange of the full density and $E_c$ the active-space cumulant
+contraction.  The standard RDM split gives $E_x + E_c =
+E_{\mathrm{CASSCF}} - E_{\mathrm{classical}}$, so at the one-step
+orbitals the hybrid is the convex combination
+$E_{\mathrm{tPBE0}} = 0.75\,E_{\mathrm{tPBE}} + 0.25\,E_{\mathrm{CASSCF}}$;
+the chain implements exactly this, with no 2-RDM convention in the
+path.
+
+\paragraph{Verification anchors.}
+Against \texttt{pyscf.mcpdft}: H$_2$/STO-3G reproduces
+$e_{tot}/e_{ot}/e_{mcwfn}$ to $10^{-16}$ (golden
+$-1.156628479816$; the tPBE0 value $-1.151792318484$ to
+$9\times10^{-16}$), H$_2$O/STO-3G to $1.6\times10^{-9}$, and
+H$_2$/6-31G to $1.3\times10^{-8}$ -- the engine's own FCI convergence
+floor, measured as its Davidson vector differing from a full block
+decomposition by $\sim10^{-7}$.  The rotation-chart AD gradient agrees
+with finite differences to $10^{-10}$, and the fully relaxed
+optimization reaches $|\nabla| = 1.4\times10^{-14}$.
+
+\paragraph{The (lambda, N) DVS scan.}
+\texttt{driver.dvs.dvs\_scan} builds the candidate orbital sets of the
+DVS construction ($G(\lambda) = F - \lambda K$ diagonalization, the
+exact t369 reproduction), picks windows with the APC chooser (pyscf's
+\texttt{mcscf.apc}, the authors' implementation), and carries each
+candidate through the one-step columns; the selection is the lowest
+mean on-top energy with the runner-up gap reported.  Windows whose
+determinant count exceeds \texttt{max\_ndet} (default 2000) are
+refused with the count recorded: the in-stack CI is a full determinant
+decomposition, so the paper's ZnH/CuCl $(12,12)/(14,14)$ windows stay
+engine-side by design.
