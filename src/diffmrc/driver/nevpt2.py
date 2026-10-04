@@ -799,6 +799,45 @@ def sa_nevpt2_table_from_mol(mol, family, scf_builder, *, nroots,
             'rows': rows, 'groups': groups, 'out': out}
 
 
+def make_sa_energy_fn(mol, scf_builder, *, ncore, nact, nele, nmo, pairs,
+                      nroots, c0=None, eig_solver='default'):
+    """The state-averaged energy alone, for orbital-point searches.
+
+    The full components' graph is heavy: it contains the running-mean
+    loop (one CI solve per root count) and the canonicalization (a
+    further CI solve), and tracing it costs ~8 minutes per eager
+    evaluation at the DVS test-orbital windows (measured, t393).  The
+    orbital-point search reads only ``E_sa``, and the equal-weight mean
+    is a single call to the state-average branch on the rotated
+    integrals -- eigenvalues do not care which active basis they are
+    computed in, so this path differs from the full one only at the
+    float-noise level (~1e-12), while its graph is roughly five times
+    lighter to trace and evaluate.
+
+    Same SCF/one-time construction contract as
+    ``make_nevpt2_sa_theta_fn``; ``c0`` is the trial-orbital hook the
+    DVS scan uses.
+    """
+    from ..core.rotation import block_rotation
+
+    mf_ = scf_builder(mol)
+    mf_.kernel()
+    C0_ = (mf_.mo_coeff if c0 is None else np.asarray(c0, dtype=float))
+    h_ = mf_.get_hcore()
+    e_ = mol.intor('int2e', aosym='s1')
+    enuc = mol.energy_nuc()
+
+    def E_sa_of(th_):
+        C2 = C0_ @ block_rotation(th_, nmo, pairs)
+        h1_, eri_ = _stepwise_mo_ints(C2, h_, e_)
+        e_sa, _ = sa_cas_solution(h1_, eri_, ncore=ncore, nact=nact,
+                                  nele=nele, nroots=nroots,
+                                  eig_solver=eig_solver)
+        return e_sa + enuc
+
+    return E_sa_of
+
+
 def sa_mcpdft_table(mol, scf_builder, *, ncore, nact, nele, nroots,
                     c0=None, max_steps=400, refine_max_iter=40,
                     optimize_tol=None, refine_target=None,
@@ -832,6 +871,12 @@ def sa_mcpdft_table(mol, scf_builder, *, ncore, nact, nele, nroots,
     comp = make_nevpt2_sa_theta_fn(mol, ncore, nact, nele, nmo, pairs,
                                    scf_builder, nroots=nroots,
                                    e2_scale=e2_scale, c0=c0)
+    # The search rides the light energy path (t393: the full graph's
+    # eager trace alone costs ~8 min at these windows); the full
+    # components are evaluated once at the converged point below.
+    E_sa_light = make_sa_energy_fn(mol, scf_builder, ncore=ncore, nact=nact,
+                                   nele=nele, nmo=nmo, pairs=pairs,
+                                   nroots=nroots, c0=c0)
     converge_kw = dict(max_steps=max_steps, refine_max_iter=refine_max_iter)
     # The scan's rows only need the orbital point to ~1e-7: the SA energy
     # is stationary there (second order) and the on-top column's leading
@@ -842,8 +887,7 @@ def sa_mcpdft_table(mol, scf_builder, *, ncore, nact, nele, nroots,
         converge_kw['optimize_tol'] = float(optimize_tol)
     if refine_target is not None:
         converge_kw['refine_target'] = float(refine_target)
-    point = converge_orbital_point(lambda th: comp(th, want_e2=False)['E_sa'],
-                                   len(pairs), **converge_kw)
+    point = converge_orbital_point(E_sa_light, len(pairs), **converge_kw)
     out = comp(point.theta)
     rows, groups = sa_nevpt2_state_table(out, dets)
 
