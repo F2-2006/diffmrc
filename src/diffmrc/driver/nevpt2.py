@@ -417,7 +417,7 @@ def sa_nevpt2_state_table(out, dets, *, tol=1e-9):
 def _sa_components_from(C0_, h_, e_, enuc, th_, *, ncore, nact, nele, nmo,
                         pairs, nroots, dets, links_a, links_b,
                         state_weights=None, e2_scale=1.0,
-                        eig_solver='default'):
+                        eig_solver='default', want_e2=True):
     """``(E_sa, states, cis)`` from reference quantities already in hand.
 
     The state-averaged analogue of ``_components_from``: contains no SCF
@@ -461,13 +461,23 @@ def _sa_components_from(C0_, h_, e_, enuc, th_, *, ncore, nact, nele, nmo,
         wv = jnp.asarray(state_weights, dtype=float)[:n_eff]
         wv = wv / jnp.sum(wv)
         E_sa = sum(wv[k] * Ek_list[k] for k in range(n_eff))
+    # ``want_e2=False`` skips the per-state NEVPT2 contraction.  The
+    # orbital-point search reads only ``E_sa``, which is fully computed
+    # before this loop, so the skip changes neither the trajectory nor
+    # the converged point -- it removes the dominant per-evaluation
+    # cost from every optimizer step (the DVS scan's candidates converge
+    # from trial orbitals far from the solution and pay this hundreds of
+    # times per row).
     states = []
     for k in range(n_eff):
-        e2k, _ = nevpt2_e2_full2(h1c, eric, CIs[:, k], dets, Ek_list[k],
-                                 mo_energy=eps, ncore=ncore, nact=nact,
-                                 nocc=ncore + nact, links_a=links_a,
-                                 links_b=links_b)
-        states.append((Ek_list[k] + enuc, e2_scale * e2k))
+        if want_e2:
+            e2k, _ = nevpt2_e2_full2(h1c, eric, CIs[:, k], dets, Ek_list[k],
+                                     mo_energy=eps, ncore=ncore, nact=nact,
+                                     nocc=ncore + nact, links_a=links_a,
+                                     links_b=links_b)
+            states.append((Ek_list[k] + enuc, e2_scale * e2k))
+        else:
+            states.append((Ek_list[k] + enuc, 0.0))
     # ``C`` is the canonical-basis orbital set the ``cis`` are expressed
     # in; the on-top columns (sa_mcpdft_table_from_mol) evaluate their
     # densities on exactly these orbitals.
@@ -476,7 +486,7 @@ def _sa_components_from(C0_, h_, e_, enuc, th_, *, ncore, nact, nele, nmo,
 
 def make_nevpt2_sa_theta_fn(mol, ncore, nact, nele, nmo, pairs, scf_builder,
                             nroots, e2_scale=1.0, state_weights=None,
-                            eig_solver='default'):
+                            eig_solver='default', c0=None):
     """Theta-only state-averaged components at a fixed geometry.
 
     The reference SCF and the AO integrals are computed once here and the
@@ -487,12 +497,18 @@ def make_nevpt2_sa_theta_fn(mol, ncore, nact, nele, nmo, pairs, scf_builder,
     ``make_nevpt2_theta_fn``.  At a fixed geometry the frozen-reference
     form is the same function as the joint one: the SCF would run once
     either way, so no physics is dropped.
+
+    ``c0`` replaces the SCF orbitals as the theta reference: the rotation
+    chart is measured from these columns instead.  The DVS scan passes
+    its test orbitals here, which is the paper's protocol -- the SA
+    convergence starts from the candidate, not from the mean field.
     """
     from ..core.nevpt2.impl import cas_dets_for2
 
     mf_ = scf_builder(mol)
     mf_.kernel()
-    C0_ = mf_.mo_coeff
+    C0_ = (mf_.mo_coeff if c0 is None
+           else np.asarray(c0, dtype=float))
     h_ = mf_.get_hcore()
     e_ = mol.intor('int2e', aosym='s1')
     enuc = mol.energy_nuc()
@@ -503,8 +519,9 @@ def make_nevpt2_sa_theta_fn(mol, ncore, nact, nele, nmo, pairs, scf_builder,
               state_weights=state_weights, e2_scale=e2_scale,
               eig_solver=eig_solver)
 
-    def components(th_):
-        return _sa_components_from(C0_, h_, e_, enuc, th_, **kw)
+    def components(th_, want_e2=True):
+        return _sa_components_from(C0_, h_, e_, enuc, th_, want_e2=want_e2,
+                                   **kw)
 
     return components
 
@@ -771,7 +788,7 @@ def sa_nevpt2_table_from_mol(mol, family, scf_builder, *, nroots,
     comp = make_nevpt2_sa_theta_fn(mol, ncore, nact, nele, nmo, pairs,
                                    scf_builder, nroots=nroots,
                                    e2_scale=e2_scale)
-    point = converge_orbital_point(lambda th: comp(th)['E_sa'],
+    point = converge_orbital_point(lambda th: comp(th, want_e2=False)['E_sa'],
                                    len(pairs), max_steps=max_steps,
                                    refine_max_iter=refine_max_iter)
     out = comp(point.theta)
@@ -782,30 +799,22 @@ def sa_nevpt2_table_from_mol(mol, family, scf_builder, *, nroots,
             'rows': rows, 'groups': groups, 'out': out}
 
 
-def sa_mcpdft_table_from_mol(mol, family, scf_builder, *, nroots,
-                             max_steps=400, refine_max_iter=40,
-                             e2_scale=1.0, grid=None, grid_level=3,
-                             eval_xc=None):
-    """State-averaged CASSCF + per-state one-step MC-PDFT table.
+def sa_mcpdft_table(mol, scf_builder, *, ncore, nact, nele, nroots,
+                    c0=None, max_steps=400, refine_max_iter=40,
+                    optimize_tol=None, refine_target=None,
+                    e2_scale=1.0, grid=None, grid_level=3, eval_xc=None):
+    """SA-CASSCF + per-state one-step MC-PDFT on an explicit window.
 
-    The orbital point is the equal-weight SA-CASSCF solution of
-    ``sa_nevpt2_table_from_mol`` -- same window rules, same convergence
-    -- and on it every root gets one tPBE evaluation from its own
-    density: the one-step MC-PDFT protocol of the DVS paper, whose
-    tables carry exactly these mcscf/nevpt2/tpbe columns.  The per-state
-    NEVPT2 corrections ride along (the SA machinery computes them for
-    the orbital point anyway), so the result is the complete
-    three-column table.
+    The window-explicit core of ``sa_mcpdft_table_from_mol``: the
+    equal-weight SA-CASSCF point -- optionally started from ``c0``, the
+    DVS scan passes its test orbitals there, which is the paper's
+    protocol -- then one tPBE evaluation per root from that root's own
+    density, on the canonical-basis orbitals the components return.
+    The per-state NEVPT2 corrections ride along.
 
-    The densities are evaluated on the canonical-basis orbitals the
-    components return (``out['C']``), through the same primitives the
-    ground-state chain uses (``core.mcpdft``; the jnp PBE kernel by
-    default); the frozen grid comes from ``kernel.frozen_grid``.
-
-    Returns the dict of ``sa_nevpt2_table_from_mol`` plus ``e_tpbe``
-    (per-root one-step energies); the groups gain ``dE_mcpdft`` (the
-    representative's vertical excitation, relative to root 0 like the
-    other two columns).
+    Returns ``window``, ``nmo``, ``npar``, ``ndet``, ``grad_norm``,
+    ``rows``, ``groups`` (with ``dE_casscf``/``dE_nevpt2``/
+    ``dE_mcpdft``), the raw ``out`` and ``e_tpbe``.
     """
     import numpy as np
     from jax import numpy as jnp
@@ -814,23 +823,26 @@ def sa_mcpdft_table_from_mol(mol, family, scf_builder, *, nroots,
     from ..core.nevpt2.impl import cas_dets_for2
     from ..core.orblib import orbital_pairs
     from .kernel import frozen_grid
-    from .orbitals import auto_window, converge_orbital_point
+    from .orbitals import converge_orbital_point
 
     nmo = mol.nao_nr()
-    mf = scf_builder(mol).run(verbose=0)
-    report = auto_window(mol, mf, family)
-    ncore = int(report['suggested_window']['ncore'])
-    nact = int(report['suggested_window']['nact'])
-    nele = int(mol.nelectron - 2 * ncore)
-
     pairs = orbital_pairs(ncore, nact, nmo, include_cv=True)
     dets = cas_dets_for2(ncore, nact, nele)
     comp = make_nevpt2_sa_theta_fn(mol, ncore, nact, nele, nmo, pairs,
                                    scf_builder, nroots=nroots,
-                                   e2_scale=e2_scale)
-    point = converge_orbital_point(lambda th: comp(th)['E_sa'],
-                                   len(pairs), max_steps=max_steps,
-                                   refine_max_iter=refine_max_iter)
+                                   e2_scale=e2_scale, c0=c0)
+    converge_kw = dict(max_steps=max_steps, refine_max_iter=refine_max_iter)
+    # The scan's rows only need the orbital point to ~1e-7: the SA energy
+    # is stationary there (second order) and the on-top column's leading
+    # sensitivity to the point is ~3e-3 per radian, so a looser target
+    # moves it by ~1e-10 Eh while cutting the Newton stage's evaluation
+    # count.  None keeps the standard targets for every other caller.
+    if optimize_tol is not None:
+        converge_kw['optimize_tol'] = float(optimize_tol)
+    if refine_target is not None:
+        converge_kw['refine_target'] = float(refine_target)
+    point = converge_orbital_point(lambda th: comp(th, want_e2=False)['E_sa'],
+                                   len(pairs), **converge_kw)
     out = comp(point.theta)
     rows, groups = sa_nevpt2_state_table(out, dets)
 
@@ -876,7 +888,46 @@ def sa_mcpdft_table_from_mol(mol, family, scf_builder, *, nroots,
     for g in groups:
         g['dE_mcpdft'] = float(e_tpbe[g['representative']] - e_tpbe[0])
     return {'window': {'ncore': ncore, 'nact': nact, 'nele': nele},
-            'frontier_report': report, 'nmo': nmo, 'npar': len(pairs),
+            'nmo': nmo, 'npar': len(pairs),
             'ndet': len(dets), 'grad_norm': float(point.grad_norm),
             'rows': rows, 'groups': groups, 'out': out,
             'e_tpbe': e_tpbe}
+
+
+def sa_mcpdft_table_from_mol(mol, family, scf_builder, *, nroots,
+                             max_steps=400, refine_max_iter=40,
+                             e2_scale=1.0, grid=None, grid_level=3,
+                             eval_xc=None):
+    """State-averaged CASSCF + per-state one-step MC-PDFT table.
+
+    The orbital point is the equal-weight SA-CASSCF solution of
+    ``sa_nevpt2_table_from_mol`` -- same window rules, same convergence
+    -- and on it every root gets one tPBE evaluation from its own
+    density: the one-step MC-PDFT protocol of the DVS paper, whose
+    tables carry exactly these mcscf/nevpt2/tpbe columns.  The per-state
+    NEVPT2 corrections ride along (the SA machinery computes them for
+    the orbital point anyway), so the result is the complete
+    three-column table.
+
+    The densities are evaluated on the canonical-basis orbitals the
+    components return (``out['C']``), through the same primitives the
+    ground-state chain uses (``core.mcpdft``; the jnp PBE kernel by
+    default); the frozen grid comes from ``kernel.frozen_grid``.
+
+    Returns the dict of ``sa_mcpdft_table`` plus ``frontier_report``;
+    the groups carry ``dE_mcpdft`` next to the other two columns.
+    """
+    from .orbitals import auto_window
+
+    nmo = mol.nao_nr()
+    mf = scf_builder(mol).run(verbose=0)
+    report = auto_window(mol, mf, family)
+    ncore = int(report['suggested_window']['ncore'])
+    nact = int(report['suggested_window']['nact'])
+    nele = int(mol.nelectron - 2 * ncore)
+    out = sa_mcpdft_table(mol, scf_builder, ncore=ncore, nact=nact,
+                          nele=nele, nroots=nroots, max_steps=max_steps,
+                          refine_max_iter=refine_max_iter, e2_scale=e2_scale,
+                          grid=grid, grid_level=grid_level, eval_xc=eval_xc)
+    out['frontier_report'] = report
+    return out
