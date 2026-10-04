@@ -7,8 +7,10 @@ suggested the window -- the suggestion is a suggestion, and a reader
 must be able to check it rather than trust it.
 
 Excitation energies are in eV above the reference (the lowest grouped
-state); the two columns are the CASSCF and the per-state NEVPT2
-vertical energies.
+state) -- the report contract is eV, and the caller converts from the
+tables' Hartree at the boundary.  The columns are the CASSCF and the
+per-state NEVPT2 vertical energies, plus the one-step MC-PDFT column
+when the caller supplies it (``dE_mcpdft`` on the states).
 """
 import json
 from dataclasses import dataclass, field
@@ -53,19 +55,24 @@ def _render_header(data):
 
 
 def _render_states(data):
+    has_mcpdft = any(s.get('dE_mcpdft') is not None for s in data.states)
     lines = [
         ' state  multiplicity   dE(CASSCF)/eV   dE(NEVPT2)/eV   '
-        'Sz components',
+        + ('dE(MC-PDFT)/eV   ' if has_mcpdft else '') + 'Sz components',
         '------  ------------   --------------   --------------   '
-        '-------------',
+        + ('----------------   ' if has_mcpdft else '') + '-------------',
     ]
     for s in data.states:
-        lines.append('{:>6}  {:>12}   {:>14}   {:>14}   {:>13}'.format(
+        row = '{:>6}  {:>12}   {:>14}   {:>14}   '.format(
             s.get('index', ''),
             s.get('multiplicity', ''),
             _fmt(s.get('dE_casscf'), '+.6f'),
-            _fmt(s.get('dE_nevpt2'), '+.6f'),
-            ','.join(str(x) for x in s.get('szs', [])) or '-'))
+            _fmt(s.get('dE_nevpt2'), '+.6f'))
+        if has_mcpdft:
+            row += '{:>16}   '.format(_fmt(s.get('dE_mcpdft'), '+.6f'))
+        row += '{:>13}'.format(','.join(str(x) for x in s.get('szs', []))
+                               or '-')
+        lines.append(row)
     lines.append('')
     return lines
 

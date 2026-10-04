@@ -46,3 +46,17 @@ def test_json_roundtrips_the_plain_fields():
     assert payload['states'][1]['dE_nevpt2'] == 3.97
     assert payload['frontier']['homo']['kind'] == 'lone'
     assert payload['family'] == 'npi'
+
+
+def test_the_on_top_column_appears_only_when_present():
+    from diffmrc.report.vee import render_vee_json, render_vee_text
+
+    d = _data()
+    assert 'MC-PDFT' not in render_vee_text(d)
+
+    d.states[1]['dE_mcpdft'] = 4.11
+    text = render_vee_text(d)
+    assert 'dE(MC-PDFT)/eV' in text
+    assert '+4.110000' in text
+    payload = json.loads(render_vee_json(d))
+    assert payload['states'][1]['dE_mcpdft'] == 4.11

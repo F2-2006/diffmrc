@@ -330,25 +330,32 @@ def _compute(atoms, charge, spin, active_space, params, level='fast'):
 
 def vertical_excitations_from_geometry(geometry_file, family, *, nroots=6,
                                        charge=0, spin=0, basis='6-31g',
-                                       max_steps=400, refine_max_iter=40):
+                                       max_steps=400, refine_max_iter=40,
+                                       method='casci'):
     """A vertical-excitation table from a geometry file, one call.
 
     The state-averaged companion of ``run_from_geometry``.  The active
     window is suggested by the frontier identity rules
     (``driver.orbitals.auto_window``) for one excitation family --
     ``'npi'`` (lone pair to pi*) or ``'ppi'`` (pi to pi*) -- the
-    orbital point comes from the two-stage convergence, and NEVPT2 is
-    evaluated per state.  The frontier report that suggested the window
-    is returned with the table so the suggestion can be checked.
+    orbital point comes from the two-stage convergence, and the
+    correlation columns are evaluated per state.  The frontier report
+    that suggested the window is returned with the table so the
+    suggestion can be checked.
 
-    The reference is a closed-shell RHF; ``spin`` must be 0.  Returns
-    the dict of ``driver.nevpt2.sa_nevpt2_table_from_mol`` --
+    ``method='mcpdft'`` switches the table factory to
+    ``sa_mcpdft_table_from_mol``: the same SA-CASSCF orbital point,
+    with the per-state one-step MC-PDFT column added (the groups gain
+    ``dE_mcpdft``); the default keeps the NEVPT2 table only.
+
+    The reference is a closed-shell RHF; ``spin`` must be 0.  All
+    excitation energies in the returned tables are in Hartree; the
+    report layer converts to eV.  Returns the dict of
+    ``driver.nevpt2.sa_nevpt2_table_from_mol`` --
     ``window``, ``frontier_report``, ``grad_norm``, ``rows``,
     ``groups`` and the raw ``out``.
     """
     from pyscfad import gto, scf as pscf
-
-    from .nevpt2 import sa_nevpt2_table_from_mol
 
     atoms = read_xyz(geometry_file)
     mol = gto.Mole()
@@ -361,6 +368,12 @@ def vertical_excitations_from_geometry(geometry_file, family, *, nroots=6,
     def builder(m):
         return pscf.RHF(m)
 
+    if method == 'mcpdft':
+        from .nevpt2 import sa_mcpdft_table_from_mol
+        return sa_mcpdft_table_from_mol(
+            mol, family, builder, nroots=nroots, max_steps=max_steps,
+            refine_max_iter=refine_max_iter)
+    from .nevpt2 import sa_nevpt2_table_from_mol
     return sa_nevpt2_table_from_mol(
         mol, family, builder, nroots=nroots, max_steps=max_steps,
         refine_max_iter=refine_max_iter)

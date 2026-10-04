@@ -31,6 +31,10 @@ EXIT_BAD_INPUT = 2
 
 _LEVELS = ('fast', 'robust')
 
+# CODATA Hartree-to-eV conversion; the same value the M5-C batch scripts
+# carry, and the one the VEE report's eV column is measured with.
+_HARTREE_TO_EV = 27.211386245988
+
 
 def build_parser():
     """Build the argument parser, with defaults from the parameter table."""
@@ -347,7 +351,13 @@ def _run_vee(args):
     ground-state state machine does not apply: the table's trust
     carriers are the orbital-gradient norm and the frontier report,
     both of which travel in the output.
+
+    The tables carry Hartree; the report contract is eV, so the
+    conversion happens here, at the boundary.  ``--method mcpdft``
+    switches the table to the one-step MC-PDFT variant and the report
+    gains its column.
     """
+    from ..policy.params import effective
     from ..report.vee import (VeeReportData, render_vee_json,
                               render_vee_text)
 
@@ -361,9 +371,17 @@ def _run_vee(args):
         return EXIT_FAILED
 
     try:
+        params = effective(_param_overrides(args))
+    except ValueError as exc:
+        sys.stderr.write(f'diffmrc: {exc}\n')
+        return EXIT_BAD_INPUT
+    method = str(params['method'])
+
+    try:
         out = vertical_excitations_from_geometry(
             geometry_file=args.geometry, family=args.vee,
-            nroots=args.nroots, charge=args.charge, spin=args.spin)
+            nroots=args.nroots, charge=args.charge, spin=args.spin,
+            basis=str(params['basis']), method=method)
     except Exception as exc:
         sys.stderr.write(
             f'diffmrc: the calculation failed: {type(exc).__name__}: '
@@ -371,24 +389,39 @@ def _run_vee(args):
         )
         return EXIT_FAILED
 
+    def _ev(value):
+        if value is None:
+            return None
+        return float(value) * _HARTREE_TO_EV
+
+    states = []
+    for i, g in enumerate(out.get('groups', [])):
+        state = {
+            'index': i,
+            'multiplicity': g.get('multiplicity'),
+            'szs': list(g.get('szs', [])),
+            'dE_casscf': _ev(g.get('dE_casscf')),
+            'dE_nevpt2': _ev(g.get('dE_nevpt2')),
+        }
+        if method == 'mcpdft':
+            state['dE_mcpdft'] = _ev(g.get('dE_mcpdft'))
+        states.append(state)
+    protocol = ('equal-weight SA-CASSCF, per-state NEVPT2'
+                if method != 'mcpdft' else
+                'equal-weight SA-CASSCF, per-state one-step MC-PDFT (tPBE) '
+                'and NEVPT2')
+
     data = VeeReportData(
         geometry=args.geometry,
         family=args.vee,
         window=out.get('window', {}),
         grad_norm=out.get('grad_norm', float('nan')),
-        states=[
-            {
-                'index': i,
-                'multiplicity': g.get('multiplicity'),
-                'szs': list(g.get('szs', [])),
-                'dE_casscf': g.get('dE_casscf'),
-                'dE_nevpt2': g.get('dE_nevpt2'),
-            }
-            for i, g in enumerate(out.get('groups', []))
-        ],
+        states=states,
         frontier=out.get('frontier_report', {}),
-        provenance={'basis': '6-31g', 'reference': 'RHF',
-                    'protocol': 'equal-weight SA-CASSCF, per-state NEVPT2'},
+        provenance={'basis': str(params['basis']), 'reference': 'RHF',
+                    'protocol': protocol,
+                    'dE_unit': 'eV',
+                    'hartree_to_ev': _HARTREE_TO_EV},
     )
     os.makedirs(args.outdir, exist_ok=True)
     with open(os.path.join(args.outdir, 'diffmrc_vee.txt'), 'w',

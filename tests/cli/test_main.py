@@ -192,3 +192,79 @@ def test_parser_rejects_an_unknown_excitation_family():
 
     with pytest.raises(SystemExit):
         build_parser().parse_args(['mol.xyz', '--vee', 'banana'])
+
+
+def test_the_vee_report_converts_hartree_to_ev(tmp_path):
+    """The tables carry Hartree; the report contract is eV.
+
+    Found while wiring the on-top column (t388): the released CLI
+    printed Hartree numbers under an eV header, off by 27.2x. The
+    conversion lives here, at the boundary, for every column.
+    """
+    import json
+
+    import diffmrc.cli.main as main_mod
+    from diffmrc.driver import run as run_mod
+
+    p = _write(tmp_path)
+    out = {
+        'window': {'ncore': 7, 'nact': 2, 'nele': 2},
+        'grad_norm': 1e-10,
+        'groups': [
+            {'multiplicity': 1, 'szs': [0.0],
+             'dE_casscf': 0.0, 'dE_nevpt2': 0.0, 'dE_mcpdft': 0.0},
+            {'multiplicity': 3, 'szs': [0.0, 1.0],
+             'dE_casscf': 0.105129, 'dE_nevpt2': 0.129004,
+             'dE_mcpdft': 0.129026},
+        ],
+        'frontier_report': {},
+    }
+    original = run_mod.vertical_excitations_from_geometry
+    run_mod.vertical_excitations_from_geometry = lambda **k: out
+    try:
+        rc = main_mod.main([str(p), '--vee', 'npi', '--nroots', '2',
+                            '--method', 'mcpdft',
+                            '--outdir', str(tmp_path)])
+    finally:
+        run_mod.vertical_excitations_from_geometry = original
+    assert rc == 0
+
+    payload = json.loads(
+        (tmp_path / 'diffmrc_vee.json').read_text(encoding='utf-8'))
+    h2ev = 27.211386245988
+    assert abs(payload['states'][1]['dE_casscf'] - 0.105129 * h2ev) < 1e-9
+    assert abs(payload['states'][1]['dE_nevpt2'] - 0.129004 * h2ev) < 1e-9
+    assert abs(payload['states'][1]['dE_mcpdft'] - 0.129026 * h2ev) < 1e-9
+    assert payload['provenance']['dE_unit'] == 'eV'
+    assert 'one-step' in payload['provenance']['protocol']
+    text = (tmp_path / 'diffmrc_vee.txt').read_text(encoding='utf-8')
+    assert 'dE(MC-PDFT)/eV' in text
+
+
+def test_the_vee_report_omits_the_on_top_column_by_default(tmp_path):
+    import json
+
+    import diffmrc.cli.main as main_mod
+    from diffmrc.driver import run as run_mod
+
+    p = _write(tmp_path)
+    out = {
+        'window': {'ncore': 7, 'nact': 2, 'nele': 2},
+        'grad_norm': 1e-10,
+        'groups': [{'multiplicity': 1, 'szs': [0.0],
+                    'dE_casscf': 0.0, 'dE_nevpt2': 0.0}],
+        'frontier_report': {},
+    }
+    original = run_mod.vertical_excitations_from_geometry
+    run_mod.vertical_excitations_from_geometry = lambda **k: out
+    try:
+        rc = main_mod.main([str(p), '--vee', 'npi', '--outdir',
+                            str(tmp_path)])
+    finally:
+        run_mod.vertical_excitations_from_geometry = original
+    assert rc == 0
+    payload = json.loads(
+        (tmp_path / 'diffmrc_vee.json').read_text(encoding='utf-8'))
+    assert 'dE_mcpdft' not in payload['states'][0]
+    text = (tmp_path / 'diffmrc_vee.txt').read_text(encoding='utf-8')
+    assert 'MC-PDFT' not in text
