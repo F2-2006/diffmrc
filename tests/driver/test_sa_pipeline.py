@@ -355,7 +355,7 @@ def test_sa_mcpdft_table_matches_the_engine_per_state():
     The engine sits at exactly our point, so the comparison isolates the
     table's densities and on-top evaluation -- measured 3e-14 (t387).
     """
-    from pyscf import gto, mcpdft
+    from pyscf import gto, mcpdft, scf
 
     from diffmrc.driver.nevpt2 import sa_mcpdft_table_from_mol
 
