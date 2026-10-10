@@ -71,11 +71,21 @@ def make_dm123_sf(c_ci, dets, ncas=2, ncore=0):
     built from single-excitation masks and fermionic phases, as in the CI
     solver.
     """
-    nso = 2 * (ncore + ncas)
+    # Active-relative bitmap (fix, 2026-10-10): the determinant bitmaps from
+    # ``cas_dets_for2`` span the full SO space (2*(ncore+ncas) bits), and
+    # ``jnp.asarray`` overflows int64 once nao grows (LaF/cc-pVTZ-DK: 350
+    # bits -> OverflowError: Python int too large to convert to C long).
+    # Shift the fixed core bits out before the conversion; only the 2*ncas
+    # active bits are ever consumed below.  The shift is exact: the core
+    # columns are constant one (they contribute nothing to the difference
+    # masks) and their phase offset enters pos_p and pos_q as 2*ncore each,
+    # i.e. 4*ncore in the parity -- even, so every sign is unchanged.
+    # This mirrors the segmented-string principle of pyscf's cistring:
+    # each segment stays bounded instead of one huge integer.
+    nso = 2 * ncas
     ndet = len(dets)
-    # ---- Occupation bitmap. The determinants are integer bitmaps, so they
-    #      are decomposed by bitwise AND rather than used as indices. ----
-    det_arr = jnp.asarray(dets, dtype=int)[:, None]      # (ndet, 1)
+    det_arr = jnp.asarray([int(d) >> (2 * ncore) for d in dets],
+                          dtype=int)[:, None]        # (ndet, 1)
     occ_bit = (det_arr & (1 << jnp.arange(nso))[None, :]) != 0  # (ndet, nso) bool
     # ---- Single-excitation matching: a^dag_p a_q with q in D_J, p not in D_J,
     #      and D_I = D_J - {q} + {p} ----
@@ -112,8 +122,8 @@ def make_dm123_sf(c_ci, dets, ncas=2, ncore=0):
     for p in range(ncas):
         for q in range(ncas):
             dm1 = dm1.at[p, q].set(
-                jnp.einsum("i,ij,j->", c_ci, slice_M(2 * (ncore + p), 2 * (ncore + q)), c_ci)
-                + jnp.einsum("i,ij,j->", c_ci, slice_M(2 * (ncore + p) + 1, 2 * (ncore + q) + 1), c_ci))
+                jnp.einsum("i,ij,j->", c_ci, slice_M(2 * p, 2 * q), c_ci)
+                + jnp.einsum("i,ij,j->", c_ci, slice_M(2 * p + 1, 2 * q + 1), c_ci))
     # ---- dm2 and dm3 in density order; the contraction formulas are as usual ----
     dm2 = jnp.zeros((ncas, ncas, ncas, ncas))
     for p in range(ncas):
@@ -123,8 +133,8 @@ def make_dm123_sf(c_ci, dets, ncas=2, ncore=0):
                     val = jnp.zeros(())
                     for sig in (0, 1):
                         for tau in (0, 1):
-                            Mp = slice_M(2 * (ncore + p) + sig, 2 * (ncore + q) + sig)
-                            Mr = slice_M(2 * (ncore + r) + tau, 2 * (ncore + s) + tau)
+                            Mp = slice_M(2 * p + sig, 2 * q + sig)
+                            Mr = slice_M(2 * r + tau, 2 * s + tau)
                             val = val + jnp.einsum("i,ik,kj,j->", c_ci, Mp, Mr, c_ci)
                     dm2 = dm2.at[p, q, r, s].set(val)
     dm3 = jnp.zeros((ncas,) * 6)
@@ -138,9 +148,9 @@ def make_dm123_sf(c_ci, dets, ncas=2, ncore=0):
                             for sig in (0, 1):
                                 for tau in (0, 1):
                                     for ups in (0, 1):
-                                        Mp = slice_M(2 * (ncore + p) + sig, 2 * (ncore + q) + sig)
-                                        Mr = slice_M(2 * (ncore + r) + tau, 2 * (ncore + s) + tau)
-                                        Mt = slice_M(2 * (ncore + t) + ups, 2 * (ncore + u) + ups)
+                                        Mp = slice_M(2 * p + sig, 2 * q + sig)
+                                        Mr = slice_M(2 * r + tau, 2 * s + tau)
+                                        Mt = slice_M(2 * t + ups, 2 * u + ups)
                                         val = val + jnp.einsum("i,ik,kl,lj,j->",
                                                                c_ci, Mp, Mr, Mt, c_ci)
                             dm3 = dm3.at[p, q, r, s, t, u].set(val)
