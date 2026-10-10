@@ -64,11 +64,54 @@ USED BY
   excited part of a block free of bit-exact pairs, and the raw rule is NaN
   through those pairs even though only column 0 is consumed.
 """
+import json as _json
+import os as _os
+
 import jax
 jax.config.update("jax_enable_x64", True)
 from jax import numpy as jnp
+import numpy as _np
 
-__all__ = ['eigh_safe', 'make_eigh_mask', 'eigh_mask', 'eigh_cluster_ift']
+__all__ = ['eigh_safe', 'make_eigh_mask', 'eigh_mask', 'eigh_cluster_ift',
+           'set_trace_sink']
+
+# Diagnostic hook (added 2026-10-10 after the t397 lesson: the
+# cluster-member scan had to monkey-patch this frozen module from
+# outside, missed two other module-level bindings of the same functions,
+# and silently recorded nothing). The sink belongs inside the kernel:
+# it records every call as one JSON line and never alters a return
+# value -- every failure inside it is swallowed, so a trace can never
+# change a calculation.
+_TRACE_SINK = None
+
+
+def set_trace_sink(path):
+    """Record kernel eigh calls as JSON lines to ``path`` (None = off).
+
+    ``DIFFMRC_EIGH_TRACE`` seeds the same sink at import time. The hook
+    is diagnostics only: values and derivatives are untouched.
+    """
+    global _TRACE_SINK
+    _TRACE_SINK = path
+
+
+def _trace_call(name, a):
+    sink = _TRACE_SINK or _os.environ.get('DIFFMRC_EIGH_TRACE')
+    if not sink:
+        return
+    try:
+        arr = _np.asarray(a)             # raises under tracing; swallowed
+        if arr.ndim != 2 or arr.shape[0] < 2:
+            return
+        w = _np.sort(_np.linalg.eigvalsh(arr))
+        gaps = _np.diff(w)
+        rec = {'solver': name, 'n': int(w.size),
+               'min_gap': float(gaps.min()),
+               'n_near': int((gaps < 1e-6).sum())}
+        with open(sink, 'a', encoding='utf-8') as fh:
+            fh.write(_json.dumps(rec) + '\n')
+    except Exception:
+        pass
 
 
 @jax.custom_jvp
@@ -79,6 +122,7 @@ def eigh_safe(a):
     replaced (see the module docstring for the rule, its measurements and
     its first-order scope).
     """
+    _trace_call('eigh_safe', a)
     return jnp.linalg.eigh(a)
 
 
@@ -121,6 +165,7 @@ def make_eigh_mask(tol=1e-6):
     """
     @jax.custom_jvp
     def eigh_mask(a):
+        _trace_call('eigh_mask', a)
         return jnp.linalg.eigh(a)
 
     @eigh_mask.defjvp
@@ -173,6 +218,7 @@ def eigh_cluster_ift(a, tol=1e-8):
     gap; on the CO chain the clusters are bit-exact (1e-15) and the
     smallest real gap is 1.5e-2, so the default 1e-8 is safe.
     """
+    _trace_call('eigh_cluster_ift', a)
     w, u = jnp.linalg.eigh(a)
     w_sg = jax.lax.stop_gradient(w)
     u_sg = jax.lax.stop_gradient(u)

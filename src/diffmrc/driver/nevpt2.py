@@ -41,6 +41,13 @@ Two entry points share the same core (``_components_from``):
 """
 import numpy as np
 
+# Kernel symbols are imported at module level by discipline: the t397
+# trace tool missed this file while this import was function-scoped, and
+# the same mistake would hide any future kernel use from a static audit
+# (tests/core/test_kernel_binding.py enforces the rule). Heavy optional
+# dependencies keep the deferred style -- see ``run.py`` for why.
+from ..core.eigh import eigh_cluster_ift, eigh_safe
+
 __all__ = ['make_nevpt2_joint_fn', 'make_nevpt2_theta_fn',
            'nevpt2_nuclear_gradient', 'nevpt2_hvp',
            'nevpt2_relaxed_hessian']
@@ -188,7 +195,6 @@ def canonicalize_sa_jax(C, h1e, eri, CIs, *, ncore, nact, nele, occ2_idx=(),
     """
     from jax import numpy as jnp
 
-    from ..core.eigh import eigh_cluster_ift, eigh_safe
     from ..core.nevpt2.impl import cas_dets_for2, make_dm123_sf
 
     eig = eigh_cluster_ift if eig_solver == 'lanczos' else eigh_safe
