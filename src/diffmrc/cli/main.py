@@ -376,6 +376,8 @@ def _run_vee(args):
         sys.stderr.write(f'diffmrc: {exc}\n')
         return EXIT_BAD_INPUT
     method = str(params['method'])
+    from ..policy.methods import method_spec
+    spec = method_spec(method)
 
     try:
         out = vertical_excitations_from_geometry(
@@ -403,17 +405,10 @@ def _run_vee(args):
             'dE_casscf': _ev(g.get('dE_casscf')),
             'dE_nevpt2': _ev(g.get('dE_nevpt2')),
         }
-        if method in ('mcpdft', 'mcpdft0'):
+        if spec.on_top:
             state['dE_mcpdft'] = _ev(g.get('dE_mcpdft'))
         states.append(state)
-    if method == 'mcpdft0':
-        protocol = ('equal-weight SA-CASSCF, per-state NEVPT2 with the '
-                    'one-step tPBE0 column (0.25-mixed)')
-    elif method == 'mcpdft':
-        protocol = ('equal-weight SA-CASSCF, per-state one-step MC-PDFT '
-                    '(tPBE) and NEVPT2')
-    else:
-        protocol = 'equal-weight SA-CASSCF, per-state NEVPT2'
+    protocol = spec.vee_protocol
 
     data = VeeReportData(
         geometry=args.geometry,
@@ -473,8 +468,10 @@ def _to_report(args, params, result):
             suggestions=list(decision.suggestions),
         )
 
+    from ..policy.methods import on_top_method
+
     on_top = {}
-    if algo.get('method') in ('mcpdft', 'mcpdft0'):
+    if on_top_method(algo.get('method')):
         on_top = {k: algo.get(k) for k in
                   ('method', 'protocol', 'hyb', 'e_casscf', 'e_ot',
                    'e_mcwfn')}

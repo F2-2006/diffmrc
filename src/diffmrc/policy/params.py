@@ -19,6 +19,8 @@ engineering limit.
 """
 from dataclasses import dataclass, field
 
+from .methods import METHODS
+
 __all__ = ['Param', 'EffectiveParams', 'PARAMS', 'defaults', 'validate',
            'effective']
 
@@ -95,7 +97,7 @@ _PARAM_LIST = [
           'MC-PDFT protocol of the DVS paper (A. Wardzala, B. King, '
           'L. Gagliardi, JPCA 2025, doi 10.1021/acs.jpca.4c08597); '
           'mcpdft0 is its 0.25 hybrid (tPBE0)',
-          'driver', choices=('casci', 'mcpdft', 'mcpdft0')),
+          'driver', choices=tuple(METHODS)),
     Param('multistart_tries', 4,
           'starting points tried at the robust level; the variationally '
           'lowest point is kept. A single start from the reference '

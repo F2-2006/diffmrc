@@ -590,9 +590,10 @@ def compute_ground_state(atoms, charge, spin, active_space, params,
     n_doubly = sum(1 for i in space.active if occ[i] > 1.5)
     energy = float(point.energy)
     e_casscf = energy
-    method_data = {'method': 'casci'}
-    method = str(_value('method', 'casci'))
-    if method in ('mcpdft', 'mcpdft0'):
+    from ..policy.methods import method_spec
+    spec = method_spec(_value('method', 'casci'))
+    method_data = {'method': spec.name}
+    if spec.on_top:
         # One-step MC-PDFT (the DVS paper's protocol): the orbitals are
         # the CASSCF-driven ones just converged, and the on-top energy
         # is evaluated once at that point. The self-checks below still
@@ -602,18 +603,13 @@ def compute_ground_state(atoms, charge, spin, active_space, params,
         # 0.25 hybrid: E = 0.75 E_tPBE + 0.25 E_CASSCF at the same
         # orbitals (the RDM split of the engine's E_x + E_c; anchors
         # 8.9e-16 on H2/STO-3G, t391).
-        hyb = 0.25 if method == 'mcpdft0' else 0.0
-        terms, _ = mcpdft_terms_function(mol, C, space, hyb=hyb)
+        terms, _ = mcpdft_terms_function(mol, C, space, hyb=spec.hyb)
         E_tot, E_ot, E_mcwfn, _ = (float(x) for x in terms(point.theta))
         energy = E_tot
         method_data = dict(
-            method=method,
-            protocol=('one-step: CASSCF-driven orbitals, one on-top '
-                      'evaluation (tPBE)' if not hyb else
-                      'one-step: CASSCF-driven orbitals, one on-top '
-                      'evaluation (tPBE), 0.25-mixed with the CASSCF '
-                      'energy (tPBE0)'),
-            hyb=hyb,
+            method=spec.name,
+            protocol=spec.ground_protocol,
+            hyb=spec.hyb,
             e_casscf=e_casscf,
             e_ot=E_ot,
             e_mcwfn=E_mcwfn,

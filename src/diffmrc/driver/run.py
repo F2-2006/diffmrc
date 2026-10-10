@@ -369,12 +369,13 @@ def vertical_excitations_from_geometry(geometry_file, family, *, nroots=6,
     def builder(m):
         return pscf.RHF(m)
 
-    if method in ('mcpdft', 'mcpdft0'):
+    from ..policy.methods import method_spec
+    spec = method_spec(method)
+    if spec.on_top:
         from .nevpt2 import sa_mcpdft_table_from_mol
         return sa_mcpdft_table_from_mol(
             mol, family, builder, nroots=nroots, max_steps=max_steps,
-            refine_max_iter=refine_max_iter,
-            hyb=(0.25 if method == 'mcpdft0' else 0.0))
+            refine_max_iter=refine_max_iter, hyb=spec.hyb)
     from .nevpt2 import sa_nevpt2_table_from_mol
     return sa_nevpt2_table_from_mol(
         mol, family, builder, nroots=nroots, max_steps=max_steps,
