@@ -69,6 +69,14 @@ import os as _os
 
 import jax
 jax.config.update("jax_enable_x64", True)
+# JAX 持久编译缓存（性能，2026-10-10）：批处理每分子一个进程时，jit 编译
+# （实测 E 1797 s / grad 2960 s / hvp 16827 s，t393）此前每进程重付；
+# 设 DIFFMRC_JAX_CACHE=<dir> 后跨进程复用（首进程编译、后续命中）。
+# 配置级改动，零数值影响；与本模块探针同一「允许的 core 例外」类别。
+_jax_cache = _os.environ.get('DIFFMRC_JAX_CACHE')
+if _jax_cache:
+    jax.config.update('jax_compilation_cache_dir', _jax_cache)
+    jax.config.update('jax_persistent_cache_min_compile_time_secs', 1.0)
 from jax import numpy as jnp
 import numpy as _np
 
