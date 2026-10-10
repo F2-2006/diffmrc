@@ -108,8 +108,9 @@ __all__ = ['lowest_eigpair_lanczos']
 # Below this Krylov coefficient the new direction is treated as exhausted
 # (the space has closed onto an invariant subspace) and the basis is
 # refilled from a deterministic generic vector. Both the division and the
-# refill normalization carry denominator floors, per the untaken-branch
-# rule (memory `where-untaken-branch-nan`).
+# refill normalization carry denominator floors: a raw 0/0 in the untaken
+# branch of a where() still reaches the reverse pass as 0 * inf and
+# infects the selected branch.
 _BETA_FLOOR = 1e-10
 _FILL_SEED = 1.7
 _FILL_SEED2 = 2.9

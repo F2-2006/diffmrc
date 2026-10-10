@@ -1,7 +1,9 @@
 """Fourth-order density contraction for the f3ca and f3ac intermediates.
 
-The contraction was derived from the semantics of the reference C
-implementation and validated against it to machine precision on H2 CAS(2,2).
+The contraction was derived from the semantics of PySCF's C kernels
+(``libmc``/``libfci``, called directly through ctypes during
+development) and validated against them to machine precision on H2
+CAS(2,2) -- a semantic reimplementation, not a copy of their sources.
 
     t1[s, i, a]       = <det_a[stra_id], det_b[strb_id+s] | E^i_a | ci>
     t2[k, i, a, j, l] = <det_a[stra_id], det_b[strb_id+k] | E^i_a E^j_l | ci>
