@@ -33,14 +33,21 @@ import numpy as np                                              # noqa: E402
 
 from diffmrc.policy.rules import molecular_end_candidate        # noqa: E402
 
+#: The cached SCF/orbital data written by the t176 batch; point this at
+#: the directory holding the t176cache_*.npz files (the experiment
+#: skips a system when its cache is absent).
+_CACHE_DIR = os.environ.get('DIFFMRC_EXPERIMENT_CACHE', '.')
+
 SYSTEMS = {
     'EuF': ("Eu 0 0 0; F 0 0 2.06", 8, 'F',
-            '/path/to/results/t176cache_EuF_mol_atom+default_scf.npz',
+            os.path.join(_CACHE_DIR,
+                         't176cache_EuF_mol_atom+default_scf.npz'),
             dict(n_singly=8, n_centre=8, n_ligand=3, n_active=11,
                  n_electrons=14, centre_counts={'Eu-f': 6, 'Eu-s': 1,
                                                 'Eu-d': 1})),
     'EuO': ("Eu 0 0 0; O 0 0 1.81", 7, 'O',
-            '/path/to/results/t176cache_EuO_mol_atom+default_scf.npz',
+            os.path.join(_CACHE_DIR,
+                         't176cache_EuO_mol_atom+default_scf.npz'),
             None),   # expectations unknown until the cache exists
 }
 
