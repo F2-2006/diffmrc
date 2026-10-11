@@ -229,3 +229,24 @@ def test_the_pair_density_is_core_shift_invariant():
     shifted = [(p << (2 * ncore)) | core for p in patterns]
     rho_shifted = pair_density(c, shifted, 0, 1, ncore=ncore, nact=nact)
     assert np.allclose(rho_shifted, rho_small, atol=1e-12)
+
+
+def test_dets_and_vector_from_fci_matches_hand_computed_layout():
+    """ncore=1, nact=2: active j=0 -> bits 2 (alpha) / 3 (beta), j=1 ->
+    bits 4 / 5; enumeration alpha outer, beta inner, both ascending."""
+    from diffmrc.analysis.ci import dets_and_vector_from_fci
+
+    alpha = [0b01, 0b10]
+    beta = [0b01, 0b10]
+    ci = np.array([[0.7, 0.1], [0.1, 0.7071]])
+    dets, c = dets_and_vector_from_fci(ci, alpha, beta, ncore=1, nact=2)
+    assert dets == [12, 36, 24, 48]
+    assert np.allclose(c, [0.7, 0.1, 0.1, 0.7071])
+
+
+def test_the_fci_vector_length_must_match_the_string_lists():
+    from diffmrc.analysis.ci import dets_and_vector_from_fci
+
+    with pytest.raises(ValueError, match='do not belong'):
+        dets_and_vector_from_fci(np.zeros(3), [0b01, 0b10], [0b01, 0b10],
+                                 ncore=0, nact=2)

@@ -23,7 +23,7 @@ from .entropy import single_orbital_entropy
 
 __all__ = ['occupation_masks', 'occupations_from_ci', 'entropy_from_ci',
            'pair_scatter', 'pair_density', 'two_orbital_entropy',
-           'mutual_information']
+           'mutual_information', 'dets_and_vector_from_fci']
 
 
 def occupation_masks(dets, ncore=0, nact=2):
@@ -192,6 +192,46 @@ def two_orbital_entropy(c_ci, dets, i, j, ncore=0, nact=2):
     w = np.linalg.eigvalsh(0.5 * (rho + rho.T))
     w = w[w > 1e-14]
     return float(-(w * np.log(w)).sum())
+
+
+def dets_and_vector_from_fci(ci, alpha_strings, beta_strings, ncore, nact):
+    """This package's (dets, c) from a PySCF FCI vector.
+
+    PySCF's CI strings carry one bit per spatial orbital of the active
+    space; this package's determinant bit s is spin orbital s, with the
+    active orbital j's alpha at bit ``2 * (ncore + j)`` and beta at the
+    next bit.  The enumeration order (alpha outer, beta inner, both
+    ascending) matches the C-order flatten of the PySCF civec, so the
+    returned coefficient vector is index-matched to the determinant
+    list by construction -- the two are returned together because
+    splitting them into paired calls is exactly how an order mismatch
+    sneaks in.  No PySCF import: the strings are plain integers, which
+    keeps this in the analysis layer.
+
+    Graduated from the experiment scripts (2026-10-11); a caller holds
+    the strings from ``pyscf.fci.cistring`` and passes them in.
+    """
+    def remap(strings, shift):
+        table = {}
+        for s in strings:
+            g = 0
+            for k in range(nact):
+                if (int(s) >> k) & 1:
+                    g |= 1 << (2 * (ncore + k) + shift)
+            table[int(s)] = g
+        return table
+
+    amap = remap(alpha_strings, 0)
+    bmap = remap(beta_strings, 1)
+    dets = [amap[int(sa)] | bmap[int(sb)]
+            for sa in alpha_strings for sb in beta_strings]
+    c = np.asarray(ci, dtype=float).flatten()
+    if c.shape[0] != len(dets):
+        raise ValueError(
+            f'the FCI vector flattens to {c.shape[0]} entries for '
+            f'{len(dets)} determinants; the string lists and the vector '
+            f'do not belong together')
+    return dets, c
 
 
 def mutual_information(c_ci, dets, ncore=0, nact=2):
