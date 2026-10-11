@@ -2,7 +2,7 @@
 """MC-PDFT on-top energy (tPBE) on a frozen grid -- jnp, differentiable.
 
 Value layer and first derivatives are validated against the pyscf engine
-(t344/t355/t379 in the project worked examples):
+(t344/t355/t379 in this project's worked examples):
 
   - translation convention (Li Manni et al. 2014; pyscf
     ``get_rho_translated``): gradient rows follow
