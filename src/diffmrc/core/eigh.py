@@ -43,16 +43,27 @@ so forward-over-reverse keeps the raw 1/diff and overflows to NaN as soon
 as something consumes the eigenvectors -- while segments that only consume
 the eigenvalues look fine because the offending tangent is dead code (t219).
 
-SCOPE: first order only. Micro-tested 2026-09-24 on a bit-exact pair: this
-rule is finite for both the eigenvalue and the eigenvector paths, including
-when the degeneracy lies away from the consumed column, whereas the raw
-rule is NaN in all of those configurations. Second derivatives remain NaN
--- for eigenvalue-only functionals too, and for eigh, eigvalsh and this
-rule alike -- because the outer differentiation mode re-enters the primal
-decomposition and the raw 1/diff returns. A second-order-safe decomposition
-needs an explicit second-order rule; until then, second-order quantities on
-systems with bit-exact degeneracies must avoid the decomposition (finite
-differences of the first-order gradient are the interim route).
+SCOPE: first order under THIS rule. Micro-tested 2026-09-24 on a bit-exact
+pair: this rule is finite for both the eigenvalue and the eigenvector paths,
+including when the degeneracy lies away from the consumed column, whereas
+the raw rule is NaN in all of those configurations. Second derivatives
+remain NaN under this rule (and under ``eigh_mask``) -- for eigenvalue-only
+functionals too, and for eigh, eigvalsh and the two rules alike -- because
+the outer differentiation mode re-enters the primal decomposition and the
+raw 1/diff returns.
+
+The explicit second-order rule is ``eigh_cluster_ift`` below: it removes
+the decomposition from the differentiated path entirely (stopped primal +
+implicit per-column correction), so the second derivative is self-
+consistent. The boundary audit (t57, 2026-10-11, N2 CAS(6,6) with
+bit-exact degeneracies) measured HVP finiteness across four directions:
+under the IFT route all three completed directions were finite
+(|HVP| = 1.2e5 .. 6.6e5, 0 NaN entries), while ``eigh_mask`` returned
+NaN in every direction (204/204). Second-order quantities on degenerate
+systems should therefore route through ``eigh_cluster_ift``; the finite
+values still carry large condition numbers (magnitudes ~1e5 on N2), so
+regularization awareness remains part of the contract. Finite differences
+of the first-order gradient stay the independent cross-check.
 
 USED BY
 
