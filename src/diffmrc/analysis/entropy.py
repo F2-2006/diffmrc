@@ -36,6 +36,38 @@ LN4 = float(np.log(4.0))
 MAX_ENTROPY = LN4
 
 
+def eigenvalue_entropy(w, xp=None):
+    """``-sum w ln w`` over the positive eigenvalues of a spectrum.
+
+    The entropy formula shared by the four occupation weights and the
+    16 eigenvalues of a pair density; separated here so the numpy and
+    the differentiable routes run one expression instead of two free to
+    drift apart. Negative round-off is clipped to zero; the log takes a
+    protected argument so a zero eigenvalue cannot send ``0 * log(0)``
+    through a backward pass (the same guard as in
+    ``single_orbital_entropy``).
+
+    Parameters
+    ----------
+    w : array_like
+        Eigenvalues (any one-dimensional array works; only positive
+        entries contribute).
+    xp : module, optional
+        Array backend; defaults to numpy.
+
+    Returns
+    -------
+    float (numpy) or scalar array (jax)
+    """
+    if xp is None:
+        xp = np
+    w = xp.maximum(xp.asarray(w, dtype=float), 0.0)
+    positive = w > 0.0
+    contrib = xp.where(positive,
+                       w * xp.log(xp.where(positive, w, 1.0)), 0.0)
+    return -contrib.sum()
+
+
 def single_orbital_entropy(n_a, n_b, p2, xp=None):
     """Compute the single-orbital entropy for a set of orbitals.
 

@@ -109,6 +109,118 @@ def test_the_entropy_factory_matches_the_direct_extraction():
     assert np.allclose(s_factory, s_direct, atol=1e-12)
 
 
+def _scatters_for(dets, nact):
+    from diffmrc.analysis.ci import pair_scatter
+    return {(i, j): pair_scatter(dets, i, j, 0, nact)
+            for i in range(nact) for j in range(i + 1, nact)}
+
+
+def test_the_jax_pair_density_matches_the_numpy_one():
+    from diffmrc.analysis.ci import pair_density, pair_scatter
+    from diffmrc.driver.entropy import pair_density_from_scatter
+
+    dets, c = _sz0_vector(0, 4, 4)
+    inv, pat, sign, ngroups = pair_scatter(dets, 0, 2, 0, 4)
+    rho_np = pair_density(c, dets, 0, 2, ncore=0, nact=4)
+    rho_jx = np.asarray(pair_density_from_scatter(
+        jnp.asarray(c), inv, pat, sign, ngroups))
+    assert np.allclose(rho_jx, rho_np, atol=1e-12)
+
+
+def test_the_jax_mutual_information_reproduces_the_numpy_matrix():
+    from diffmrc.analysis.ci import mutual_information
+    from diffmrc.driver.entropy import mutual_information_from_ci
+
+    dets, c = _sz0_vector(0, 4, 4)
+    scatters = _scatters_for(dets, 4)
+    I_np = mutual_information(c, dets, ncore=0, nact=4)
+    I_jx = np.asarray(mutual_information_from_ci(
+        jnp.asarray(c), dets, scatters, ncore=0, nact=4))
+    assert np.allclose(I_jx, I_np, atol=1e-12)
+    assert np.allclose(np.diag(I_jx), 0.0, atol=1e-14)
+
+
+def test_the_mi_gradient_matches_a_finite_difference_of_the_numpy_route():
+    """AD differentiates the same function the numpy route evaluates."""
+    from diffmrc.analysis.ci import mutual_information
+    from diffmrc.driver.entropy import mutual_information_from_ci
+
+    dets, c = _sz0_vector(0, 4, 4)
+    scatters = _scatters_for(dets, 4)
+    v = np.random.default_rng(11).normal(size=c.shape)
+
+    def f_np(x):
+        return float(mutual_information(x, dets, ncore=0, nact=4)[0, 1])
+
+    eps = 1e-6
+    fd = (f_np(c + eps * v) - f_np(c - eps * v)) / (2 * eps)
+
+    def f_jx(x):
+        I = mutual_information_from_ci(x, dets, scatters, ncore=0,
+                                       nact=4)
+        return I[0, 1]
+
+    g = jax.grad(f_jx)(jnp.asarray(c))
+    ad = float(jnp.asarray(g) @ jnp.asarray(v))
+    assert np.isfinite(ad)
+    assert abs(ad - fd) < 1e-6 * max(1.0, abs(fd))
+
+
+def test_the_mi_factory_matches_the_direct_extraction():
+    pytest.importorskip("pyscfad")
+    from diffmrc.analysis.ci import mutual_information
+    from diffmrc.driver.entropy import make_casscf_mi_theta_fn
+    from diffmrc.driver.nevpt2 import _casscf_solution
+
+    C0, h_, e_, dets, ncore, nact, nele, nmo, pairs = _h2_chain()
+    th0 = jnp.zeros((len(pairs),))
+    fn = make_casscf_mi_theta_fn(
+        C0, h_, e_, dets, ncore=ncore, nact=nact, nele=nele, nmo=nmo,
+        pairs=pairs)
+    I_factory = np.asarray(fn(th0))
+    _, _, ci2, _, _, _ = _casscf_solution(C0, h_, e_, th0, ncore=ncore,
+                                          nact=nact, nele=nele, nmo=nmo,
+                                          pairs=pairs)
+    I_direct = mutual_information(np.asarray(ci2), dets, ncore=ncore,
+                                  nact=nact)
+    assert np.allclose(I_factory, I_direct, atol=1e-12)
+
+
+def test_the_mi_factory_is_differentiable_in_theta():
+    pytest.importorskip("pyscfad")
+    from diffmrc.driver.entropy import make_casscf_mi_theta_fn
+    from diffmrc.driver.nevpt2 import _casscf_solution
+
+    C0, h_, e_, dets, ncore, nact, nele, nmo, pairs = _h2_chain()
+    th0 = jnp.zeros((len(pairs),))
+    fn = make_casscf_mi_theta_fn(
+        C0, h_, e_, dets, ncore=ncore, nact=nact, nele=nele, nmo=nmo,
+        pairs=pairs)
+
+    def value(th):
+        return fn(th)[0, 1]
+
+    g = jax.grad(value)(th0)
+    assert np.isfinite(np.asarray(g)).all()
+
+    v = np.random.default_rng(5).normal(size=(len(pairs),))
+    # finite difference of the numpy route, one direction
+    h = 1e-6
+
+    def f_direct(th):
+        _, _, ci2, _, _, _ = _casscf_solution(
+            C0, h_, e_, jnp.asarray(th), ncore=ncore, nact=nact,
+            nele=nele, nmo=nmo, pairs=pairs)
+        from diffmrc.analysis.ci import mutual_information as mi_np
+        return float(mi_np(np.asarray(ci2), dets, ncore=ncore,
+                           nact=nact)[0, 1])
+
+    fd = (f_direct(np.asarray(th0) + h * v)
+          - f_direct(np.asarray(th0) - h * v)) / (2 * h)
+    ad = float(jnp.asarray(g) @ jnp.asarray(v))
+    assert abs(ad - fd) < 1e-5 * max(1.0, abs(fd))
+
+
 def test_the_entropy_gradient_matches_a_finite_difference():
     pytest.importorskip("pyscfad")
     from diffmrc.driver.entropy import make_casscf_entropy_theta_fn

@@ -22,7 +22,8 @@ import numpy as np
 from .entropy import single_orbital_entropy
 
 __all__ = ['occupation_masks', 'occupations_from_ci', 'entropy_from_ci',
-           'pair_density', 'two_orbital_entropy', 'mutual_information']
+           'pair_scatter', 'pair_density', 'two_orbital_entropy',
+           'mutual_information']
 
 
 def occupation_masks(dets, ncore=0, nact=2):
@@ -83,6 +84,50 @@ def entropy_from_ci(c_ci, dets, ncore=0, nact=2):
     return single_orbital_entropy(n_a, n_b, p2)
 
 
+def pair_scatter(dets, i, j, ncore=0, nact=2):
+    """Static bit bookkeeping of the pair (i, j): (inv, pat, sign, ngroups).
+
+    The pieces from which :func:`pair_density` assembles
+    ``rho = V^T V``: the environment group id of every determinant
+    (``inv``), its 16-pattern index (``pat``), the crossing-parity sign,
+    and the number of environment groups.  Separated so the
+    differentiable sibling (``driver.entropy``) can rebuild V as a
+    segment sum over the CI vector instead of re-deriving the bit
+    bookkeeping -- the components are functions of the determinant list
+    alone and are hoisted out of any differentiation loop.
+
+    The order i < j fixes the bit layout of ``pat`` and is enforced.
+    """
+    dets = list(dets)
+    if not (0 <= i < j < nact):
+        raise ValueError(f'pair ({i}, {j}) outside the active space of '
+                         f'{nact} orbitals; the order i < j fixes the '
+                         f'bit layout')
+    base = 2 * ncore
+    g = (base + 2 * i, base + 2 * i + 1, base + 2 * j, base + 2 * j + 1)
+    pair_mask = 0
+    for x in g:
+        pair_mask |= 1 << x
+    weight = (1, 2, 4, 8)
+    nd = len(dets)
+    pat = np.zeros(nd, dtype=np.int64)
+    parity = np.zeros(nd, dtype=np.int64)
+    env_key = np.zeros(nd, dtype=np.int64)
+    for idx, d in enumerate(dets):
+        d = int(d)
+        p = 0
+        for t, x in enumerate(g):
+            if (d >> x) & 1:
+                p |= weight[t]
+                lower = (d & ((1 << x) - 1)) & ~pair_mask
+                parity[idx] += bin(lower).count('1')
+        pat[idx] = p
+        env_key[idx] = d & ~pair_mask
+    sign = np.where(parity % 2 == 0, 1.0, -1.0)
+    keys, inv = np.unique(env_key, return_inverse=True)
+    return inv, pat, sign, int(keys.size)
+
+
 def pair_density(c_ci, dets, i, j, ncore=0, nact=2):
     """Two-orbital reduced density of the pair (i, j), shape (16, 16).
 
@@ -114,29 +159,9 @@ def pair_density(c_ci, dets, i, j, ncore=0, nact=2):
     if c.shape[0] != len(dets):
         raise ValueError(f'c_ci has {c.shape[0]} coefficients for '
                          f'{len(dets)} determinants')
-    base = 2 * ncore
-    g = (base + 2 * i, base + 2 * i + 1, base + 2 * j, base + 2 * j + 1)
-    pair_mask = 0
-    for x in g:
-        pair_mask |= 1 << x
-    weight = (1, 2, 4, 8)
-    nd = len(dets)
-    pat = np.zeros(nd, dtype=np.int64)
-    parity = np.zeros(nd, dtype=np.int64)
-    env_key = np.zeros(nd, dtype=np.int64)
-    for idx, d in enumerate(dets):
-        d = int(d)
-        p = 0
-        for t, x in enumerate(g):
-            if (d >> x) & 1:
-                p |= weight[t]
-                lower = (d & ((1 << x) - 1)) & ~pair_mask
-                parity[idx] += bin(lower).count('1')
-        pat[idx] = p
-        env_key[idx] = d & ~pair_mask
-    sign = np.where(parity % 2 == 0, 1.0, -1.0)
-    keys, inv = np.unique(env_key, return_inverse=True)
-    V = np.zeros((keys.size, 16))
+    inv, pat, sign, ngroups = pair_scatter(dets, i, j, ncore=ncore,
+                                           nact=nact)
+    V = np.zeros((ngroups, 16))
     np.add.at(V, (inv, pat), c * sign)
     return V.T @ V
 
