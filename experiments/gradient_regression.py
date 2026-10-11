@@ -1,4 +1,4 @@
-"""Regression test for the production gradient module.
+"""t155: Regression test for the production gradient module.
 
 Runs the gradient through the public interface of grad.py on three systems and
 compares against a golden standard. Only converged reference points are
@@ -7,7 +7,7 @@ intermediate value rather than as a stationary point, which inflates the
 apparent deviation by orders of magnitude. The number of such points is
 reported alongside the residual.
 
-Usage: python t155_grad_regression.py [NT]
+Usage: python gradient_regression.py [NT]
 """
 import os
 import sys
@@ -176,7 +176,7 @@ if all_ok:
 else:
     print(f'\nFAIL: at least one system did not pass', flush=True)
 
-outp = 'results/t155_grad_regression.json'
+outp = 'results/gradient_regression.json'
 json.dump(RESULT, open(outp, 'w', encoding='utf-8'), ensure_ascii=False,
           default=str, indent=1)
 print(f'\n>>> {outp}', flush=True)

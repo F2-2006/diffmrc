@@ -1,4 +1,4 @@
-"""Orbital-response term by implicit differentiation of the stationarity condition.
+"""t154: Orbital-response term by implicit differentiation of the stationarity condition.
 
 Applies the implicit-function theorem to g(theta*, R) = 0:
 
@@ -9,7 +9,7 @@ requiring three matrices of moderate dimension rather than the tape of an
 unrolled iteration. The orbital Hessian is not positive definite and can be
 near-singular, so a pseudo-inverse is required in place of a direct solve.
 
-Usage: python t154_implicit_hessian.py <SYS> [NT]
+Usage: python orbital_response_implicit.py <SYS> [NT]
 """
 import os
 import sys

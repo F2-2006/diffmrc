@@ -1,4 +1,4 @@
-"""Lanthanide dissociation energies with multi-start orbital optimization.
+"""t142: Lanthanide dissociation energies with multi-start orbital optimization.
 
 Each atomic and molecular end is computed from several SCF initial guesses;
 only converged solutions are retained, and the lowest is selected by the
@@ -6,7 +6,7 @@ variational principle. Active spaces follow the conservation criterion: the
 number of active electrons and orbitals on the molecular side equals the sum
 of the corresponding quantities on the separated-atom side.
 
-Usage: python t142_layerA_v2.py <LaF|LaO|EuF|EuO> [nthread]
+Usage: python lanthanide_multistart.py <LaF|LaO|EuF|EuO> [nthread]
 """
 import os
 import sys

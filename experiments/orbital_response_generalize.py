@@ -1,4 +1,4 @@
-"""Generalization of the unrolled-iteration response to CO and N2.
+"""t152: Generalization of the unrolled-iteration response to CO and N2.
 
 The full Newton expansion is exact but its cost scales with both the number of
 rotation parameters and the number of iterations. This script tests a
@@ -8,7 +8,7 @@ the derivative with respect to geometry retains the complete response. The
 golden standard uses a warm start from the converged reference parameters to
 track a single solution branch.
 
-Usage: python t152_generalize.py <H2O|CO|N2> <freeze|full|gold|all> [NT]
+Usage: python orbital_response_generalize.py <H2O|CO|N2> <freeze|full|gold|all> [NT]
 """
 import os
 import sys

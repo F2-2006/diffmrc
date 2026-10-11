@@ -1,4 +1,4 @@
-"""Convergence strategies for the europium atom.
+"""t156: Convergence strategies for the europium atom.
 
 The europium ground state has a half-filled f shell, and the restricted
 open-shell SCF converges poorly from standard initial guesses. This script
@@ -6,7 +6,7 @@ compares convergence strategies - cycle limits, damping, level shifting, DIIS
 suppression, and Newton-Raphson - and selects among the converged solutions by
 the variational principle.
 
-Usage: python t156_eu_scf_convergence.py [NT]
+Usage: python europium_scf_convergence.py [NT]
 """
 import os
 import sys

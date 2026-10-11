@@ -18,7 +18,7 @@ virtual v is tried by the true CASCI gain E(W) - E(W + v); the best v
 enters the active block (column moved to the block end); stop when the
 best gain falls below f_stop of the first step's, or at nact_max.
 
-Usage (101): JAX_PLATFORMS=cpu python t162_ggasg.py [--sys CO]
+Usage (101): JAX_PLATFORMS=cpu python greedy_growth_exact.py [--sys CO]
 """
 import json
 import sys
@@ -31,7 +31,7 @@ import jax.numpy as jnp  # noqa: E402
 import numpy as np  # noqa: E402
 
 from diffmrc.core.orblib import orbital_pairs  # noqa: E402
-from t161_boundary_coupling import build, energy_at  # noqa: E402
+from boundary_coupling_probe import build, energy_at  # noqa: E402
 
 H2K = 627.5094740631
 

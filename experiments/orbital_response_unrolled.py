@@ -1,4 +1,4 @@
-"""Orbital-response term by unrolling the orbital optimization into the graph.
+"""t151: Orbital-response term by unrolling the orbital optimization into the graph.
 
 The orbital optimization is expanded as a fixed number of Newton steps inside
 the computational graph, so that back-propagation through the chain accumulates
@@ -8,7 +8,7 @@ iteration construct, since it cannot be traced; the orbital Hessian requires
 regularization because it has negative eigenvalues at the reference geometry;
 and the iteration must start from the converged parameters.
 
-Usage: python t151_unrolled_theta.py [nthread]
+Usage: python orbital_response_unrolled.py [nthread]
 """
 import os
 import sys

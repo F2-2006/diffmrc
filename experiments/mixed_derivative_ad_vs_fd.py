@@ -1,4 +1,4 @@
-"""Finite differences versus automatic differentiation for the mixed derivative.
+"""t149: Finite differences versus automatic differentiation for the mixed derivative.
 
 The mixed second derivative d2E/dtheta dR is the orbital-response term. At a
 converged orbital optimization the gradient with respect to the rotation
@@ -8,7 +8,7 @@ quantifies the failure: the finite-difference estimate is two orders of
 magnitude larger than the auto-differentiated value and grows as the step is
 reduced.
 
-Usage: python t149_mix_AD_vs_FD.py [nthread]
+Usage: python mixed_derivative_ad_vs_fd.py [nthread]
 """
 import os
 import sys
@@ -271,8 +271,8 @@ if AD_OK:
         rel_AD=[abs(res['AD'][i, i]-C_GOLD[i])/abs(C_GOLD[i]) for i in range(3)],
         rel_FD=[abs(res['FD'][i, i]-C_GOLD[i])/abs(C_GOLD[i]) for i in range(3)],
     )
-    json.dump(out, open('results/t149_mix_AD_vs_FD.json', 'w',
+    json.dump(out, open('results/mixed_derivative_ad_vs_fd.json', 'w',
                         encoding='utf-8'), ensure_ascii=False, indent=1)
-    print(f'\n>>> results/t149_mix_AD_vs_FD.json', flush=True)
+    print(f'\n>>> results/mixed_derivative_ad_vs_fd.json', flush=True)
 print('\nt149_DONE', flush=True)
 gc.collect()

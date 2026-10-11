@@ -14,7 +14,7 @@ CASCI depends on the subspace, not on a contiguous layout); core
 columns stay fixed.  Single jit over the traced coefficient matrix, so
 the 924 evaluations share one compilation.
 
-Usage (101): JAX_PLATFORMS=cpu python t163_ggasg_exhaustive.py
+Usage (101): JAX_PLATFORMS=cpu python greedy_growth_exhaustive.py
 """
 import itertools
 import json
@@ -28,7 +28,7 @@ import jax.numpy as jnp  # noqa: E402
 import numpy as np  # noqa: E402
 
 from diffmrc.core.orblib import orbital_pairs  # noqa: E402
-from t161_boundary_coupling import build, energy_at  # noqa: E402
+from boundary_coupling_probe import build, energy_at  # noqa: E402
 
 H2K = 627.5094740631
 

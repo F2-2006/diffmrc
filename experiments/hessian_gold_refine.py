@@ -1,4 +1,4 @@
-"""Golden-standard Hessian by re-optimizing orbitals at every displaced geometry.
+"""t150: Golden-standard Hessian by re-optimizing orbitals at every displaced geometry.
 
 Each displaced geometry is optimized to a tight gradient threshold with a
 Newton refinement, and the Hessian is assembled by central differences of the
@@ -6,7 +6,7 @@ resulting energies. This reference does not share the differentiation path with
 the quantity under test, but it is valid only where the displaced calculations
 converge; the convergence status of every point is reported.
 
-Usage: python t150_gold_refine.py [nthread]
+Usage: python hessian_gold_refine.py [nthread]
 """
 import os
 import sys

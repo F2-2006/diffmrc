@@ -1,4 +1,4 @@
-"""Gradient validation against an analytic reference and reference-free checks.
+"""t157: Gradient validation against an analytic reference and reference-free checks.
 
 Three independent criteria are evaluated: the closed-form analytic gradient of
 an independent program, and two conditions that require no external reference
@@ -7,7 +7,7 @@ zero, and rotational invariance, in which the torque vanishes. The
 finite-difference golden standard is included for comparison, together with the
 convergence status of every displaced point.
 
-Usage: python t157_grad_gold_fix.py <SYS> [NT]
+Usage: python gradient_gold_validation.py <SYS> [NT]
 """
 import os
 import sys

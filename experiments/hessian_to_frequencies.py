@@ -1,4 +1,4 @@
-"""Harmonic vibrational frequencies from the mass-weighted Hessian.
+"""t153: Harmonic vibrational frequencies from the mass-weighted Hessian.
 
 The Hessian is mass-weighted, the translational and rotational modes are
 projected out, and the remaining eigenvalues are converted to wavenumbers. The
@@ -6,7 +6,7 @@ conversion factor is sqrt(lambda) * 5140.487, where the numerical factor
 follows from 1 Ha = 219474.6313632 cm^-1 and 1 amu = 1822.8884862 electron
 masses.
 
-Usage: python t153_hessian_to_freq.py <H2O|CO|N2> [NT]
+Usage: python hessian_to_frequencies.py <H2O|CO|N2> [NT]
 """
 import os
 import sys

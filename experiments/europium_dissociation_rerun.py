@@ -1,4 +1,4 @@
-"""Europium dissociation energies with convergence-accelerating settings.
+"""t158: Europium dissociation energies with convergence-accelerating settings.
 
 Convergence settings applied to the initial SCF must be cleared before entering
 the orbital optimization; otherwise the optimization retraverses the SCF with
@@ -7,7 +7,7 @@ between the orbital optimization and its starting point is checked after every
 call, since a violation indicates that the two calculations described different
 electronic states.
 
-Usage: python t158_eu_fix_rerun.py <EuF|EuO> [NT]
+Usage: python europium_dissociation_rerun.py <EuF|EuO> [NT]
 """
 import os
 import sys

@@ -298,17 +298,17 @@ Scripts in `experiments/` correspond to the results section by section:
 
 | Script | Result |
 |---|---|
-| `t157_grad_gold_fix.py` | nuclear gradient validation; invariance conditions |
-| `t155_grad_regression.py` | gradient regression against an analytic reference |
-| `t150_gold_refine.py` | golden-standard Hessian by re-optimizing at each displaced geometry |
-| `t149_mix_AD_vs_FD.py` | why finite differences fail for the mixed derivative |
-| `t151_unrolled_theta.py` | response term by unrolled iteration |
-| `t152_generalize.py` | unrolled route on CO and N₂ |
-| `t154_implicit_hessian.py` | response term by implicit differentiation |
-| `t153_hessian_to_freq.py` | harmonic frequencies from the mass-weighted Hessian |
-| `t159_basis_active_space.py` | frequency dependence on basis set and active space |
-| `t160_collect_freq.py` | frequency summary |
-| `t142_layerA_v2.py`, `t156_eu_scf_convergence.py`, `t158_eu_fix_rerun.py` | lanthanide dissociation energies |
+| `gradient_gold_validation.py` | nuclear gradient validation; invariance conditions |
+| `gradient_regression.py` | gradient regression against an analytic reference |
+| `hessian_gold_refine.py` | golden-standard Hessian by re-optimizing at each displaced geometry |
+| `mixed_derivative_ad_vs_fd.py` | why finite differences fail for the mixed derivative |
+| `orbital_response_unrolled.py` | response term by unrolled iteration |
+| `orbital_response_generalize.py` | unrolled route on CO and N₂ |
+| `orbital_response_implicit.py` | response term by implicit differentiation |
+| `hessian_to_frequencies.py` | harmonic frequencies from the mass-weighted Hessian |
+| `frequencies_basis_active_space.py` | frequency dependence on basis set and active space |
+| `collect_frequency_results.py` | frequency summary |
+| `lanthanide_multistart.py`, `europium_scf_convergence.py`, `europium_dissociation_rerun.py` | lanthanide dissociation energies |
 
 Each script sets the thread environment variables internally and writes
 JSON to a `results/` directory. The scripts import `diffmrc` directly; make

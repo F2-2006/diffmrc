@@ -1,11 +1,11 @@
-"""Frequencies versus basis set and active space, with and without the response.
+"""t159: Frequencies versus basis set and active space, with and without the response.
 
 Compares the frozen-orbital and response-corrected Hessians at three levels of
 theory. The frozen-orbital error grows with the flexibility of the one-particle
 basis whereas the corrected error is stable, which establishes that omitting
 the orbital response is not a controlled approximation.
 
-Usage: python t159_basis_active_space.py <basis> <nact> [NT]
+Usage: python frequencies_basis_active_space.py <basis> <nact> [NT]
 """
 import os
 import sys

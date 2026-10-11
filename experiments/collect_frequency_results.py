@@ -1,4 +1,4 @@
-"""Collect frequency results from the experiment logs into a single summary.
+"""t160: Collect frequency results from the experiment logs into a single summary.
 
 The frequency study writes its JSON only at the end of the script, so a run
 that is stopped partway leaves its finished results unrecorded. This utility
@@ -9,7 +9,7 @@ Both the English output of the current scripts and the Chinese-language logs
 written by earlier versions are recognized, since the parser is meant to work on
 logs that already exist as well as on new ones.
 
-Usage: python t160_collect_freq.py
+Usage: python collect_frequency_results.py
 """
 import os
 import re

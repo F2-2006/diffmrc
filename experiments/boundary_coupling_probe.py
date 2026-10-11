@@ -26,7 +26,7 @@ P-space, selected-CI growth) uses the same intuition through
 amplitudes; this route uses the variational derivative of the
 differentiable chain instead.
 
-Usage (101): JAX_PLATFORMS=cpu python t161_boundary_coupling.py
+Usage (101): JAX_PLATFORMS=cpu python boundary_coupling_probe.py
 """
 import json
 import sys
