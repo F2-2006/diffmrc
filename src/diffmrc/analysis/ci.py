@@ -116,6 +116,12 @@ def pair_scatter(dets, i, j, ncore=0, nact=2):
         raise ValueError(f'pair ({i}, {j}) outside the active space of '
                          f'{nact} orbitals; the order i < j fixes the '
                          f'bit layout')
+    if 2 * nact > 63:
+        raise ValueError(
+            f'active space of {nact} orbitals spans {2 * nact} spin '
+            f'orbitals, past the 63-bit window the pair bitmaps are '
+            f'stored in (the same limit occupation_masks enforces; '
+            f'shrink the window or move to a segmented layout)')
     base = 2 * ncore
     g = (2 * i, 2 * i + 1, 2 * j, 2 * j + 1)
     pair_mask = 0

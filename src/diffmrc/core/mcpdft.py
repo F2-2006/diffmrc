@@ -52,6 +52,14 @@ def build_M(c_ci, dets, nso):
     Same construction as ``core.nevpt2.rdm.make_dm123_sf`` (bitmap masks and
     fermionic phases), returned as a dict keyed by spin-orbital pairs.
     """
+    if nso > 63:
+        # 1 << k wraps silently past bit 62 of a signed int64; refuse
+        # loudly instead of building corrupted masks (same 63-bit window
+        # as analysis.ci and the rdm bitmap routes).
+        raise ValueError(
+            f'nso={nso} spin orbitals exceed the 63-bit window the '
+            f'occupation bitmaps are stored in; shift to an '
+            f'active-relative layout first')
     det_arr = jnp.asarray(dets, dtype=int)[:, None]
     occ_bit = (det_arr & (1 << jnp.arange(nso))[None, :]) != 0
     XA = occ_bit[:, None, :] & ~occ_bit[None, :, :]
