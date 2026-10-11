@@ -206,3 +206,26 @@ def test_the_orbital_order_is_enforced():
         pair_density(np.array([1.0]), dets, 1, 0, ncore=0, nact=2)
     with pytest.raises(ValueError):
         pair_density(np.array([1.0]), dets, 0, 0, ncore=0, nact=2)
+
+
+def test_the_pair_density_is_core_shift_invariant():
+    """A 30-orbital frozen core must not change the pair density.
+
+    The bit arithmetic is active-relative; a global layout needs
+    2*(ncore + nact) bits and overflows int64 here (the measured LaF
+    crash, 2026-10-11: ncore 31, a 69-bit global determinant).  The
+    frozen core is fully occupied in every determinant, so its
+    contribution to the crossing parity is one constant sign for every
+    amplitude and rho = V^T V is invariant under the shift.
+    """
+    nact = 2
+    # 2 electrons, Sz = 0; active bits (a0, b0, a1, b1)
+    patterns = [0b0011, 0b1100, 0b0101, 0b1010]
+    c = np.array([0.6, 0.4, 0.3, 0.7])
+    c = c / np.linalg.norm(c)
+    rho_small = pair_density(c, patterns, 0, 1, ncore=0, nact=nact)
+    ncore = 30
+    core = (1 << (2 * ncore)) - 1
+    shifted = [(p << (2 * ncore)) | core for p in patterns]
+    rho_shifted = pair_density(c, shifted, 0, 1, ncore=ncore, nact=nact)
+    assert np.allclose(rho_shifted, rho_small, atol=1e-12)

@@ -97,6 +97,19 @@ def pair_scatter(dets, i, j, ncore=0, nact=2):
     alone and are hoisted out of any differentiation loop.
 
     The order i < j fixes the bit layout of ``pat`` and is enforced.
+
+    The bit arithmetic runs on the active-relative bitmap (the
+    determinant shifted past the frozen core), not on the global one:
+    a global layout needs 2*(ncore + nact) bits and overflows int64 for
+    the f-block chains (LaF: ncore 31 -> 69 bits; measured 2026-10-11
+    when the first real-system mutual-information run crashed here on
+    pair 0/2).  The shift is exact, not an approximation: the frozen
+    core is fully occupied in every determinant of the CI space, so
+    the core's contribution to the crossing parity is the same global
+    sign for every amplitude -- one constant phase -- and the reduced
+    density rho = V^T V is invariant under it.  (This is the same
+    active-relative convention as the core.nevpt2.rdm bitmap fix,
+    fee6311.)
     """
     dets = list(dets)
     if not (0 <= i < j < nact):
@@ -104,17 +117,18 @@ def pair_scatter(dets, i, j, ncore=0, nact=2):
                          f'{nact} orbitals; the order i < j fixes the '
                          f'bit layout')
     base = 2 * ncore
-    g = (base + 2 * i, base + 2 * i + 1, base + 2 * j, base + 2 * j + 1)
+    g = (2 * i, 2 * i + 1, 2 * j, 2 * j + 1)
     pair_mask = 0
     for x in g:
         pair_mask |= 1 << x
     weight = (1, 2, 4, 8)
+    active_mask = (1 << (2 * nact)) - 1
     nd = len(dets)
     pat = np.zeros(nd, dtype=np.int64)
     parity = np.zeros(nd, dtype=np.int64)
     env_key = np.zeros(nd, dtype=np.int64)
     for idx, d in enumerate(dets):
-        d = int(d)
+        d = (int(d) >> base) & active_mask
         p = 0
         for t, x in enumerate(g):
             if (d >> x) & 1:
