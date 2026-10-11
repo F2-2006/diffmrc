@@ -10,9 +10,11 @@ where the docstring states how the safe gradient differs from the raw
 one.
 """
 import numpy as np
-import jax
+import pytest
+
+jax = pytest.importorskip("jax")
 jax.config.update("jax_enable_x64", True)
-import jax.numpy as jnp
+import jax.numpy as jnp  # noqa: E402
 
 from diffmrc.core import safe_math as sm
 

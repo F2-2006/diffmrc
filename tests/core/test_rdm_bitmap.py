@@ -8,9 +8,11 @@ physical invariants hold on a small system, and a large-nso construction
 no longer raises.
 """
 import numpy as np
-import jax
+import pytest
+
+jax = pytest.importorskip("jax")
 jax.config.update("jax_enable_x64", True)
-import jax.numpy as jnp
+import jax.numpy as jnp  # noqa: E402
 
 from diffmrc.core.nevpt2.impl import cas_dets_for2
 from diffmrc.core.nevpt2.rdm import make_dm123_sf
