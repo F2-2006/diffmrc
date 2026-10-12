@@ -43,3 +43,33 @@ def test_a_relay_density_joins_the_candidates():
                                                   dm0_guess=dm)
     assert mf.converged and reliable
     assert e == pytest.approx(float(e0), abs=1e-9)
+
+
+def test_ecp_molecules_skip_the_x2c1e_transform(monkeypatch):
+    """The ThO seed failure of 2026-10-12: an ECP molecule must not go
+    through x2c1e -- its scalar relativity already lives in the ECP,
+    and every protocol candidate threw until the guard was added."""
+    from pyscf import gto
+    from pyscf import scf as pyscf_scf
+
+    from diffmrc.driver.scf_protocol import scf_protocol
+
+    calls = []
+    real = pyscf_scf.hf.SCF.x2c1e
+
+    def spy(self):
+        calls.append(1)
+        return real(self)
+
+    monkeypatch.setattr(pyscf_scf.hf.SCF, "x2c1e", spy)
+
+    h2 = gto.M(atom="H 0 0 0; H 0 0 0.74", basis="sto-3g", verbose=0)
+    scf_protocol(h2, 0, "h2-spy")
+    assert calls, "x2c1e must run for an all-electron molecule"
+
+    calls.clear()
+    cu = gto.M(atom="Cu 0 0 0", basis="lanl2dz", ecp="lanl2dz", spin=1,
+               verbose=0)
+    mf, e, reliable, spread, stage = scf_protocol(cu, 1, "cu-ecp-spy")
+    assert not calls, "x2c1e must be skipped when an ECP is present"
+    assert mf is not None

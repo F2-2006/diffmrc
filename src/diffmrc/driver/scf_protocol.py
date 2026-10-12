@@ -49,7 +49,13 @@ def _scf_run(mol, spin, g, damp, shift, conv_tol, max_cycle, dm0=None):
         m.damp = damp
     if shift is not None:
         m.level_shift = shift
-    m = m.x2c1e()
+    # x2c1e is this line's scalar-relativistic route for all-electron
+    # bases (cc-pVTZ-DK).  A molecule on an ECP already carries its
+    # scalar relativity inside the potential, and the transform is not
+    # valid on pseudo-orbitals -- the ThO seed died here on 2026-10-12
+    # (plain RHF converged; every protocol candidate threw).
+    if not mol.ecp:
+        m = m.x2c1e()
     try:
         m.kernel(dm0=dm0)
     except Exception:
