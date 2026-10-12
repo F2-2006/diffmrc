@@ -24,7 +24,15 @@ virtual v is tried by the true CASCI gain E(W) - E(W + v); the best v
 enters the active block (column moved to the block end); stop when the
 best gain falls below f_stop of the first step's, or at nact_max.
 
-Usage (101): JAX_PLATFORMS=cpu python greedy_growth_exact.py [--sys CO]
+Pricing kernel (2026-10-12): the loop needs CI ENERGIES only; the
+inherited jax chain's XLA compile explodes with system size (CO: one
+candidate priced for more than 19 core-hours without finishing, vs
+~0.6 for N2's whole run).  ``--kernel pyscf`` computes a plain-pyscf
+CASCI value for the same window in seconds; the jax kernel stays the
+default for the recorded semantics and the step-1 proxy arena.
+
+Usage (101): JAX_PLATFORMS=cpu python greedy_growth_v2.py [--sys CO]
+             [--kernel pyscf] [--no-proxy]
 """
 import json
 import sys
@@ -37,12 +45,24 @@ import jax.numpy as jnp  # noqa: E402
 import numpy as np  # noqa: E402
 
 from diffmrc.core.orblib import orbital_pairs  # noqa: E402
-from boundary_coupling_probe import build, energy_at  # noqa: E402
+from boundary_coupling_probe import SYS, build, energy_at  # noqa: E402
 
 H2K = 627.5094740631
 
 # name: (nele, nact_max, f_stop)
 RUNS = {'N2': (2, 6, 0.1), 'CO': (6, 10, 0.1)}
+
+
+def build_pyscf(name):
+    """The same molecule on the plain-pyscf side (pricing kernel 'pyscf')."""
+    from pyscf import gto as pgto, scf as pscf
+
+    atom, basis, nele, nact = SYS[name]
+    mol = pgto.M(atom=atom, basis=basis, charge=0, spin=0, verbose=0)
+    mf = pscf.RHF(mol)
+    mf.kernel()
+    ncore = (mol.nelectron - nele) // 2
+    return mol, mf, ncore, nact, mol.nao_nr()
 
 
 def proxy_order(C0, h_, e_, ncore, nact, nele, nmo, vir_lo):
@@ -61,13 +81,36 @@ def proxy_order(C0, h_, e_, ncore, nact, nele, nmo, vir_lo):
     return best
 
 
-def run_sys(name):
+def run_sys(name, kernel='jax', proxy=True):
     nele, nact_max, f_stop = RUNS[name]
-    mol, C0, h_, e_, ncore, nact0, nmo = build(name)
-    print(f'=== {name}: start CAS({nele},{nact0}), grow to at most '
-          f'{nact_max} ===', flush=True)
+    if kernel == 'pyscf':
+        mol_p, mf_p, ncore, nact0, nmo = build_pyscf(name)
+        from pyscf import fci as pfci
+        from pyscf import mcscf as pmcscf
 
-    C = C0
+        def price(Cmat, nact_):
+            mf2 = mf_p.copy()
+            mf2.mo_coeff = np.asarray(Cmat)
+            mc = pmcscf.CASCI(mf2, nact_, nele)
+            mc.fcisolver = pfci.direct_spin1.FCI(mol_p)
+            mc.fcisolver.spin = 0
+            mc.fcisolver.conv_tol = 1e-10
+            mc.fcisolver.max_cycle = 500
+            return float(mc.kernel()[0])
+
+        C = np.asarray(mf_p.mo_coeff)
+        h_ = e_ = None                      # jax-side objects not needed
+    else:
+        mol, C0, h_, e_, ncore, nact0, nmo = build(name)
+
+        def price(Cmat, nact_):
+            return float(energy_at(
+                Cmat, h_, e_, ncore, nact_, nele, nmo,
+                jnp.zeros(len(orbital_pairs(ncore, nact_, nmo)))))
+
+        C = C0
+    print(f'=== {name}: start CAS({nele},{nact0}), grow to at most '
+          f'{nact_max}  [{kernel} kernel] ===', flush=True)
     nact = nact0
     orig = list(range(nmo))            # orig[i] = column i's initial index
     steps = []
@@ -77,9 +120,7 @@ def run_sys(name):
     t_start = time.time()
     while nact < nact_max:
         vir_lo = ncore + nact
-        E_cur = float(energy_at(C, h_, e_, ncore, nact, nele, nmo,
-                                jnp.zeros(len(orbital_pairs(ncore, nact,
-                                                           nmo)))))
+        E_cur = price(C, nact)
         drops = {}
         for v_pos in range(vir_lo, nmo):
             v_abs = v_pos
@@ -87,18 +128,20 @@ def run_sys(name):
                     + list(range(vir_lo, v_abs))
                     + list(range(v_abs + 1, nmo)))
             C1 = C[:, perm]
-            E_add = float(energy_at(C1, h_, e_, ncore, nact + 1, nele,
-                                    nmo,
-                                    jnp.zeros(
-                                        len(orbital_pairs(ncore, nact + 1,
-                                                          nmo)))))
+            t_v = time.time()
+            E_add = price(C1, nact + 1)
             drops[v_pos] = E_cur - E_add
+            print(f'   step {len(steps) + 1} candidate '
+                  f'{v_pos - vir_lo + 1}/{nmo - vir_lo}: '
+                  f'gain={drops[v_pos] * H2K:+.4f} kcal/mol '
+                  f'({time.time() - t_v:.0f}s)', flush=True)
         order = sorted(drops, key=lambda v: -drops[v])
         best_v = order[0]
         prev = margin_prev
         margin_prev = drops[best_v]
         if margin_first is None:
             margin_first = drops[best_v]
+        if proxy and kernel == 'jax' and proxy_vs_exact is None:
             # proxy arena: exact gains vs one-derivative order, step 1
             prox = proxy_order(C, h_, e_, ncore, nact, nele, nmo, vir_lo)
             exact_rank = {v: i for i, v in enumerate(order)}
@@ -145,7 +188,8 @@ def run_sys(name):
 
     rec = dict(name=name, nact0=nact0, nact_final=nact, nele=nele,
                steps=steps, proxy_vs_exact=proxy_vs_exact,
-               f_stop=f_stop, nact_max=nact_max)
+               f_stop=f_stop, nact_max=nact_max, kernel=kernel,
+               proxy_arena=bool(proxy and kernel == 'jax'))
     with open(f't162_{name}.json', 'w', encoding='utf-8') as fh:
         json.dump(rec, fh, indent=1)
     return rec
@@ -155,8 +199,14 @@ def main():
     names = list(RUNS)
     if '--sys' in sys.argv:
         names = sys.argv[sys.argv.index('--sys') + 1].split(',')
+    kernel = 'jax'
+    if '--kernel' in sys.argv:
+        kernel = sys.argv[sys.argv.index('--kernel') + 1]
+    if kernel not in ('jax', 'pyscf'):
+        raise SystemExit(f'unknown kernel {kernel!r}; use jax or pyscf')
+    proxy = '--no-proxy' not in sys.argv
     for n in names:
-        run_sys(n)
+        run_sys(n, kernel=kernel, proxy=proxy)
     print('t162_DONE', flush=True)
 
 
