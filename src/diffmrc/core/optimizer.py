@@ -44,10 +44,14 @@ USAGE
                                          steps=400, g_conv=1e-8,
                                          label='N2', theta0=None)
 """
+import logging
+
 import numpy as np
 import jax
 jax.config.update("jax_enable_x64", True)
 from jax import numpy as jnp
+
+logger = logging.getLogger(__name__)
 
 __all__ = ['optimize_theta', 'optimize_theta_scipy', 'optimize_theta_hand']
 
@@ -120,8 +124,8 @@ def optimize_theta_hand(E_of, npar, steps=400, g_conv=1e-9, theta0=None,
                 rss_s = f'  RSS={int(rss)/1048576:.1f}GB'
             except Exception:
                 rss_s = ''
-            print(f'[{label} iter {it}] E = {float(E_jit(theta)):.10f}  '
-                  f'|g| = {gnorm:.2e}{rss_s}', flush=True)
+            logger.info('[%s iter %d] E = %.10f  |g| = %.2e%s',
+                        label, it, float(E_jit(theta)), gnorm, rss_s)
 
         # ---- L-BFGS two-loop recursion
         ss, ys = s_list, y_list

@@ -20,6 +20,7 @@ The class carries the whole H2 correlation energy (no core, no single
 external by symmetry), which is the first anchor:
 server/caspt2_anchor/h2_cas22.log, ORCA CASPT2 = -0.004043415 Eh.
 """
+import logging  # noqa: E402
 import os  # noqa: E402
 from collections import defaultdict  # noqa: E402
 
@@ -28,6 +29,16 @@ jax.config.update("jax_enable_x64", True)
 from jax import numpy as jnp  # noqa: E402
 
 import numpy as np  # noqa: E402
+
+_log = logging.getLogger(__name__)
+
+if os.environ.get('CASPT2_DEBUG'):
+    # Back-compat for the pre-logging switch (retired 2026-10-12): the
+    # environment variable still forces the debug records out, even
+    # without the CLI's -v.
+    logging.basicConfig(level=logging.DEBUG,
+                        format='[%(levelname)s %(name)s] %(message)s')
+    _log.setLevel(logging.DEBUG)
 
 __all__ = ['caspt2_double_external_e2', 'caspt2_full_e2',
            'caspt2_contracted_e2']
@@ -111,12 +122,12 @@ def caspt2_full_e2(h1e_mo, eri_mo, ci, dets, *, ncore, nact, nele, eps,
     H = _block_H(h1eff, eri_mo, dets_full_so, idx0, ncore, nact + nvir, nele)
     v = jnp.asarray(vec0)[jnp.asarray(idx0)]
     v = np.asarray(H @ v)
-    if os.environ.get('CASPT2_DEBUG'):
-        print(f'[caspt2] dets_full={len(dets_full)} idx0={len(idx0)} '
-              f'ref_in_block={len(ref_idx & set(idx0))} '
-              f'vec0_nnz={int(np.count_nonzero(vec0))} '
-              f'|H|max={float(np.abs(np.asarray(H)).max()):.3e} '
-              f'|v|max={float(np.abs(v).max()):.3e}', flush=True)
+    _log.debug('dets_full=%d idx0=%d ref_in_block=%d vec0_nnz=%d '
+               '|H|max=%.3e |v|max=%.3e',
+               len(dets_full), len(idx0), len(ref_idx & set(idx0)),
+               int(np.count_nonzero(vec0)),
+               float(np.abs(np.asarray(H)).max()),
+               float(np.abs(v).max()))
 
     # Zeroth-order reference energy.
     if occ_variant == 'rdm':
@@ -156,12 +167,12 @@ def caspt2_full_e2(h1e_mo, eri_mo, ci, dets, *, ncore, nact, nele, eps,
         if os.environ.get('CASPT2_DEBUG'):
             diag.append((abs(contrib), contrib, v[i_local], denom,
                          d, holes, n_vir_e))
-    if os.environ.get('CASPT2_DEBUG'):
+    if _log.isEnabledFor(logging.DEBUG):
         diag.sort(reverse=True)
-        print(f'[caspt2] e0_zero={e0_zero:.6f}')
+        _log.debug('e0_zero=%.6f', e0_zero)
         for a, c, vv, dn, d, h, nv in diag[:5]:
-            print(f'[caspt2] top: contrib={c:+.6f} v={vv:+.6f} '
-                  f'denom={dn:+.6f} det={d} holes={h} n_vir={nv}')
+            _log.debug('top: contrib=%+.6f v=%+.6f denom=%+.6f '
+                       'det=%d holes=%d n_vir=%d', c, vv, dn, d, h, nv)
     return total, breakdown
 
 

@@ -314,6 +314,20 @@ Each script sets the thread environment variables internally and writes
 JSON to a `results/` directory. The scripts import `diffmrc` directly; make
 it importable first (`pip install -e .`, or `PYTHONPATH=src`).
 
+## Debugging
+
+The package logs through Python's standard ``logging`` under the
+``diffmrc.*`` namespaces; nothing is emitted unless the level is raised.
+
+```python
+import logging
+logging.basicConfig(level=logging.DEBUG)   # INFO for optimizer progress
+```
+
+The CLI exposes the same switch: ``diffmrc mol.xyz -v`` shows optimizer
+progress (INFO); ``-vv`` adds internals (DEBUG). ``CASPT2_DEBUG=1`` in
+the environment still forces the CASPT2 debug records out.
+
 ## License
 
 [MIT](LICENSE) — see the license file.

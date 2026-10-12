@@ -20,6 +20,7 @@ Exit codes: 0 success, 1 the calculation failed or was refused, 2 the
 input was rejected.
 """
 import argparse
+import logging
 import os
 import sys
 
@@ -54,6 +55,9 @@ def build_parser():
     p.add_argument('--spin', type=int, default=0,
                    help='2S = Nalpha - Nbeta, NOT the multiplicity 2S+1 '
                         '(default: 0)')
+    p.add_argument('-v', '--verbose', action='count', default=0,
+                   help='raise the logging level for debugging: -v shows '
+                        'progress (INFO), -vv shows internals (DEBUG)')
     p.add_argument('--level', choices=_LEVELS, default='fast',
                    help='fast runs a single orbital optimization from the '
                         'reference orbitals; robust also retries from '
@@ -264,6 +268,12 @@ def main(argv=None):
         The process exit code.
     """
     args = build_parser().parse_args(argv)
+
+    if args.verbose:
+        logging.basicConfig(
+            level=logging.DEBUG if args.verbose >= 2 else logging.INFO,
+            format='[%(levelname)s %(name)s] %(message)s',
+        )
 
     if args.show_defaults:
         _print_defaults(sys.stdout)

@@ -19,12 +19,16 @@ throughout the package; the production optimizer lives in optim_theta.py.
 
 Usage: python casscf_lih.py [all|sto3g|631g]
 """
+import logging
 import os
 os.environ.setdefault("JAX_PLATFORMS", "")
 
 import jax
 jax.config.update("jax_enable_x64", True)
 from jax import numpy as jnp
+
+logger = logging.getLogger(__name__)
+
 
 def block_rotation(theta, nmo, pairs):
     """Exponential-map orbital rotation, C = R(theta), as a product of Givens rotations.
@@ -52,9 +56,10 @@ def optimize_theta(mol, C0, E_of, npar, steps=200, g_conv=1e-9,
     convergence, reaching the tolerance in roughly 20 to 50 steps for about ten
     parameters.
 
-    log_interval > 0 prints energy, gradient norm, and resident memory every N
-    steps, which is how an earlier out-of-memory failure in a state-averaged
-    calculation was diagnosed.
+    log_interval > 0 logs energy, gradient norm, and resident memory every N
+    steps (at INFO; raise the logging level, e.g. the CLI's -v), which is how
+    an earlier out-of-memory failure in a state-averaged calculation was
+    diagnosed.
 
     NOTE: this implementation is retained for the validation case. The
     production optimizer is optim_theta.optimize_theta, which replaces it with
@@ -100,8 +105,9 @@ def optimize_theta(mol, C0, E_of, npar, steps=200, g_conv=1e-9,
             break
         if log_interval and it % log_interval == 0:
             rss = open("/proc/self/status").read().split("VmRSS:")[1].split()[0]
-            print(f"[{label} iter {it}] E = {float(E_jit(theta)):.10f}  "
-                  f"|g| = {gnorm:.2e}  RSS = {int(rss)/1048576:.1f}GB", flush=True)
+            logger.info('[%s iter %d] E = %.10f  |g| = %.2e  RSS = %.1fGB',
+                        label, it, float(E_jit(theta)), gnorm,
+                        int(rss) / 1048576)
         d = lbfgs_dir(g, s_list, y_list)
         # Backtracking line search (Armijo condition)
         e = float(E_jit(theta))
