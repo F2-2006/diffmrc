@@ -80,12 +80,21 @@ def run_sys(name):
                     + list(range(vir_lo, v_abs))
                     + list(range(v_abs + 1, nmo)))
             C1 = C[:, perm]
+            t_v = time.time()
             E_add = float(energy_at(C1, h_, e_, ncore, nact + 1, nele,
                                     nmo,
                                     jnp.zeros(
                                         len(orbital_pairs(ncore, nact + 1,
                                                           nmo)))))
             drops[v_pos] = E_cur - E_add
+            # Per-candidate progress: the CO run of 2026-10-11 sat in this
+            # loop for 20+ h with no output, so every priced candidate now
+            # reports (the next print in the loop is otherwise only after
+            # the whole sweep and the proxy gradient).
+            print(f'   step {len(steps) + 1} candidate '
+                  f'{v_pos - vir_lo + 1}/{nmo - vir_lo}: '
+                  f'gain={drops[v_pos] * H2K:+.4f} kcal/mol '
+                  f'({time.time() - t_v:.0f}s)', flush=True)
         order = sorted(drops, key=lambda v: -drops[v])
         best_v = order[0]
         if margin_first is None:
