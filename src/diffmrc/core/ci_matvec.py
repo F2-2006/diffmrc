@@ -22,6 +22,10 @@ _DISCOVERY_ROUNDS = 4
 # Pattern-chunk size of the accumulation; bounds the largest temporary of a
 # scatter to chunk * n_src * n_strings entries.
 _CHUNK = 8
+# Fixed width of the batched block apply: the whole chain then compiles a
+# single shape, so a Davidson run pays one compilation however its subspace
+# grows. All blocks are a handful of columns wide.
+_BLOCK_WIDTH = 8
 
 
 def block_determinant_count(nact, n_alpha, n_beta):
@@ -96,6 +100,16 @@ def _excitation_table(nact, n_occ, masks, index, pos, order):
             for c in range(order):
                 parity += int(pos[pat[c], k]) + int(pos[pat[order + c], j])
             sign[p, s] = 1.0 if parity % 2 == 0 else -1.0
+    # Pad the pattern axis to a whole number of chunks: the accumulation
+    # loops slice fixed-size chunks inside a traced loop, and the zero-sign
+    # filler rows contribute nothing (their values are multiplied by 0).
+    pad = (-len(patterns)) % _CHUNK
+    if pad:
+        rem = np.vstack([rem, np.zeros((pad, order), dtype=np.int64)])
+        add = np.vstack([add, np.zeros((pad, order), dtype=np.int64)])
+        src = np.vstack([src, np.zeros((pad, n_src), dtype=np.int64)])
+        tgt = np.vstack([tgt, np.zeros((pad, n_src), dtype=np.int64)])
+        sign = np.vstack([sign, np.zeros((pad, n_src))])
     return (jnp.asarray(rem), jnp.asarray(add), jnp.asarray(src),
             jnp.asarray(tgt), jnp.asarray(sign))
 
@@ -185,46 +199,84 @@ def _acc_alpha(sig, src, tgt, sign, cpl, x2):
 
     ``cpl`` broadcasts against the (n_pat, n_src, n_J) shape: a per-pattern
     scalar is passed as (n_pat, 1, 1), a per-(pattern, source) value as
-    (n_pat, n_src, 1), a full field as (n_pat, n_src, n_J).
+    (n_pat, n_src, 1), a full field as (n_pat, n_src, n_J). The pattern
+    axis is walked by a traced loop over fixed chunks (tables are padded to
+    a whole number of chunks at construction), so the compiled graph holds
+    one scatter per excitation class however many patterns there are; the
+    zero-sign filler rows contribute nothing.
     """
     n_pat = src.shape[0]
+    if n_pat == 0:
+        return sig
+    n_chunks = n_pat // _CHUNK
     nJ = sig.shape[1]
-    for c0 in range(0, n_pat, _CHUNK):
-        c1 = min(c0 + _CHUNK, n_pat)
-        val = (sign[c0:c1, :, None] * cpl[c0:c1] * x2[src[c0:c1], :])
-        sig = sig.at[tgt[c0:c1, :, None],
-                     jnp.arange(nJ)[None, None, :]].add(val)
-    return sig
+
+    def body(i, s):
+        c0 = i * _CHUNK
+        src_c = lax.dynamic_slice_in_dim(src, c0, _CHUNK, axis=0)
+        tgt_c = lax.dynamic_slice_in_dim(tgt, c0, _CHUNK, axis=0)
+        sign_c = lax.dynamic_slice_in_dim(sign, c0, _CHUNK, axis=0)
+        cpl_c = lax.dynamic_slice_in_dim(cpl, c0, _CHUNK, axis=0)
+        val = sign_c[:, :, None] * cpl_c * x2[src_c, :]
+        return s.at[tgt_c[:, :, None],
+                    jnp.arange(nJ)[None, None, :]].add(val)
+
+    return lax.fori_loop(0, n_chunks, body, sig)
 
 
 def _acc_beta(sig, src, tgt, sign, cpl, x2):
     """``sig[:, tgt] += sign * cpl * x2[:, src]`` over beta-string sources."""
     n_pat = src.shape[0]
+    if n_pat == 0:
+        return sig
+    n_chunks = n_pat // _CHUNK
     nI = sig.shape[0]
-    for c0 in range(0, n_pat, _CHUNK):
-        c1 = min(c0 + _CHUNK, n_pat)
-        val = (sign[c0:c1, :, None] * cpl[c0:c1]
-               * x2[:, src[c0:c1]].transpose(1, 2, 0))
-        sig = sig.at[jnp.arange(nI)[None, None, :],
-                     tgt[c0:c1, :, None]].add(val)
-    return sig
+
+    def body(i, s):
+        c0 = i * _CHUNK
+        src_c = lax.dynamic_slice_in_dim(src, c0, _CHUNK, axis=0)
+        tgt_c = lax.dynamic_slice_in_dim(tgt, c0, _CHUNK, axis=0)
+        sign_c = lax.dynamic_slice_in_dim(sign, c0, _CHUNK, axis=0)
+        cpl_c = lax.dynamic_slice_in_dim(cpl, c0, _CHUNK, axis=0)
+        val = (sign_c[:, :, None] * cpl_c
+               * x2[:, src_c].transpose(1, 2, 0))
+        return s.at[jnp.arange(nI)[None, None, :],
+                    tgt_c[:, :, None]].add(val)
+
+    return lax.fori_loop(0, n_chunks, body, sig)
 
 
 def _acc_alpha_beta(sig, src_a, tgt_a, sign_a, src_b, tgt_b, sign_b, cval, x2):
-    """The opposite-spin double class: one alpha single times one beta single."""
+    """The opposite-spin double class: one alpha single times one beta single.
+
+    The (alpha-chunk, beta-chunk) pairs are flattened into one traced loop;
+    ``cval`` is the (n_pat_a, n_pat_b) integral field of the pattern pairs.
+    """
     n_pa, n_pb = src_a.shape[0], src_b.shape[0]
-    for a0 in range(0, n_pa, _CHUNK):
-        a1 = min(a0 + _CHUNK, n_pa)
-        xa = x2[src_a[a0:a1], :]
-        for b0 in range(0, n_pb, _CHUNK):
-            b1 = min(b0 + _CHUNK, n_pb)
-            val = (sign_a[a0:a1, :, None, None]
-                   * sign_b[None, None, b0:b1, :]
-                   * cval[a0:a1, None, b0:b1, None]
-                   * xa[:, :, src_b[b0:b1]])
-            sig = sig.at[tgt_a[a0:a1, :, None, None],
-                         tgt_b[None, None, b0:b1, :]].add(val)
-    return sig
+    if n_pa == 0 or n_pb == 0:
+        return sig
+    n_ca, n_cb = n_pa // _CHUNK, n_pb // _CHUNK
+
+    def body(idx, s):
+        ia, ib = idx // n_cb, idx % n_cb
+        ca0, cb0 = ia * _CHUNK, ib * _CHUNK
+        src_a_c = lax.dynamic_slice_in_dim(src_a, ca0, _CHUNK, axis=0)
+        tgt_a_c = lax.dynamic_slice_in_dim(tgt_a, ca0, _CHUNK, axis=0)
+        sign_a_c = lax.dynamic_slice_in_dim(sign_a, ca0, _CHUNK, axis=0)
+        src_b_c = lax.dynamic_slice_in_dim(src_b, cb0, _CHUNK, axis=0)
+        tgt_b_c = lax.dynamic_slice_in_dim(tgt_b, cb0, _CHUNK, axis=0)
+        sign_b_c = lax.dynamic_slice_in_dim(sign_b, cb0, _CHUNK, axis=0)
+        cval_a = lax.dynamic_slice_in_dim(cval, ca0, _CHUNK, axis=0)
+        cval_c = lax.dynamic_slice_in_dim(cval_a, cb0, _CHUNK, axis=1)
+        xa = x2[src_a_c, :]
+        val = (sign_a_c[:, :, None, None]
+               * sign_b_c[None, None, :, :]
+               * cval_c[:, None, :, None]
+               * xa[:, :, src_b_c])
+        return s.at[tgt_a_c[:, :, None, None],
+                    tgt_b_c[None, None, :, :]].add(val)
+
+    return lax.fori_loop(0, n_ca * n_cb, body, sig)
 
 
 def _apply(h1e_mo, eri_mo, tab, ncore, nact, x):
@@ -308,12 +360,24 @@ def ci_block_operator(h1e_mo, eri_mo, ncore, nact, n_alpha, n_beta, tab=None):
     def matvec(x):
         if x.ndim == 1:
             return mv1(x)
-        # Sequential columns rather than a vmap: the column-apply kernel is
-        # the same shape every call, so XLA compiles it once and reuses it,
-        # while the batched staging of the many scatters was measured to
-        # blow past the 8 GB job cap at n_det ~ 6e4 (the unbatched peak is
-        # 2 GB). The block is a handful of columns wide.
-        return jnp.stack([mv1(x[:, j]) for j in range(x.shape[1])], axis=1)
+        # The block applies each column independently (the scatter of one
+        # column never touches another), so batching them with a vmap is
+        # bit-identical to a sequential loop while running several times
+        # faster. Every chunk is zero-padded to a fixed width so that the
+        # whole chain sees exactly one shape: with a width that followed
+        # the Davidson's growing subspace, each new width re-triggered a
+        # full recompilation, and at n_det ~ 8.5e5 those compilations
+        # dominated the wall clock. Padding is exact (the operator is
+        # linear, a zero column maps to zero), so values are unchanged.
+        n, m = x.shape
+        outs = []
+        for c0 in range(0, m, _BLOCK_WIDTH):
+            c1 = min(c0 + _BLOCK_WIDTH, m)
+            block = jnp.zeros((n, _BLOCK_WIDTH), dtype=x.dtype)
+            block = block.at[:, :c1 - c0].set(x[:, c0:c1])
+            y = jax.vmap(mv1, in_axes=1, out_axes=1)(block)
+            outs.append(y[:, :c1 - c0])
+        return jnp.concatenate(outs, axis=1)
 
     return matvec, _diagonal(h1e_mo, eri_mo, tab, ncore, nact)
 
