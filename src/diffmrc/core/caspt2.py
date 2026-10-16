@@ -19,6 +19,11 @@ only for that basis.
 The class carries the whole H2 correlation energy (no core, no single
 external by symmetry), which is the first anchor:
 server/caspt2_anchor/h2_cas22.log, ORCA CASPT2 = -0.004043415 Eh.
+
+Two engines realise the same scheme: ``caspt2_contracted_e2`` (numpy
+reference, with the bitwise-verified Slater-Condon coupling and the
+debug hooks) and ``caspt2_contracted_e2_jax`` (a jax twin of the same
+construction, traceable in the CI coefficients).
 """
 import logging  # noqa: E402
 import os  # noqa: E402
@@ -41,7 +46,111 @@ if os.environ.get('CASPT2_DEBUG'):
     _log.setLevel(logging.DEBUG)
 
 __all__ = ['caspt2_double_external_e2', 'caspt2_full_e2',
-           'caspt2_contracted_e2']
+           'caspt2_contracted_e2', 'caspt2_contracted_e2_jax']
+
+
+def _sc_kernel(h1e_mo, eri_mo):
+    """Slater-Condon matrix elements over spin-orbital occupation bitmaps.
+
+    Builds the spin-orbital integrals from the (chemist-notation) MO
+    integrals and returns ``(h_elem, so_bits)``: ``h_elem(J, K)`` is
+    ``<J|H|K>`` for determinant bitmaps, zero on the diagonal (a class
+    function never overlaps its own reference coupling) and beyond
+    rank-two differences; ``so_bits(x)`` lists the occupied spin orbitals
+    of a bitmap with a cache.  Shared by the numpy reference and the jax
+    twin so the two engines cannot drift apart.
+    """
+    h1e_mo = np.asarray(h1e_mo)
+    eri_mo = np.asarray(eri_mo)
+    nmo = h1e_mo.shape[0]
+    nso = 2 * nmo
+    pi = np.arange(nso) // 2
+    si = np.arange(nso) % 2
+    h_so = np.where(si[:, None] == si[None, :],
+                    h1e_mo[pi[:, None], pi[None, :]], 0.0)
+    m4 = ((si[:, None, None, None] == si[None, None, :, None])
+          & (si[None, :, None, None] == si[None, None, None, :]))
+    eri_so = np.where(
+        m4, eri_mo[pi[:, None, None, None], pi[None, None, :, None],
+                   pi[None, :, None, None], pi[None, None, None, :]], 0.0)
+
+    _bits_cache = {}
+
+    def so_bits(x):
+        if x not in _bits_cache:
+            _bits_cache[x] = [i for i in range(nso) if (x >> i) & 1]
+        return _bits_cache[x]
+
+    def pc(x):
+        return bin(x).count('1')
+
+    def h_elem(J, K):
+        if J == K:
+            return 0.0
+        dj, dk = J & ~K, K & ~J
+        n = pc(dj)
+        if n != pc(dk) or n > 2:
+            return 0.0
+        if n == 1:
+            i = (dj & -dj).bit_length() - 1
+            k = (dk & -dk).bit_length() - 1
+            sgn = (-1.0) ** (pc(J & ((1 << i) - 1)) + pc(K & ((1 << k) - 1)))
+            tot = h_so[i, k]
+            for j in so_bits(J & K):
+                tot += eri_so[i, j, k, j] - eri_so[i, j, j, k]
+            return sgn * tot
+        i1, i2 = so_bits(dj)
+        k1, k2 = so_bits(dk)
+        sgn = (-1.0) ** (pc(J & ((1 << i1) - 1)) + pc(J & ((1 << i2) - 1))
+                         + pc(K & ((1 << k1) - 1)) + pc(K & ((1 << k2) - 1)))
+        return sgn * (eri_so[i1, i2, k1, k2] - eri_so[i1, i2, k2, k1])
+
+    return h_elem, so_bits
+
+
+def _ann(dd, so):
+    """Annihilate ``so`` in a determinant bitmap (None if empty)."""
+    if not (dd >> so) & 1:
+        return None
+    return dd ^ (1 << so), (-1.0) ** ((dd & ((1 << so) - 1)).bit_count())
+
+
+def _cre(dd, so):
+    """Create ``so`` in a determinant bitmap (None if occupied)."""
+    if (dd >> so) & 1:
+        return None
+    return dd | (1 << so), (-1.0) ** ((dd & ((1 << so) - 1)).bit_count())
+
+
+def _e1(dd, p, q):
+    """Spin-summed E(p, q) applied to a determinant bitmap.
+
+    Returns the list of (target bitmap, fermionic sign) over both spin
+    channels, matching the element rules the coupling build has always
+    used.
+    """
+    out = []
+    for spin in (0, 1):
+        r = _ann(dd, 2 * q + spin)
+        if r is None:
+            continue
+        d1, s1 = r
+        r2 = _cre(d1, 2 * p + spin)
+        if r2 is None:
+            continue
+        d2, s2 = r2
+        out.append((d2, s1 * s2))
+    return out
+
+
+def _apply2(dd, p1, q1, p2, q2):
+    """E(p2 q2) E(p1 q1) applied to a determinant bitmap ->
+    {target bitmap: coefficient}."""
+    acc = defaultdict(float)
+    for d1, c1 in _e1(dd, p1, q1):
+        for d2, c2 in _e1(d1, p2, q2):
+            acc[d2] += c1 * c2
+    return acc
 
 
 def caspt2_full_e2(h1e_mo, eri_mo, ci, dets, *, ncore, nact, nele, eps,
@@ -252,118 +361,63 @@ def caspt2_contracted_e2(h1e_mo, eri_mo, ci, dets, *, ncore, nact, nele, eps):
       across different active orbitals (measured on H2O: K(act2,act2)
       ~ -K(act1,act1)/42, so their W^2/D coincide); only the pool's
       leading orbital contributes those rows.  Core and virtual pools
-      have no such replicas and are summed in full.  (The single-
-      excitation class V0_ia has W = 0 identically -- its physical
-      contribution lives in the off-diagonal F coupling, out of scope of
-      this diagonal-complete scheme.)
+      have no such replicas and are summed in full.
+    - The single-excitation class V0_ia (Molcas case D, AIVX; ORCA
+      class table) is not the plain single excitation E(a,j)|0> -- that
+      one is Brillouin-forbidden at a CASSCF reference (W = 0 measured,
+      and it is why Vm1_a and V1_i come out as clean zeros, matching
+      ORCA).  Case D instead dresses the excitation with an active-pair
+      reorganization: per unordered active pair (u, v) -- the double
+      classes' pair convention -- two component functions (Molcas stores
+      two slots per pair, src/caspt2 ADDRHSD1/D2),
+
+          cross  K = E(v,u) E(a,j)|0>   -- coupling dominated by (aj|vu)
+          direct K = E(v,j) E(a,u)|0>   -- coupling dominated by (au|vj)
+
+      which coincide into a single component for the diagonal pairs
+      (v == u), and are solved per block as the projected amplitude
+      equation (see the class block below).
 
     Anchors (ratios to ORCA CASPT2 over the five dominant classes):
     H2O/6-31G CAS(2,2) 1.02 / 0.94 / 1.00 / 0.89 / 0.96 (V0_ijab, Vm1_iab,
-    Vm2_ab, V1_ija, V2_ij);  CO/6-31G CAS(2,2) total within 0.03%.
+    Vm2_ab, V1_ija, V2_ij);  V0_ia target -0.011135 (ORCA);
+    CO/6-31G CAS(2,2) total within 0.03%.
 
     Returns (e2_total, breakdown) with breakdown keyed by class name.
     """
-    from .nevpt2.impl import cas_dets_for2  # noqa: F401  (API parity)
-
     h1e_mo = np.asarray(h1e_mo)
     eri_mo = np.asarray(eri_mo)
     ci = np.asarray(ci).ravel()
     eps = np.asarray(eps, dtype=float)
     nmo = h1e_mo.shape[0]
     nocc = ncore + nact
-    nso = 2 * nmo
 
     ref_pairs = [(int(d), float(c)) for d, c in zip(dets, ci)
                  if abs(c) > 1e-14]
 
-    pi = np.arange(nso) // 2
-    si = np.arange(nso) % 2
-    h_so = np.where(si[:, None] == si[None, :],
-                    h1e_mo[pi[:, None], pi[None, :]], 0.0)
-    m4 = ((si[:, None, None, None] == si[None, None, :, None])
-          & (si[None, :, None, None] == si[None, None, None, :]))
-    eri_so = np.where(
-        m4, eri_mo[pi[:, None, None, None], pi[None, None, :, None],
-                   pi[None, :, None, None], pi[None, None, None, :]], 0.0)
-
-    _bits_cache = {}
-
-    def so_bits(x):
-        if x not in _bits_cache:
-            _bits_cache[x] = [i for i in range(nso) if (x >> i) & 1]
-        return _bits_cache[x]
-
-    def pc(x):
-        return bin(x).count('1')
-
-    def h_elem(J, K):
-        """<J|H|K> (Slater-Condon; verified bitwise against core.casci._block_H)."""
-        if J == K:
-            return 0.0
-        dj, dk = J & ~K, K & ~J
-        n = pc(dj)
-        if n != pc(dk) or n > 2:
-            return 0.0
-        if n == 1:
-            i = (dj & -dj).bit_length() - 1
-            k = (dk & -dk).bit_length() - 1
-            sgn = (-1.0) ** (pc(J & ((1 << i) - 1)) + pc(K & ((1 << k) - 1)))
-            tot = h_so[i, k]
-            for j in so_bits(J & K):
-                tot += eri_so[i, j, k, j] - eri_so[i, j, j, k]
-            return sgn * tot
-        i1, i2 = so_bits(dj)
-        k1, k2 = so_bits(dk)
-        sgn = (-1.0) ** (pc(J & ((1 << i1) - 1)) + pc(J & ((1 << i2) - 1))
-                         + pc(K & ((1 << k1) - 1)) + pc(K & ((1 << k2) - 1)))
-        return sgn * (eri_so[i1, i2, k1, k2] - eri_so[i1, i2, k2, k1])
-
-    def ann(dd, so):
-        if not (dd >> so) & 1:
-            return None
-        return dd ^ (1 << so), (-1.0) ** pc(dd & ((1 << so) - 1))
-
-    def cre(dd, so):
-        if (dd >> so) & 1:
-            return None
-        return dd | (1 << so), (-1.0) ** pc(dd & ((1 << so) - 1))
-
-    def e1(dd, p, q):
-        out = []
-        for spin in (0, 1):
-            r = ann(dd, 2 * q + spin)
-            if r is None:
-                continue
-            d1, s1 = r
-            r2 = cre(d1, 2 * p + spin)
-            if r2 is None:
-                continue
-            d2, s2 = r2
-            out.append((d2, s1 * s2))
-        return out
-
-    def apply2(dd, p1, q1, p2, q2):
-        acc = defaultdict(float)
-        for d1, c1 in e1(dd, p1, q1):
-            for d2, c2 in e1(d1, p2, q2):
-                acc[d2] += c1 * c2
-        return acc
+    h_elem, so_bits = _sc_kernel(h1e_mo, eri_mo)
 
     _g = {}
 
     def g_of(dd):
         if dd not in _g:
             _g[dd] = sum(cJ * h_elem(J, dd) for J, cJ in ref_pairs
-                         if pc(J ^ dd) <= 4)
+                         if (J ^ dd).bit_count() <= 4)
         return _g[dd]
 
-    def wsa(qs, ps, vm):
-        """(W, S, A) for the contracted function of the given pair labels."""
+    def wsa(qs, ps, vm, pair='both'):
+        """(W, S, A) for the contracted function of the given pair labels.
+
+        ``pair`` selects the operator combination of the two-pair branch:
+        'both' builds E(p1 q1)E(p2 q2) + fac E(p1 q2)E(p2 q1) as before;
+        'direct' and 'cross' keep a single term, which is how the two
+        independent amplitudes of the V0_ia class are built.
+        """
         if len(qs) == 1:
             q, p = qs[0], ps[0]
             kacc = defaultdict(float)
             for I, cI in ref_pairs:
-                for d1, cc in e1(I, p, q):
+                for d1, cc in _e1(I, p, q):
                     kacc[d1] += cI * cc
         else:
             q1, q2 = qs
@@ -371,10 +425,12 @@ def caspt2_contracted_e2(h1e_mo, eri_mo, ci, dets, *, ncore, nact, nele, eps):
             fac = -np.sqrt(3.0) if vm else 1.0
             kacc = defaultdict(float)
             for I, cI in ref_pairs:
-                for d2, cc in apply2(I, p1, q1, p2, q2).items():
-                    kacc[d2] += cI * cc
-                for d2, cc in apply2(I, p1, q2, p2, q1).items():
-                    kacc[d2] += fac * cI * cc
+                if pair in ('both', 'direct'):
+                    for d2, cc in _apply2(I, p1, q1, p2, q2).items():
+                        kacc[d2] += cI * cc
+                if pair in ('both', 'cross'):
+                    for d2, cc in _apply2(I, p1, q2, p2, q1).items():
+                        kacc[d2] += fac * cI * cc
         w = sum(cc * g_of(dd) for dd, cc in kacc.items())
         s = sum(cc * cc for cc in kacc.values())
         occ = np.zeros(nmo)
@@ -408,7 +464,6 @@ def caspt2_contracted_e2(h1e_mo, eri_mo, ci, dets, *, ncore, nact, nele, eps):
         ('Vm2_ab', act, act, vir, vir),
         ('V1_ija', core, core, act, vir),
         ('V2_ij', core, core, act, act),
-        ('V0_ia', core, None, vir, None),
         ('Vm1_a', act, None, vir, None),
         ('V1_i', core, None, act, None),
     ]
@@ -435,4 +490,268 @@ def caspt2_contracted_e2(h1e_mo, eri_mo, ci, dets, *, ncore, nact, nele, eps):
                         acc -= wm * wm / dnm2
         breakdown[name] = acc
         total += acc
+
+    # V0_ia (Molcas case D): one inactive hole, one virtual particle and
+    # an active-pair reorganization.  Per unordered active pair (u <= v)
+    # -- the double classes' pair convention -- and each (core j,
+    # virtual a) the class has two component functions, the 'cross' and
+    # 'direct' functions of the docstring, built with qs = (u, j) and
+    # ps = (a, v):
+    #   direct = apply2(p1, q1, p2, q2) = E(v,j) E(a,u)  -- u -> a, j -> v
+    #   cross  = apply2(p1, q2, p2, q1) = E(v,u) E(a,j)  -- j -> a, u -> v
+    # For a diagonal pair (v == u) the two components coincide as
+    # vectors, so the block carries ONE amplitude there.
+    #
+    # The components of a block are strongly overlapping (the cross and
+    # direct vectors share determinants with opposing weights), so the
+    # block is solved as the projected amplitude equation
+    #
+    #     M x = -W,   M[p, q] = sum_D K_p[D] K_q[D] (de_D - E0),
+    #
+    # the exact projection of the occupation-diagonal H0 - E0 onto the
+    # block, with W_p = <0|H|K_p> and E2 = sum_p W_p x_p.  Independent
+    # per-function contributions (the strictly diagonal reading) overcount
+    # the H2O class by 1.59x and CO by 1.79x against ORCA (t414 round 1);
+    # the block solve lands both systems within 2.3% (round 3) and
+    # reproduces the block orthogonality of the Molcas case structure.
+    acc_ia = 0.0
+    _de_cache = {}
+
+    def de_of(dd):
+        if dd not in _de_cache:
+            tot = 0.0
+            for p in range(nmo):
+                tot += ((dd >> (2 * p)) & 3).bit_count() * eps[p]
+            _de_cache[dd] = tot
+        return _de_cache[dd]
+
+    def kacc_of(mode, u, j, a, v):
+        kacc = defaultdict(float)
+        for I, cI in ref_pairs:
+            terms = (_apply2(I, a, j, v, u) if mode == 'cross'
+                     else _apply2(I, a, u, v, j))
+            for d2, cc in terms.items():
+                kacc[d2] += cI * cc
+        return kacc
+
+    for iu, u in enumerate(act):
+        for v in act[iu:]:
+            modes = ('cross',) if v == u else ('cross', 'direct')
+            for j in core:
+                for a in vir:
+                    ks = [kacc_of(m, u, j, a, v) for m in modes]
+                    ws = [sum(cc * g_of(dd) for dd, cc in k.items())
+                          for k in ks]
+                    n = len(ks)
+                    mmat = np.zeros((n, n))
+                    for p in range(n):
+                        for q in range(n):
+                            shared = ks[p].keys() & ks[q].keys()
+                            mmat[p, q] = sum(ks[p][d] * ks[q][d]
+                                             * (de_of(d) - e0_zero)
+                                             for d in shared)
+                    if n == 1:
+                        if abs(mmat[0, 0]) > 1e-10:
+                            acc_ia -= ws[0] * ws[0] / mmat[0, 0]
+                    else:
+                        det = (mmat[0, 0] * mmat[1, 1]
+                               - mmat[0, 1] * mmat[1, 0])
+                        if abs(det) > 1e-12:
+                            x = np.linalg.solve(mmat, -np.asarray(ws))
+                            acc_ia += float(np.dot(ws, x))
+    breakdown['V0_ia'] = acc_ia
+    total += acc_ia
+    return total, breakdown
+
+
+def caspt2_contracted_e2_jax(h1e_mo, eri_mo, ci, dets, *, ncore, nact, nele,
+                             eps):
+    """Differentiable twin of :func:`caspt2_contracted_e2`.
+
+    Same diagonal-complete contracted scheme, same class definitions and
+    the same diagonal denominator ``A - E0 * S``; verified elementwise
+    against the numpy reference (tests/core/test_caspt2.py, t414).
+
+    Every contracted function is linear in the CI vector by
+    construction, so its coupling W, overlap S and Fock expectation A
+    are static quadratic forms ``c^T M c``.  The matrices are built once
+    with numpy from the shared Slater-Condon kernel; the evaluation is a
+    chain of jax array operations, so ``jax.grad`` of the returned total
+    flows through the whole construction.  The static build costs
+    ``ndet``-squared Slater-Condon elements per function: intended for
+    pilot active spaces, not for production-size CI lists.
+
+    Returns ``(e2_total, breakdown)`` with jax scalars.
+    """
+    h_elem, _ = _sc_kernel(h1e_mo, eri_mo)
+    eps = np.asarray(eps, dtype=float)
+    nmo = eps.shape[0]
+    nocc = ncore + nact
+    dets = [int(d) for d in dets]
+    ndet = len(dets)
+
+    de_cache = {}
+
+    def de_of(dd):
+        """Per-determinant Fock energy, sum_p n_p(D) eps_p."""
+        if dd not in de_cache:
+            tot = 0.0
+            for p in range(nmo):
+                tot += ((dd >> (2 * p)) & 3).bit_count() * eps[p]
+            de_cache[dd] = tot
+        return de_cache[dd]
+
+    def v_single(p, q):
+        return [dict(_e1(Ibit, p, q)) for Ibit in dets]
+
+    def v_two(p1, q1, p2, q2, pair='both', fac=1.0):
+        out = []
+        for Ibit in dets:
+            if pair == 'direct':
+                out.append(dict(_apply2(Ibit, p1, q1, p2, q2)))
+            elif pair == 'cross':
+                out.append(dict(_apply2(Ibit, p1, q2, p2, q1)))
+            else:
+                acc = defaultdict(float)
+                for tgt, sgn in _apply2(Ibit, p1, q1, p2, q2).items():
+                    acc[tgt] += sgn
+                for tgt, sgn in _apply2(Ibit, p1, q2, p2, q1).items():
+                    acc[tgt] += fac * sgn
+                out.append(dict(acc))
+        return out
+
+    def gram_forms(va, vb):
+        """(S, A) quadratic-form matrices between two component sets:
+        S[i, j] = <va_i|vb_j> and A[i, j] = the same with the per-
+        determinant Fock energy de_D as weight."""
+        q = np.zeros((ndet, ndet))
+        qa = np.zeros((ndet, ndet))
+        for i, vi in enumerate(va):
+            if not vi:
+                continue
+            for j, vj in enumerate(vb):
+                if not vj:
+                    continue
+                qij = 0.0
+                qaij = 0.0
+                for tgt in vi.keys() & vj.keys():
+                    qij += vi[tgt] * vj[tgt]
+                    qaij += vi[tgt] * vj[tgt] * de_of(tgt)
+                q[i, j] = qij
+                qa[i, j] = qaij
+        return q, qa
+
+    def w_form(vrefs):
+        """The coupling quadratic form W = c^T mw c of one component set."""
+        mw = np.zeros((ndet, ndet))
+        for i, vi in enumerate(vrefs):
+            if not vi:
+                continue
+            for j in range(ndet):
+                mwij = 0.0
+                for tgt, sgn in vi.items():
+                    mwij += sgn * h_elem(dets[j], tgt)
+                mw[i, j] = mwij
+        return mw
+
+    def forms(vrefs):
+        """Static (W, S, A) quadratic-form matrices of one function."""
+        mw = w_form(vrefs)
+        q, qa = gram_forms(vrefs, vrefs)
+        return mw, q, qa
+
+    ci = jnp.asarray(ci).ravel()
+    e0 = jnp.sum(ci * ci * jnp.asarray([de_of(d) for d in dets]))
+
+    def contrib(fmat):
+        mw, q, qa = fmat
+        w = ci @ jnp.asarray(mw) @ ci
+        s = ci @ jnp.asarray(q) @ ci
+        a = ci @ jnp.asarray(qa) @ ci
+        dnm = a - e0 * s
+        ok = jnp.abs(dnm) > 1e-10
+        return -jnp.where(ok, w * w / jnp.where(ok, dnm, 1.0), 0.0)
+
+    core = list(range(ncore))
+    act = list(range(ncore, nocc))
+    vir = list(range(nocc, nmo))
+
+    def pairs_list(o1, o2):
+        if o2 is None:
+            return [(x,) for x in o1]
+        if o1 is o2:
+            return [(o1[i], o1[j]) for i in range(len(o1))
+                    for j in range(i, len(o1))]
+        return [(x, y) for x in o1 for y in o2]
+
+    classes = [
+        ('V0_ijab', core, core, vir, vir),
+        ('Vm1_iab', act, core, vir, vir),
+        ('Vm2_ab', act, act, vir, vir),
+        ('V1_ija', core, core, act, vir),
+        ('V2_ij', core, core, act, act),
+        ('Vm1_a', act, None, vir, None),
+        ('V1_i', core, None, act, None),
+    ]
+    breakdown = {}
+    total = 0.0
+    for name, o1, o2, i1c, i2c in classes:
+        acc = 0.0
+        for qs in pairs_list(o1, o2):
+            if len(qs) == 2 and qs[0] == qs[1] and qs[0] in act \
+                    and qs[0] != act[0]:
+                continue
+            for ps in pairs_list(i1c, i2c):
+                if len(ps) == 2 and ps[0] == ps[1] and ps[0] in act \
+                        and ps[0] != act[0]:
+                    continue
+                if len(qs) == 1:
+                    acc += contrib(forms(v_single(ps[0], qs[0])))
+                else:
+                    acc += contrib(forms(v_two(ps[0], qs[0], ps[1], qs[1])))
+                    if qs[0] != qs[1] and ps[0] != ps[1]:
+                        acc += contrib(forms(v_two(ps[0], qs[0], ps[1], qs[1],
+                                                   fac=-np.sqrt(3.0))))
+        breakdown[name] = acc
+        total += acc
+
+    # V0_ia (Molcas case D): per unordered active pair one or two
+    # components, solved per block as M x = -W with
+    # M[p, q] = sum_D K_p K_q (de_D - E0), exactly as in the numpy
+    # reference.  Every entry is a static quadratic form in c.
+    acc_ia = 0.0
+    for iu, u in enumerate(act):
+        for v in act[iu:]:
+            modes = ('cross',) if v == u else ('cross', 'direct')
+            for j in core:
+                for a in vir:
+                    vls = [v_two(a, u, v, j, pair=m) for m in modes]
+                    ws = [ci @ jnp.asarray(w_form(x)) @ ci for x in vls]
+                    if len(vls) == 1:
+                        q, qa = gram_forms(vls[0], vls[0])
+                        m00 = (ci @ jnp.asarray(qa) @ ci
+                               - e0 * (ci @ jnp.asarray(q) @ ci))
+                        ok = jnp.abs(m00) > 1e-10
+                        acc_ia += -jnp.where(
+                            ok, ws[0] * ws[0] / jnp.where(ok, m00, 1.0), 0.0)
+                    else:
+                        mm = []
+                        for p in range(len(vls)):
+                            row = []
+                            for q in range(len(vls)):
+                                g, ga = gram_forms(vls[p], vls[q])
+                                row.append(ci @ jnp.asarray(ga) @ ci
+                                           - e0 * (ci @ jnp.asarray(g) @ ci))
+                            mm.append(jnp.stack(row))
+                        mmat = jnp.stack(mm)
+                        wvec = jnp.stack(ws)
+                        det = (mmat[0, 0] * mmat[1, 1]
+                               - mmat[0, 1] * mmat[1, 0])
+                        ok = jnp.abs(det) > 1e-12
+                        eye = jnp.eye(len(vls))
+                        x = jnp.linalg.solve(
+                            mmat + jnp.where(ok, 0.0, 1.0) * eye, -wvec)
+                        acc_ia += jnp.where(ok, jnp.dot(wvec, x), 0.0)
+    breakdown['V0_ia'] = acc_ia
+    total += acc_ia
     return total, breakdown
