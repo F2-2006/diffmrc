@@ -38,14 +38,36 @@ def block_rotation(theta, nmo, pairs):
     orbital set on the right, so the orbitals become a differentiable function
     of a fixed-size parameter vector.
 
+    The accumulation runs as a `lax.scan` with the pair indices as runtime
+    values, so the traced graph carries one scan node instead of one node per
+    pair: its size is independent of the pair count.  The earlier unrolled
+    Python loop made the compile cost grow with the window -- at the ~10^3-pair
+    windows of the aromatic QUESTDB set, single jit compiles took tens of
+    minutes and ~20 GB (benzene/cc-pVDZ, 2026-10-13).  Each step applies the
+    same arithmetic as ``R @ Rt`` through two column updates (columns i and j
+    mix as col_i' = c*col_i - s*col_j, col_j' = s*col_i + c*col_j; all other
+    columns are untouched), and the step order -- hence the parametrization --
+    is unchanged.
+
     `pairs` must span every non-redundant inter-block rotation; see
     orblib.orbital_pairs.
     """
-    R = jnp.eye(nmo)
-    for t, (i, j) in zip(theta, pairs):
+    if len(pairs) == 0:
+        return jnp.eye(nmo)
+    idx_i = jnp.asarray([p[0] for p in pairs], dtype=jnp.int32)
+    idx_j = jnp.asarray([p[1] for p in pairs], dtype=jnp.int32)
+
+    def _step(R, xs):
+        t, i, j = xs
         c, s = jnp.cos(t), jnp.sin(t)
-        Rt = jnp.eye(nmo).at[i, i].set(c).at[i, j].set(s).at[j, i].set(-s).at[j, j].set(c)
-        R = R @ Rt
+        ci = R[:, i]
+        cj = R[:, j]
+        R = R.at[:, i].set(c * ci - s * cj)
+        R = R.at[:, j].set(s * ci + c * cj)
+        return R, None
+
+    R, _ = jax.lax.scan(_step, jnp.eye(nmo),
+                        (jnp.asarray(theta), idx_i, idx_j))
     return R
 
 def optimize_theta(mol, C0, E_of, npar, steps=200, g_conv=1e-9,

@@ -529,6 +529,18 @@ def make_nevpt2_sa_theta_fn(mol, ncore, nact, nele, nmo, pairs, scf_builder,
         return _sa_components_from(C0_, h_, e_, enuc, th_, want_e2=want_e2,
                                    **kw)
 
+    def components_args(th_, C0__, h__, e__, want_e2=True):
+        # Array-argument form of ``components``: identical numerics, but
+        # the reference arrays enter as traced arguments instead of
+        # closure constants -- required by the jitted theta optimizers,
+        # whose compiles otherwise embed the nao^4 AO ERI in the graph
+        # (a 20 GB compile at benzene/cc-pVDZ, 2026-10-13).
+        return _sa_components_from(C0__, h__, e__, enuc, th_,
+                                   want_e2=want_e2, **kw)
+
+    components.arrays = (C0_, h_, e_)
+    components.component_args = components_args
+
     return components
 
 
@@ -794,9 +806,16 @@ def sa_nevpt2_table_from_mol(mol, family, scf_builder, *, nroots,
     comp = make_nevpt2_sa_theta_fn(mol, ncore, nact, nele, nmo, pairs,
                                    scf_builder, nroots=nroots,
                                    e2_scale=e2_scale)
-    point = converge_orbital_point(lambda th: comp(th, want_e2=False)['E_sa'],
-                                   len(pairs), max_steps=max_steps,
-                                   refine_max_iter=refine_max_iter)
+
+    def _E_sa_args(th_, *arrays):
+        # The orbital-point search is the jitted stage: route the AO
+        # integrals through jit arguments (see components_args).
+        return comp.component_args(th_, *arrays, want_e2=False)['E_sa']
+
+    point = converge_orbital_point(_E_sa_args, len(pairs),
+                                   max_steps=max_steps,
+                                   refine_max_iter=refine_max_iter,
+                                   arrays=comp.arrays)
     out = comp(point.theta)
     rows, groups = sa_nevpt2_state_table(out, dets)
     return {'window': {'ncore': ncore, 'nact': nact, 'nele': nele},

@@ -61,8 +61,15 @@ _LR_FLOOR = 1e-6
 
 
 def optimize_theta_scipy(E_of, npar, steps=400, g_conv=1e-8,
-                         theta0=None, label='', log_interval=0):
+                         theta0=None, label='', log_interval=0, arrays=()):
     """Primary path: scipy L-BFGS-B.
+
+    ``arrays`` are extra runtime arguments appended to every call of
+    ``E_of(theta, *arrays)``: large reference arrays (AO integrals) must
+    travel this way rather than through closure, or ``jax.jit`` embeds
+    them in the traced graph as constants and the compiles explode
+    (nao^4 tensors; the pattern of driver.kernel.energy_function, and
+    the lesson of a 20 GB compile at benzene/cc-pVDZ, 2026-10-13).
 
     Returns (E_jit, theta, gnorm, info).
     """
@@ -72,10 +79,10 @@ def optimize_theta_scipy(E_of, npar, steps=400, g_conv=1e-8,
     g_jit = jax.jit(jax.grad(E_of))
 
     def fun(x):
-        return float(E_jit(jnp.asarray(x)))
+        return float(E_jit(jnp.asarray(x), *arrays))
 
     def jac(x):
-        return np.asarray(g_jit(jnp.asarray(x)), dtype=float)
+        return np.asarray(g_jit(jnp.asarray(x), *arrays), dtype=float)
 
     x0 = (np.zeros(npar) if theta0 is None
           else np.asarray(theta0, dtype=float))
@@ -93,14 +100,16 @@ def optimize_theta_scipy(E_of, npar, steps=400, g_conv=1e-8,
             ok=False, msg=f'{type(ex).__name__}: {str(ex)[:50]}', nit=-1)
 
     theta = jnp.asarray(x)
-    gnorm = float(jnp.linalg.norm(g_jit(theta)))
+    gnorm = float(jnp.linalg.norm(g_jit(theta, *arrays)))
     return E_jit, theta, gnorm, dict(ok=ok, msg=msg, nit=n_it,
-                                     E=float(E_jit(theta)))
+                                     E=float(E_jit(theta, *arrays)))
 
 
 def optimize_theta_hand(E_of, npar, steps=400, g_conv=1e-9, theta0=None,
-                        label='', log_interval=0):
+                        label='', log_interval=0, arrays=()):
     """Fallback path: hand-written L-BFGS with both defects fixed.
+
+    ``arrays`` as in ``optimize_theta_scipy``.
 
     Returns (E_jit, theta, gnorm, info).
     """
@@ -108,7 +117,7 @@ def optimize_theta_hand(E_of, npar, steps=400, g_conv=1e-9, theta0=None,
     g_jit = jax.jit(jax.grad(E_of))
 
     theta = (jnp.zeros(npar) if theta0 is None else jnp.asarray(theta0))
-    g = g_jit(theta)
+    g = g_jit(theta, *arrays)
     gnorm = float(jnp.linalg.norm(g))
     s_list, y_list = [], []
     m = 8
@@ -125,7 +134,7 @@ def optimize_theta_hand(E_of, npar, steps=400, g_conv=1e-9, theta0=None,
             except Exception:
                 rss_s = ''
             logger.info('[%s iter %d] E = %.10f  |g| = %.2e%s',
-                        label, it, float(E_jit(theta)), gnorm, rss_s)
+                        label, it, float(E_jit(theta, *arrays)), gnorm, rss_s)
 
         # ---- L-BFGS two-loop recursion
         ss, ys = s_list, y_list
@@ -157,13 +166,13 @@ def optimize_theta_hand(E_of, npar, steps=400, g_conv=1e-9, theta0=None,
             dn = 10.0
 
         # ---- Armijo backtracking
-        e = float(E_jit(theta))
+        e = float(E_jit(theta, *arrays))
         gd = float(g @ d)
         lr = 1.0
         accepted = False
         for _ in range(30):
             theta_new = theta + lr * d
-            if float(E_jit(theta_new)) < e + 1e-4 * lr * gd:
+            if float(E_jit(theta_new, *arrays)) < e + 1e-4 * lr * gd:
                 accepted = True
                 break
             lr *= 0.5
@@ -180,7 +189,7 @@ def optimize_theta_hand(E_of, npar, steps=400, g_conv=1e-9, theta0=None,
             n_stall = 0
 
         s = theta_new - theta
-        y = g_jit(theta_new) - g
+        y = g_jit(theta_new, *arrays) - g
         if float(s @ y) > 1e-12:
             s_list.append(s)
             y_list.append(y)
@@ -188,13 +197,13 @@ def optimize_theta_hand(E_of, npar, steps=400, g_conv=1e-9, theta0=None,
                 s_list.pop(0)
                 y_list.pop(0)
         theta = theta_new
-        g = g_jit(theta)
+        g = g_jit(theta, *arrays)
         gnorm = float(jnp.linalg.norm(g))
         if n_stall > 20:
             break
 
     return E_jit, theta, gnorm, dict(ok=(gnorm < 1e-6), msg='hand',
-                                     nit=it + 1, E=float(E_jit(theta)))
+                                     nit=it + 1, E=float(E_jit(theta, *arrays)))
 
 
 def optimize_theta(mol, C0, E_of, npar, steps=400, g_conv=1e-8,

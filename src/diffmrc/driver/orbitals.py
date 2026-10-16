@@ -65,14 +65,16 @@ def hessp_of(E_theta):
 
     g = jax.grad(E_theta)
 
+    # The returned callable takes the optional runtime arrays after
+    # (x, v): hvp(x, v, *arrays), matching the optimizer convention.
     @jax.jit
-    def hvp(x, v):
-        return jax.jvp(g, (x,), (v,))[1]
+    def hvp(x, v, *arr):
+        return jax.jvp(lambda t: g(t, *arr), (x,), (v,))[1]
 
     return hvp
 
 
-def _trust_region_polish(E_theta, theta0, target, max_iter=200):
+def _trust_region_polish(E_theta, theta0, target, max_iter=200, arrays=()):
     """A trust-region step from a point the two stages could not settle.
 
     Measured on H2O/6-31g's lower basin (2026-09-22): the two-stage
@@ -102,13 +104,13 @@ def _trust_region_polish(E_theta, theta0, target, max_iter=200):
     x0 = np.asarray(theta0, dtype=float)
 
     def fun(x):
-        return float(E_jit(jnp.asarray(x)))
+        return float(E_jit(jnp.asarray(x), *arrays))
 
     def jac(x):
-        return np.asarray(g_jit(jnp.asarray(x)), dtype=float)
+        return np.asarray(g_jit(jnp.asarray(x), *arrays), dtype=float)
 
     def hessp(x, p):
-        return np.asarray(hvp_jit(jnp.asarray(x), jnp.asarray(p)),
+        return np.asarray(hvp_jit(jnp.asarray(x), jnp.asarray(p), *arrays),
                           dtype=float)
 
     try:
@@ -119,7 +121,7 @@ def _trust_region_polish(E_theta, theta0, target, max_iter=200):
     except Exception:
         return None
     x = np.asarray(res.x, dtype=float)
-    g = float(np.linalg.norm(np.asarray(g_jit(jnp.asarray(x)),
+    g = float(np.linalg.norm(np.asarray(g_jit(jnp.asarray(x), *arrays),
                                         dtype=float)))
     return x, float(res.fun), g
 
@@ -166,7 +168,7 @@ def converge_orbital_point(E_theta, npar, theta0=None,
                            optimize_tol=OPTIMIZER_GRAD_TOL,
                            refine_target=REFINE_TARGET,
                            max_steps=MAX_STEPS,
-                           refine_max_iter=REFINE_MAX_ITER):
+                           refine_max_iter=REFINE_MAX_ITER, arrays=()):
     """Optimize with a loose target, then refine to the tight one.
 
     Parameters
@@ -183,6 +185,10 @@ def converge_orbital_point(E_theta, npar, theta0=None,
         Target for the Newton stage, and the one the verdict uses.
     max_steps, refine_max_iter : int
         Iteration caps for the two stages.
+    arrays : tuple
+        Extra runtime arguments appended to every ``E_theta(theta, *arrays)``
+        call (see ``optimizer.optimize_theta_scipy``); pass the AO
+        integrals here, not through the closure.
 
     Returns
     -------
@@ -190,15 +196,16 @@ def converge_orbital_point(E_theta, npar, theta0=None,
     """
     info = {}
     E_jit, theta, g_after, info = optimize_theta_scipy(
-        E_theta, npar, steps=max_steps, g_conv=optimize_tol, theta0=theta0)
+        E_theta, npar, steps=max_steps, g_conv=optimize_tol, theta0=theta0,
+        arrays=arrays)
     if E_jit is None:
         # scipy raised; the handwritten fallback keeps the run alive.
         E_jit, theta, g_after, info = optimize_theta_hand(
             E_theta, npar, steps=max_steps, g_conv=optimize_tol,
-            theta0=theta0)
+            theta0=theta0, arrays=arrays)
 
     sp = refine_stationary_point(E_theta, theta, max_iter=refine_max_iter,
-                                 target=refine_target)
+                                 target=refine_target, arrays=arrays)
     polished = False
     if not sp.is_stationary:
         # The two stages stopped above the target: the chart may still
@@ -209,7 +216,8 @@ def converge_orbital_point(E_theta, npar, theta0=None,
         th, en, gn = sp.theta, float(sp.energy), float(sp.grad_norm)
         for _ in range(3):
             improved = _trust_region_polish(E_theta, th, refine_target,
-                                            max_iter=2 * refine_max_iter)
+                                            max_iter=2 * refine_max_iter,
+                                            arrays=arrays)
             if improved is None or improved[2] >= gn:
                 break
             th, en, gn = improved

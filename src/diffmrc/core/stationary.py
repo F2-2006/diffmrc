@@ -222,7 +222,8 @@ def _cg_solve(matvec, b, tol=_CG_TOL, maxiter=_CG_MAXITER):
     return x
 
 
-def refine_stationary_point(E_theta, theta0, max_iter=80, target=1e-11):
+def refine_stationary_point(E_theta, theta0, max_iter=80, target=1e-11,
+                            arrays=()):
     """Damped Newton refinement that only ever moves downhill.
 
     The Newton step solves ``(H + lam I) x = g`` by conjugate gradients
@@ -241,6 +242,10 @@ def refine_stationary_point(E_theta, theta0, max_iter=80, target=1e-11):
         ``optimizer.optimize_theta``.
     max_iter : int
         Iteration cap.
+    arrays : tuple
+        Extra runtime arguments appended to every ``E_theta(theta, *arrays)``
+        call; the same contract as ``optimizer.optimize_theta_scipy``
+        (large reference arrays must not sit in a jit closure).
     target : float
         Stop when the gradient norm falls below this.
 
@@ -256,16 +261,16 @@ def refine_stationary_point(E_theta, theta0, max_iter=80, target=1e-11):
     grad_plain = jax.grad(E_theta)
     grad = jax.jit(grad_plain)
 
-    def _hvp_raw(theta, v):
-        return jax.jvp(grad_plain, (theta,), (v,))[1]
+    def _hvp_raw(theta, v, *arr):
+        return jax.jvp(lambda t: grad_plain(t, *arr), (theta,), (v,))[1]
 
     hvp = jax.jit(_hvp_raw)
 
     theta = jnp.asarray(np.asarray(theta0, dtype=float))
-    energy = float(E_theta(theta))
+    energy = float(E_theta(theta, *arrays))
     lam = _LAMBDA_INIT
     n_accepted = 0
-    gnorm = float(jnp.linalg.norm(grad(theta)))
+    gnorm = float(jnp.linalg.norm(grad(theta, *arrays)))
     # Default to the cap: it is the reason that needs no break to reach.
     reason = StopReason.ITERATION_CAP
 
@@ -273,11 +278,11 @@ def refine_stationary_point(E_theta, theta0, max_iter=80, target=1e-11):
         if gnorm < target:
             reason = StopReason.CONVERGED
             break
-        g = np.asarray(grad(theta), dtype=float)
+        g = np.asarray(grad(theta, *arrays), dtype=float)
         accepted = False
         for _try in range(_INNER_TRIES):
             def _matvec(v):
-                return np.asarray(hvp(theta, jnp.asarray(v)),
+                return np.asarray(hvp(theta, jnp.asarray(v), *arrays),
                                   dtype=float) + lam * v
 
             step = _cg_solve(_matvec, g)
@@ -287,7 +292,7 @@ def refine_stationary_point(E_theta, theta0, max_iter=80, target=1e-11):
                 lam *= _LAMBDA_UP
                 continue
             candidate = theta - jnp.asarray(step)
-            e_new = float(E_theta(candidate))
+            e_new = float(E_theta(candidate, *arrays))
             if e_new <= energy + _ENERGY_SLACK:
                 theta, energy = candidate, e_new
                 lam = max(lam * _LAMBDA_DOWN, _LAMBDA_MIN)
@@ -300,7 +305,7 @@ def refine_stationary_point(E_theta, theta0, max_iter=80, target=1e-11):
             reason = StopReason.GUARD_STOPPED
             break
 
-        g_new = float(jnp.linalg.norm(grad(theta)))
+        g_new = float(jnp.linalg.norm(grad(theta, *arrays)))
         # Lowering the energy is necessary but not sufficient. A function
         # with no stationary point (linear in some direction) lowers the
         # energy at every step, so the downhill rule alone lets the

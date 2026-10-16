@@ -185,7 +185,14 @@ def _validate_input(path, charge, spin, active_space):
         try:
             from pyscf import gto
             atom = '; '.join(f'{s} 0 0 0' for s in symbols)
-            gto.M(atom=atom, unit='Angstrom', verbose=0)
+            # charge and spin must travel with the probe: a charged
+            # input (e.g. a closed-shell cation) is consistent only at
+            # its own charge, and omitting them made the probe reject
+            # valid inputs with "Electron number ... and spin ... are
+            # not consistent" before any calculation ran (found on the
+            # streptocyanine cations, 2026-10-14).
+            gto.M(atom=atom, unit='Angstrom', charge=charge, spin=spin,
+                  verbose=0)
         except ImportError:
             pass                      # the kernel is optional for --check
         except Exception as exc:
