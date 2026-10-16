@@ -140,7 +140,9 @@ def _ci_matrix(h1e_mo, eri_mo, ncore, nact, nele_act):
     index order). The Hamiltonian is applied operator by operator with
     explicit parity counting, so no derived Slater-Condon sign formula is
     involved; the two-electron integrals enter in the physicist convention
-    ``<pq|rs> = (pr|qs)_chem``.
+    ``<pq|rs> = (pr|qs)_chem``. Excitations whose target leaves the
+    determinant list -- the core excitations of an ncore > 0 space -- are
+    skipped: the operator term is real but acts outside the space.
     """
     nso = 2 * (ncore + nact)
     core = tuple(range(2 * ncore))
@@ -175,7 +177,7 @@ def _ci_matrix(h1e_mo, eri_mo, ncore, nact, nele_act):
             if o1 is None:
                 continue
             o2, s2 = cre(o1, p)
-            if o2 is None:
+            if o2 is None or o2 not in index:
                 continue
             big[index[o2], col] += s1 * s2 * h[p, q]
         for r in occ:
@@ -193,7 +195,9 @@ def _ci_matrix(h1e_mo, eri_mo, ncore, nact, nele_act):
                         if v == 0.0:
                             continue
                         o4, s4 = cre(o3, p)
-                        big[index[o4], col] += 0.5 * s1 * s2 * s3 * s4 * v
+                        if o4 is not None and o4 in index:
+                            big[index[o4], col] += (0.5 * s1 * s2 * s3 * s4
+                                                    * v)
     return big
 
 
