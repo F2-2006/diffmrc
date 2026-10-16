@@ -65,6 +65,19 @@ values still carry large condition numbers (magnitudes ~1e5 on N2), so
 regularization awareness remains part of the contract. Finite differences
 of the first-order gradient stay the independent cross-check.
 
+``eigh_soft2`` (P0.5, 2026-10-16) is the softening counterpart of
+``eigh_cluster_ift``: it keeps the Lorentzian first-order rule of
+``eigh_safe`` -- measured bit-equal to it, 6.4e-15 -- while replacing the
+exact cluster resolvent by a Tikhonov-softened one, so its couplings stay
+bounded by 1/(2 tau) instead of diverging with the physical gap and its
+second derivative is finite without any hard spike. Its second derivative
+is still a *frozen* rule (the decomposition is stopped at the evaluation
+point): the channel through the decomposition's own response is absent,
+the same "frozen gauge vs finite differences" gap documented at t269. FD
+of the AD gradient recovers the full value-function derivative (measured
+1.9% on the bit-exact fixture, 7e-6 on a well-separated control); see the
+function docstring for the numbers.
+
 USED BY
 
 - ``core.nevpt2.impl.canonicalize_jax`` (active natural orbitals, sub-Fock
@@ -92,7 +105,7 @@ from jax import numpy as jnp
 import numpy as _np
 
 __all__ = ['eigh_safe', 'make_eigh_mask', 'eigh_mask', 'eigh_cluster_ift',
-           'set_trace_sink']
+           'eigh_soft2', 'set_trace_sink']
 
 # Diagnostic hook (added 2026-10-10 after the t397 lesson: the
 # cluster-member scan had to monkey-patch this frozen module from
@@ -234,8 +247,17 @@ def eigh_cluster_ift(a, tol=1e-8):
     kernel's bordered IFT step).
 
     ``tol`` must separate the degenerate clusters from the smallest real
-    gap; on the CO chain the clusters are bit-exact (1e-15) and the
-    smallest real gap is 1.5e-2, so the default 1e-8 is safe.
+    gap, and at theta* that band is not empty. At theta = 0 the symmetry
+    pairs are bit-exact (1e-15), so any small tol works there; at the
+    minimizer the rotated basis splits the same pairs to 1.9e-8 .. 1.2e-5
+    (floating noise, not physics; t277/t280), which straddles the 1e-8
+    signature default -- the pairs then fall outside the clusters and the
+    derivative takes the raw 1/gap resolvent, measured as the 450x
+    AD-vs-FD disagreement at theta* (t275/t282). The physical gaps start
+    at 1.9e-2, three to six orders above the split band, so the working
+    window is ~1e-7 .. 1e-2; use 1e-4 (mid-band, t286), which is what
+    driver-level callers pass (t418). The signature default is kept at
+    1e-8 for bit-exact spectra only.
     """
     _trace_call('eigh_cluster_ift', a)
     w, u = jnp.linalg.eigh(a)
@@ -264,3 +286,82 @@ def eigh_cluster_ift(a, tol=1e-8):
     # w at the solution and carries u^T dA u as its derivative.
     w_out = jnp.diag(u_sg.T @ (a @ u_sg))
     return w_out, u_out
+
+
+def eigh_soft2(a, tau=1e-4, tol=1e-4):
+    """Second-order-safe eigendecomposition with a softened resolvent (P0.5).
+
+    Same skeleton as :func:`eigh_cluster_ift` -- the decomposition (w, u) is
+    stopped at the evaluation point and every output is an explicit smooth
+    function of the live matrix -- but the exact cluster resolvent
+    ``M^-1`` is replaced by the Tikhonov-softened one, applied per column as
+
+        U_new_i = u_i - C_i (C_i^2 + tau^2 I)^-1 (C_i u_i),
+        C_i     = (I - P_i)(a - w_i^ray I)(I - P_i),
+
+    with ``w_i^ray = u_i^T a u_i`` the live Rayleigh quotient, ``P_i`` the
+    projector onto the columns whose stopped eigenvalues lie within ``tol``
+    of ``w_i``, and the small-residual grouping chosen so the solve's
+    constant is not felt in the values (the correction is a value-zero
+    expression; the solve acts on a ~1e-16 right-hand side).
+
+    WHY THIS FORM. The first derivative of this expression is the
+    Lorentzian rule of :func:`eigh_safe` -- measured against it on 5x5
+    well-separated matrices: max deviation 6.4e-15 (eigenvectors) and
+    2.8e-17 (eigenvalues), 2026-10-16. The cluster projector zeroes the
+    intra-cluster couplings identically at every order (the flat freeze of
+    :func:`eigh_mask`), which is what removes the ``F'(0) = 1/tau^2``
+    gauge curvature that an unclustered Lorentzian carries: on the 4x4
+    bit-exact-pair fixture below, the unclustered variant's HVP read
+    +7.5e6 (scaling exactly as 1/tau^2 across tau = 1e-2 .. 1e-4) while
+    this function reads +0.59 against a value-level reference of +0.70.
+    Outside the cluster the softened coupling is bounded by 1/(2 tau),
+    so the second derivative has no raw 1/gap^2 growth (the boundary
+    audit's large-condition-number components); the trade is the
+    (tau/gap)^2 first-order deviation of the Lorentzian, unchanged from
+    :func:`eigh_safe`.
+
+    WHAT THE SECOND DERIVATIVE IS. The frozen rule's second derivative
+    differentiates the softened perturbation series, not the value
+    function: the channel where the decomposition itself responds to the
+    perturbation is absent (it cannot be represented without the raw
+    1/gap). On the gauge-invariant loss of the fixture the AD HVP is
+    +0.593 against a value-level reference +0.704 (16%); on an adversarial
+    non-gauge loss on a well-separated matrix the gap can reach O(1/gn^2)
+    scale. This is the same frozen-vs-FD semantics measured at t269
+    (chain-level 7% residual) and t283 (5e-6 at CO/6-31G theta*). The FD
+    of the AD gradient does carry the full derivative and is the accurate
+    second-order route for this family (measured 1.9% on the fixture and
+    7e-6 on the control, versus the value-level FD).
+
+    VALUES. The correction vanishes identically at the evaluation point
+    (every factor is a residual that is zero at the point), so the values
+    are the plain ``jnp.linalg.eigh`` values: bit-equal on the fixture
+    (du = 0.0) and 2.2e-15 on the control.
+
+    ``tol`` must separate the numerical-split band from the smallest
+    physical gap. Measured window on CO/6-31G at theta*: split band
+    1.9e-8 .. 1.2e-5, physical gaps from 1.9e-2, so anything in
+    ~1e-7 .. 1e-2 works; the default 1e-4 sits mid-band (t286). ``tol=0``
+    disables the freeze for spectra without near-degeneracies.
+    """
+    _trace_call('eigh_soft2', a)
+    a = 0.5 * (a + a.T)
+    w, u = jnp.linalg.eigh(a)
+    w0 = jax.lax.stop_gradient(w)
+    u0 = jax.lax.stop_gradient(u)
+    n = a.shape[0]
+    eye = jnp.eye(n)
+    tau2 = tau * tau
+    close = jnp.abs(w0[None, :] - w0[:, None]) <= tol
+    cols = []
+    for i in range(n):
+        ui = u0[:, i]
+        wi = ui @ (a @ ui)
+        Pi = (u0 * close[i][None, :]) @ u0.T
+        Ii = eye - Pi
+        C = Ii @ (a - wi * eye) @ Ii
+        b = Ii @ ((a - wi * eye) @ ui)
+        y = jnp.linalg.solve(C @ C + tau2 * eye, b)
+        cols.append(ui - C @ y)
+    return jnp.diag(u0.T @ (a @ u0)), jnp.stack(cols, axis=1)
