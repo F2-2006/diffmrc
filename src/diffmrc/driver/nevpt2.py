@@ -50,7 +50,7 @@ from ..core.eigh import eigh_cluster_ift, eigh_safe
 
 __all__ = ['make_nevpt2_joint_fn', 'make_nevpt2_theta_fn',
            'nevpt2_nuclear_gradient', 'nevpt2_hvp',
-           'nevpt2_relaxed_hessian']
+           'nevpt2_relaxed_hessian', 'nevpt2_relaxed_nuclear_gradient']
 
 
 def _spin_links(nact, nele):
@@ -728,7 +728,7 @@ def nevpt2_relaxed_hessian(mol, theta, E_casscf, E_nevpt2, rcond=None):
     while the frozen curvature and the mixed term come from the NEVPT2
     energy itself. In Park's Lagrangian this is exactly the split between
     the CASSCF Z-vector (the response operator) and the NEVPT2 source
-    terms (``文献细读/细读_NEVPT2梯度_BAGEL2019.md``, Eqs. 23-28).
+    terms (the BAGEL 2019 NEVPT2 gradient notes, Eqs. 23-28).
 
     Optimizing theta on the SC-NEVPT2 surface is not an alternative: that
     surface is not smooth (the SC energy lacks invariance under inactive
@@ -770,6 +770,126 @@ def nevpt2_relaxed_hessian(mol, theta, E_casscf, E_nevpt2, rcond=None):
         dtheta_dR_max=float(np.abs(D).max()) if D.size else 0.0,
         rcond=float(rcond),
     )
+
+
+def nevpt2_relaxed_nuclear_gradient(mol, theta, E_casscf, E_nevpt2,
+                                    rcond=None, D=None, d_e2=None):
+    """dE_nevpt2/dR along the CASSCF-relaxed orbital path (first order).
+
+    The orbital path is the CASSCF one: theta*(R) solves
+    dE_casscf/dtheta = 0, so
+
+        dtheta*/dR = -pinv(H_tt) M,
+        H_tt = d2E_casscf/dtheta2,   M = d2E_casscf/dtheta dR,
+
+    and along that path
+
+        dE_nevpt2/dR = dE_nevpt2/dR|theta
+                     - (d e2/dtheta) . pinv(H_tt) M,
+
+    with e2 = E_nevpt2 - E_casscf the correlation correction. The CASSCF
+    part needs no response term: theta* is its own stationary point and
+    the envelope theorem removes dtheta*/dR from its derivative. The
+    correlation part does need it, because NEVPT2 is not variational in
+    the orbitals -- d e2/dtheta does not vanish, and
+    ``nevpt2_nuclear_gradient`` alone is the frozen-theta partial
+    derivative, not the relaxed one. This is the same Park-Lagrangian
+    split ``nevpt2_relaxed_hessian`` documents (CASSCF Z-vector response
+    operator, NEVPT2 source term; Eqs. 23-28 of the BAGEL 2019 gradients
+    paper).
+
+    Writing the source as ``d e2/dtheta`` -- the difference of the two
+    theta-gradients -- keeps the e2_scale = 0 anchor exact: with e2
+    identically zero the response source is identically zero and the
+    result reduces to ``nevpt2_nuclear_gradient`` up to re-dispatch
+    roundoff (measured on H2O/STO-3G, 2026-10-17: non-zero components
+    bitwise equal, near-zero components within 1e-15; the anchor test
+    bounds the difference at 1e-13). The alternative convention (the full
+    dE_nevpt2/dtheta as source) adds the stationarity-residual term
+    (dE_casscf/dtheta).D; it is measurable as a diagnostic but it is not
+    part of the envelope-convention derivative.
+
+    Parameters
+    ----------
+    mol : pyscfad Mole
+        Target geometry.
+    theta : array_like
+        CASSCF stationary orbital parameters for that geometry (the
+        optimizer output; the chain must be the one theta* was optimized
+        on).
+    E_casscf, E_nevpt2 : callable (mol, theta) -> scalar
+        The e2_scale = 0 and e2_scale = 1 joint functions from
+        ``make_nevpt2_joint_fn``. Jit-wrap them at the call site; the
+        same non-jit trace cost documented in the 2026-10-16 wave applies
+        here.
+    rcond : float, optional
+        Relative cutoff for the theta-Hessian pseudo-inverse
+        (``core.hessian.DEFAULT_RCOND`` when None).
+    D : array, optional
+        Precomputed response operator, shape (npar, 3 * natm). When
+        given, the implicit H_tt/M assembly is skipped -- the
+        verification script injects the finite-difference channel here
+        (the P0.5 lesson: AD second derivatives through the eigh inside
+        the chain carry the frozen-rule semantics, so the value-faithful
+        H_tt is a central difference of the jitted theta-gradient).
+    d_e2 : array, optional
+        Precomputed correlation source d e2/dtheta at (mol, theta). When
+        given, no theta-gradient is taken inside this function. The
+        pinned theta-only functions (``make_nevpt2_theta_fn`` or a
+        component function on fixed reference arrays) produce the same
+        value and avoid a second theta-gradient trace; production callers
+        that already hold it should pass it.
+
+    Notes (measured on H2O/6-31G CAS(2,2), 2026-10-17, t421)
+    ----------------------------------------------------------
+    * The response machinery closes the relaxed identity when the frozen
+      partial is taken from finite differences of the value: FD(frozen)
+      + the response term reproduces the per-geometry re-optimized FD to
+      1.3e-4 along a stretch direction, and the implicit dtheta*/dR
+      matches the optimizer's own finite difference to 0.5% (cosine
+      1.0000) once the single soft theta mode (eigenvalue 3.8e-6 at
+      kappa 2.3e7) is cut from the pseudo-inverse -- pass ``rcond``
+      around 1e-7 for that purpose; the default 1e-9 keeps the mode and
+      the response operator is then 4x off along it (the gradient
+      response is insensitive: the correlation source has no component
+      along the soft direction).
+    * The frozen partial itself carries a 37.5% error on the same
+      system's e2 part (the e2=0 chain agrees to 3.7e-4): that is a
+      defect of the e2 chain's AD nuclear derivative, orthogonal to the
+      response term, and is tracked with the t418 gradient probe. Until
+      it is resolved the relaxed gradient inherits it.
+
+    Returns
+    -------
+    numpy.ndarray, shape (natm, 3), in Eh/bohr.
+    """
+    import jax
+
+    from ..core.hessian import DEFAULT_RCOND, _mixed_derivative
+
+    rcond = DEFAULT_RCOND if rcond is None else float(rcond)
+    theta = jax.numpy.asarray(np.asarray(theta, dtype=float))
+
+    g_partial = nevpt2_nuclear_gradient(
+        mol, lambda m_: E_nevpt2(m_, theta))
+
+    if d_e2 is not None:
+        g_corr = np.asarray(d_e2, dtype=float)
+    else:
+        g_corr = np.asarray(
+            jax.grad(lambda t: E_nevpt2(mol, t))(theta)
+            - jax.grad(lambda t: E_casscf(mol, t))(theta))
+
+    if D is None:
+        H_tt = np.asarray(jax.hessian(lambda t: E_casscf(mol, t))(theta))
+        H_tt = 0.5 * (H_tt + H_tt.T)
+        M = _mixed_derivative(E_casscf, mol, theta)
+        D = -np.linalg.pinv(H_tt, rcond=rcond) @ M
+    else:
+        D = np.asarray(D, dtype=float)
+
+    resp = (g_corr @ D).reshape(g_partial.shape)
+    return g_partial + resp
 
 
 def sa_nevpt2_table_from_mol(mol, family, scf_builder, *, nroots,

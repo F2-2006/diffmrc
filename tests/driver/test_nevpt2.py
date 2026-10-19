@@ -128,7 +128,7 @@ def test_the_scale_zero_gradient_reproduces_the_casscf_gradient():
     "known answer" available (validated against invariance to 1e-14);
     externally, the equivalence argument is the Lagrangian derivation of
     the analytic NEVPT2 gradient (Park, JCTC 2019; card in
-    ``文献细读/细读_NEVPT2梯度_BAGEL2019.md``), of which an AD gradient is
+    the BAGEL 2019 NEVPT2 gradient notes), of which an AD gradient is
     an independent evaluation of the same mathematical object.
 
     The CASSCF side is not hand-written here: it is
@@ -290,10 +290,11 @@ def test_the_actinide_ecp_route_wires_through():
     assert np.isfinite(float(E_cas))
     assert np.isfinite(float(e2))
     assert float(E_cas) < float(mf0.e_tot)   # CASCI cannot exceed the SCF
-    # The correlation correction this chain returns is negative here; note
-    # that its value at this large-core, small-CAS point disagrees with
-    # PySCF by 1.6 Ha (open, memory `nevpt2-large-core-discrepancy`), so
-    # this asserts the chain's own regression value, not the physics.
+    # The correlation correction this chain returns is negative here; this
+    # asserts the chain's own regression value, not the physics. The
+    # large-core discrepancy against PySCF recorded in the earlier baseline
+    # (1.6 Ha) is closed by the blocked-loop vector fix; the post-fix
+    # deviation is 3.8e-7 (frozen-table row 7).
     assert float(e2) < 0.0
 
 
@@ -322,3 +323,111 @@ def test_the_hvp_is_symmetric():
     scale = max(1.0, np.abs(hv).max() * np.abs(w).max(),
                 np.abs(hw).max() * np.abs(v).max())
     assert abs(hv @ w - hw @ v) < 1e-8 * scale
+
+
+# ---------------------------------------------------------------------------
+# The relaxed-path nuclear gradient (the correlation response term)
+# ---------------------------------------------------------------------------
+
+def _relaxed_pieces(mol, ncore, nact, nele, theta):
+    """(frozen gradient, relaxed gradient, response term) on the H2O fixture."""
+    from pyscfad import scf
+
+    from diffmrc.driver.nevpt2 import (make_nevpt2_joint_fn,
+                                       nevpt2_nuclear_gradient,
+                                       nevpt2_relaxed_nuclear_gradient)
+
+    nmo = mol.nao_nr()
+    pairs = _pairs(ncore, nact, nmo)
+    builder = lambda m: scf.RHF(m)
+    f0 = make_nevpt2_joint_fn(ncore, nact, nele, nmo, pairs, builder,
+                              e2_scale=0.0, ci_solver='blocked')
+    f1 = make_nevpt2_joint_fn(ncore, nact, nele, nmo, pairs, builder,
+                              e2_scale=1.0, ci_solver='blocked')
+    g_frozen = np.asarray(nevpt2_nuclear_gradient(
+        mol, lambda m_: f1(m_, theta)))
+    g_relaxed = np.asarray(nevpt2_relaxed_nuclear_gradient(
+        mol, theta, f0, f1))
+    return g_frozen, g_relaxed, g_relaxed - g_frozen, f0, f1
+
+
+def test_the_relaxed_gradient_anchor_is_exact_to_roundoff():
+    """With e2 = E_nevpt2 - E_casscf identically zero the response source
+    is exactly zero, so the relaxed function reduces to the frozen-theta
+    gradient up to re-dispatch roundoff.
+
+    Measured on H2O/STO-3G (2026-10-17): the non-zero gradient
+    components are bitwise identical; the near-zero ones (translation
+    sums) differ at 1e-15 .. 1e-17 -- the SCF's own cancellation order
+    across two dispatches, not a response term. The bound below is the
+    measurement's margin.
+    """
+    from diffmrc.driver.nevpt2 import nevpt2_relaxed_nuclear_gradient
+
+    mol = _h2o()
+    nmo = mol.nao_nr()
+    ncore, nact, nele = 1, 2, 2
+    pairs = _pairs(ncore, nact, nmo)
+    from pyscfad import scf
+
+    from diffmrc.driver.nevpt2 import (make_nevpt2_joint_fn,
+                                       nevpt2_nuclear_gradient)
+
+    f0 = make_nevpt2_joint_fn(ncore, nact, nele, nmo, pairs,
+                              lambda m: scf.RHF(m), e2_scale=0.0,
+                              ci_solver='blocked')
+    theta = jnp.zeros(len(pairs))
+    g_frozen = np.asarray(nevpt2_nuclear_gradient(
+        mol, lambda m_: f0(m_, theta)))
+    g_relaxed = np.asarray(nevpt2_relaxed_nuclear_gradient(
+        mol, theta, f0, f0))
+    assert np.abs(g_relaxed - g_frozen).max() < 1e-13
+
+
+def test_the_relaxed_response_has_no_translation_or_rotation_component():
+    """The response term is translation- and rotation-free.
+
+    M's translation/rotation columns vanish because the CASSCF energy is
+    invariant under those displacements at every theta, so the response
+    D=-pinv(H_tt)M inherits exact zeros there. A nonzero value would mean
+    the mixed-derivative chain is inconsistent (the same class of defect
+    the invariance criteria exist to catch).
+    """
+    mol = _h2o()
+    ncore, nact, nele = 1, 2, 2
+    theta = jnp.zeros(len(_pairs(ncore, nact, mol.nao_nr())))
+    _, _, resp, _, _ = _relaxed_pieces(mol, ncore, nact, nele, theta)
+    assert np.isfinite(resp).all()
+    assert np.abs(resp.sum(axis=0)).max() < 1e-9
+    coords = np.asarray(mol.atom_coords())
+    rot = np.cross(coords, resp).sum(axis=0)
+    assert np.abs(rot).max() < 1e-9
+
+
+def test_the_relaxed_gradient_takes_a_precomputed_response_operator():
+    """The D seam: a zero response operator reproduces the frozen gradient
+    to roundoff (the verification script injects the finite-difference
+    channel through this argument)."""
+    from diffmrc.driver.nevpt2 import nevpt2_relaxed_nuclear_gradient
+
+    mol = _h2o()
+    nmo = mol.nao_nr()
+    ncore, nact, nele = 1, 2, 2
+    pairs = _pairs(ncore, nact, nmo)
+    from pyscfad import scf
+
+    from diffmrc.driver.nevpt2 import (make_nevpt2_joint_fn,
+                                       nevpt2_nuclear_gradient)
+
+    builder = lambda m: scf.RHF(m)
+    f0 = make_nevpt2_joint_fn(ncore, nact, nele, nmo, pairs, builder,
+                              e2_scale=0.0, ci_solver='blocked')
+    f1 = make_nevpt2_joint_fn(ncore, nact, nele, nmo, pairs, builder,
+                              e2_scale=1.0, ci_solver='blocked')
+    theta = jnp.zeros(len(pairs))
+    D0 = np.zeros((len(pairs), mol.natm * 3))
+    g0 = np.asarray(nevpt2_relaxed_nuclear_gradient(
+        mol, theta, f0, f1, D=D0))
+    g_frozen = np.asarray(nevpt2_nuclear_gradient(
+        mol, lambda m_: f1(m_, theta)))
+    assert np.abs(g0 - g_frozen).max() < 1e-13
