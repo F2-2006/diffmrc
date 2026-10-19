@@ -212,7 +212,7 @@ def main():
         errs[d] = float(np.abs((gp - gm) / (2 * d) - hv).max())
     ok3 = bool(np.isfinite(hv).all()) and errs[1e-3] < errs[3e-3]
     print('  [3] theta-HVP finite = {}   |FD-HVP| d=3e-3: {:.3e}  '
-          'd=1e-3: {:.3e}  单调 {}  [{:.0f}s]'.format(
+          'd=1e-3: {:.3e}  monotone {}  [{:.0f}s]'.format(
               bool(np.isfinite(hv).all()), errs[3e-3], errs[1e-3], ok3,
               time.time() - t0), flush=True)
     out['theta_hvp'] = dict(finite=bool(np.isfinite(hv).all()),

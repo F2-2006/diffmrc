@@ -24,19 +24,19 @@ EXP = {'H2O': [1594.7, 3656.7, 3755.8], 'CO': [2143.3], 'N2': [2330.0]}
 # Plan labels as they appear in the logs, mapped to normalized keys. Each
 # mapping lists the English and the Chinese spelling.
 TAGS = [('A (theta frozen)', 'A_frozen'),
-        ('A (θ 冻结)', 'A_frozen'),
+        ('A (frozen theta)', 'A_frozen'),
         ('frozen expansion N=2', 'unrolled_N2'),
-        ('冻结展开 N=2', 'unrolled_N2'),
+        ('unrolled N=2', 'unrolled_N2'),
         ('frozen expansion N=3', 'unrolled_N3'),
-        ('冻结展开 N=3', 'unrolled_N3'),
+        ('unrolled N=3', 'unrolled_N3'),
         ('full Newton N=3', 'newton_N3'),
-        ('完整牛顿 N=3', 'newton_N3'),
+        ('full Newton N=3', 'newton_N3'),
         ('implicit', 'implicit'),
-        ('隐函数', 'implicit')]
+        ('implicit', 'implicit')]
 
-pat_freq = re.compile(r'(?:frequencies|频率) \[cm-1\] = \[([^\]]+)\]')
-pat_imag = re.compile(r'(?:imaginary|虚频)(?: modes|个数) = (\d+)')
-TITLE_MARK = ('frequencies', '频率')
+pat_freq = re.compile(r'frequencies \[cm-1\] = \[([^\]]+)\]')
+pat_imag = re.compile(r'imaginary(?: modes)? = (\d+)')
+TITLE_MARK = ('frequencies',)
 
 summary = {}
 for sysname in ('H2O', 'CO', 'N2'):

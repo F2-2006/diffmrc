@@ -433,7 +433,7 @@ def lowest_k_eigpairs(a, k=1, tol=1e-10, max_cycles=60, n_expand=3,
         determinant count, which places the (12,12)-and-above active spaces
         of the f-block targets beyond reach. This entry is the M1 milestone
         of the iterative-CI route (project record
-        二A6_可微迭代CI_调研_20261002.md, route A): the forward solve works
+        internal research note, route A): the forward solve works
         on matrix-vector products alone, and the reverse pass is an implicit
         function of the converged eigenpairs rather than a record of the
         iteration.
