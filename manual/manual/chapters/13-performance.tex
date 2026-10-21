@@ -1,0 +1,376 @@
+\chapter{Performance and numerical hygiene}
+\label{ch:performance}
+
+This chapter records the implementation choices that carry a performance
+or numerical-branch consequence: the ordering of the MO integral
+transform, the blocked CI solver, the automatic solver selection, the
+jit reference-array form, and one repeated contraction in the CI
+matrix--vector product.  Each choice is an engineering decision with a
+measured anchor; none changes the definition of the energy.  The
+measurements were taken on one 64-core node with JAX in double
+precision on CPU, with the BLAS thread count fixed at one; wall clock
+is quoted as a relative quantity only, while compilation counts and
+peak resident memory are load-independent.
+
+\section{MO integral transforms: four sequential contractions}
+
+The two-electron transform is the most expensive single contraction in
+the differentiable chain, and its algebraic ordering is part of the
+numerical contract.  The implementation is
+\texttt{core.nevpt2.impl.stepwise\_mo\_ints}, which performs four
+sequential contractions,
+\begin{equation}
+  h_{ij} = \sum_{ab} C_{ai}\, h_{ab}\, C_{bj},
+  \qquad
+  (ij|kl) = \sum_{pqrs} C_{pi} C_{qj} C_{rk} C_{sl}\, (pq|rs),
+\end{equation}
+as one two-index transform followed by three one-index transforms:
+\begin{lstlisting}[language=Python]
+def stepwise_mo_ints(Cx, h_, e_):
+    h1 = jnp.einsum('ai,ab,bj->ij', Cx, h_, Cx)
+    z = jnp.einsum('pi,pqrs->iqrs', Cx, e_)
+    z = jnp.einsum('qj,iqrs->ijrs', Cx, z)
+    z = jnp.einsum('rk,ijrs->ijks', Cx, z)
+    eri = jnp.einsum('sl,ijks->ijkl', Cx, z)
+    return h1, eri
+\end{lstlisting}
+
+Every MO transform in the differentiable chain calls this function,
+including the three canonicalization transforms and the state-averaged
+driver.  A second copy in the driver delegates to it, so the two
+call paths cannot drift apart.
+
+\subsection{Why the one-shot form is not used}
+
+The one-shot form contracts four orbital coefficients against the
+four-index integral in a single expression,
+\texttt{jnp.einsum('pi,qj,rk,sl,pqrs->ijkl', C, C, C, C, eri)}.  It
+is algebraically identical and was the original implementation.  Two
+measurements removed it.
+
+First, on a $96^4$ integral array the one-shot form carried an absolute
+error around $10^{-6}$ against the sequential transform (the recorded
+value is $1.28\times10^{-6}$, with the active block agreeing to
+$8.9\times10^{-16}$).  The error is harmless for the energy, which is
+insensitive to it, but a linear molecule's generalized Fock matrix
+contains exact $\pi$ and $\delta$ degeneracies whose gaps are at the
+$10^{-15}$ level.  A perturbation of $10^{-6}$ against a gap of
+$10^{-15}$ rotates the eigenvector basis inside the degenerate subspace
+completely; the ratio is about $10^9$.  The theta gradient differed by
+eight percent between the two contraction orders, and the
+Hessian-vector product was NaN for the one-shot form and finite for the
+stepwise one.
+
+Second, the sequential form is faster at production size, not slower.
+On the physical ThO/ECP array with 96 orbitals ($\max|eri| = 4.78$),
+the one-shot evaluation took $5.08$--$5.79$~s and the stepwise
+evaluation $0.417$--$0.467$~s, a factor of eleven to thirteen; on a
+random array of the same shape both forms finished in about
+$50~\mu$s.  The difference is the contraction path XLA selects for the
+physical memory layout, and it is a runtime effect, not a
+reproducibility precaution.
+
+A release-tree cross-check qualifies the first measurement.  On the
+same physical array the current one-shot form agrees with the stepwise
+form to $3.33\times10^{-16}$ (rms $5.73\times10^{-18}$), so the
+$10^{-6}$ defect was not reproduced in this JAX version and on this
+array.  The ordering is retained for both reasons above: the branch
+sensitivity of a degenerate subspace is a property of the contraction
+order rather than a fixed numerical offset, and the sequential form is
+the faster route at the size where the transform dominates.
+
+\subsection{Accuracy on the release tree}
+
+The two orders were compared at fixed geometry and fixed theta, before
+and after the substitution.  The differences are at or below
+$5.7\times10^{-14}$~Ha for the energy and $2.7\times10^{-14}$ for the
+gradient; the non-degenerate H2O case is bit-identical.
+
+\begin{center}
+\begin{tabular}{lrr}
+\toprule
+System and quantity & $\Delta E$ (Ha) & $\Delta g_{\max}$ \\
+\midrule
+H2O/6-31G CAS(2,2), CASSCF energy and theta gradient & $0$ & $0$ \\
+CO/6-31G CAS(4,4), linear, CASSCF energy and theta gradient
+  & $5.7\times10^{-14}$ & $2.7\times10^{-14}$ \\
+H2O/6-31G CAS(2,2), NEVPT2 energy (eager and jit) & $0$ & --- \\
+H2O/6-31G CAS(2,2), NEVPT2 theta gradient & --- & $6.7\times10^{-15}$ \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+The acceptance band for the substitution was $10^{-12}$~Ha on
+non-degenerate systems; the largest observed energy difference is
+$5.7\times10^{-14}$.
+
+\section{The $S_z$-blocked CI solver}
+
+\texttt{core.casci.cs\_casci\_blocked} diagonalizes the CI Hamiltonian
+one spin-projection block at a time.  The partition is exact: the
+Hamiltonian is strictly zero between different $S_z$ blocks (the
+largest measured off-block element is $0.000\times10^{0}$), so the
+global lowest eigenvalue is the lowest eigenvalue over the block
+minima.  For H2O/6-31G CAS(2,2) the block structure is one determinant
+at $S_z = +6$, four at $S_z = +8$, and one at $S_z = +10$; the global
+minimum lies in the four-determinant block, whose smallest in-block
+gap is $2.545\times10^{-2}$, and the block energies are separated by
+$0.34$~Ha.
+
+The solver exists because the unblocked CI matrix carries a three-fold
+degeneracy at $-84.8416418$~Ha for H2O/6-31G CAS(2,2).  The reverse
+rule of a dense \texttt{eigh} forms $1/(w_j-w_i)$ for every pair in the
+matrix and returns NaN at that degeneracy; inverse iteration defers
+the NaN from the first derivative to the second but does not remove it.
+Block separation is necessary but not sufficient: the reverse pass
+forms the same factor for every pair inside a block whether or not the
+pair carries cotangent, so one bit-exact pair anywhere in any block
+turns the untouched entries into $0 \times \infty$.  The block
+eigenproblem therefore goes through \texttt{core.eigh.eigh\_safe},
+whose softened rule freezes the rotation inside a degenerate subspace.
+
+\subsection{Memory and time at two determinant counts}
+
+The two anchor spaces are CAS(6,6) with 924 determinants and CAS(8,8)
+with 12870 determinants, both on H2O/6-31G.  The 12870 case used
+ncore~=~1.  Peak resident memory was measured under a cgroup limit; the
+plain 12870 run required a 48~GB limit and reached 37.83~GB.
+
+\begin{center}
+\begin{tabular}{lrll}
+\toprule
+Route & $E$ (Ha) & Time & Peak RSS \\
+\midrule
+plain, eager & $-85.21730226017026$ & $27.65$~s & $37.83$~GB \\
+blocked, eager & $-85.21730226017024$ & $84.1$--$88.7$~s & $6.78$~GB \\
+blocked, jit & same & $41.70$~s ($1.97$ compile $+$ $39.73$ evaluate)
+  & $7.78$~GB \\
+plain, jit & --- & not run & --- \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+The memory ratio is $5.58$ in eager execution and $4.86$ in the jitted
+form.  The time direction is the opposite: blocked eager is $3.2$
+times slower than plain eager, and the blocked jit evaluation
+($39.73$~s, excluding its $1.97$~s compile) is still $1.44$ times the
+plain eager time, although it is $2.1$ times faster than its own eager
+form.  The plain jitted form was not run because the same
+unblocked CI graph already exceeded 2400~s of compilation at 924
+determinants; the 12870-determinant graph is larger.  The blocked
+solver's benefit is therefore memory and compilation feasibility, not
+single-call time: it builds one block at a time, so the largest boolean
+tensor drops from $(12870, 12870, 18)$ to $(4900, 4900, 18)$ at the cost
+of per-block dispatch.  The energy difference between the two routes
+is $2\times10^{-14}$~Ha.
+
+At 924 determinants the picture reverses: plain takes
+$14.7$--$16.9$~s at $1.20$--$1.23$~GB and blocked takes
+$27.8$--$29.8$~s at $1.26$--$1.33$~GB.  There is no memory benefit and
+the eager solver is $1.8$ times slower.
+
+\section{Automatic solver selection}
+
+\texttt{core.nevpt2.impl.resolve\_ci\_solver} maps
+\texttt{ci\_solver='auto'} to one of the two solvers from the
+determinant count,
+\begin{equation}
+  N_{\mathrm{det}} = \binom{2\,n_{\mathrm{act}}}{n_{\mathrm{ele,act}}},
+\end{equation}
+with the threshold \texttt{BLOCKED\_CI\_MIN\_DET}~$=2000$: at or above
+it the blocked solver is selected, below it the plain solver.  An
+explicit \texttt{'plain'} or \texttt{'blocked'} always wins, and any
+other value raises \texttt{ValueError}.  The threshold is an
+engineering choice between the 924 and 12870 anchors, not a measured
+optimum; the crossover between the two anchors was not measured.
+
+\begin{lstlisting}[language=Python]
+from diffmrc.core.nevpt2.impl import (canonicalize_jax,
+                                      resolve_ci_solver)
+
+# Inspect the decision without running a calculation:
+solver = resolve_ci_solver('auto', nact, nele_act)   # 924 -> 'plain'
+
+# canonicalize_jax accepts 'auto', 'plain', or 'blocked':
+C_can, ci_can, eps = canonicalize_jax(
+    C, h1e, eri, ci, ncore=ncore, nact=nact, nele_act=nele_act,
+    ci_solver='auto')
+\end{lstlisting}
+
+The flag applies to the two internal CI re-solves of the
+canonicalization routines (\texttt{canonicalize\_jax} and
+\texttt{canonicalize\_sa\_jax}).  The main CI solve of the production
+chain remains on the plain solver deliberately: the blocked solver
+returns the exact eigenvector, while the plain solver returns an
+inverse-iteration vector with a residual of order $10^{-8}$, and
+substituting the vector would change the NEVPT2 correlation energy by
+more than the $10^{-12}$ acceptance band.  In the state-averaged
+routine the flag also has no effect when more than one root is
+requested, because there is no multi-root blocked solver and the
+state-average branch of \texttt{cs\_casci} is required.
+
+\subsection{What the switch leaves invariant}
+
+Orbitals and orbital energies are bit-identical between the two routes;
+the CI vector differs by a global phase and by the plain solver's
+residual.  The values below are the phase-aligned differences.
+
+\begin{center}
+\begin{tabular}{lrrrr}
+\toprule
+System & $N_{\mathrm{det}}$ & $\max|\Delta C|$ & $\max|\Delta\epsilon|$
+  & CI difference \\
+\midrule
+H2O/6-31G CAS(2,2) & 6 & $0$ & $0$ & $4.71\times10^{-10}$ \\
+CO/6-31G CAS(4,4) & 70 & $0$ & $0$ & $5.39\times10^{-8}$ \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+The identity is the intended semantics: the internal re-solve enters
+no returned quantity except the CI vector, while the natural-orbital
+rotation and the sub-block Fock diagonalization are built from the
+input vector.
+
+\subsection{The small-system penalty the default avoids}
+
+Forcing the blocked solver on a small space is a net cost.  On the
+H2O/6-31G CAS(2,2) NEVPT2 chain, the eager correction takes
+$23.50$~s with the plain solver and $31.41$~s with the blocked solver,
+a $36$ percent increase, and the end-to-end wall clock moves from
+$60.3$~s to $74.2$~s.  With \texttt{'auto'} the same chain resolves to
+plain and returns to $22.26$~s eager and $62.8$~s wall clock, within
+the load band of the pre-change measurement.  The measured anchors
+behind the threshold are collected below.
+
+\begin{center}
+\small
+\begin{tabular}{r l p{0.24\textwidth} p{0.26\textwidth} l}
+\toprule
+$N_{\mathrm{det}}$ & System & plain & blocked & Decision \\
+\midrule
+6 & H2O CAS(2,2) & $23.50$~s eager, $60.3$~s wall
+  & $31.41$~s eager, $74.2$~s wall & plain \\
+70 & CO CAS(4,4) & $9.5$--$16.4$~s & $17.2$--$24.6$~s & plain \\
+924 & H2O/CO/N$_2$ CAS(6,6) & $14.7$--$16.9$~s, $1.20$--$1.23$~GB
+  & $27.8$--$29.8$~s, $1.26$--$1.33$~GB & plain \\
+12870 & H2O CAS(8,8) & $27.65$~s, $37.83$~GB
+  & $84.1$--$88.7$~s, $6.78$~GB & blocked \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\section{Reference arrays as jit arguments}
+
+The theta-only factories compute the reference SCF and the AO integrals
+once, at construction, and return a function of the rotation
+parameters.  The reference arrays can enter that function in one of two
+ways: closed over, or passed as traced arguments.  In the closure form
+the arrays become constants of the traced graph, so a jitted wrapper
+compiles one executable per geometry.  In the array form the arrays are
+runtime arguments, and one executable serves every geometry whose
+arrays have the same shape and dtype.
+
+The API exposes both members on the returned callable:
+\texttt{E\_theta.component\_args} is the array-argument function and
+\texttt{E\_theta.arrays} is the tuple to pass, in order.  The
+state-averaged energy factory \texttt{make\_sa\_energy\_fn} carries the
+same pair, and the MC-PDFT table passes them through
+\texttt{converge\_orbital\_point(..., arrays=E\_sa.arrays)} so that the
+orbital search does not compile the AO integrals into its graph.
+
+\begin{lstlisting}[language=Python]
+import jax
+
+E_theta = make_nevpt2_theta_fn(mol, ncore, nact, nele, nmo, pairs,
+                               scf_builder)
+E_jit = jax.jit(E_theta.component_args)   # one executable
+E_ref = E_jit(theta, *E_theta.arrays)     # for every same-shaped geometry
+
+# The orbital-point search takes the same pair:
+converge_orbital_point(E_theta.component_args, len(pairs),
+                       arrays=E_theta.arrays)
+\end{lstlisting}
+
+The measured difference on three geometries (the reference scaled by
+$-1$ percent, $0$, and $+1$ percent about the center of mass) is
+one compile against three, and $2.67$~s against $8.60$~s for the three
+calls, measured as interleaved medians.
+
+\begin{center}
+\begin{tabular}{lrr}
+\toprule
+Form & jit objects / compilations & Total for three geometries \\
+\midrule
+closure constants & $3$ / $3$ & $8.60$~s \\
+array arguments & $1$ / $1$ & $2.67$~s \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+The compile count is the load-independent quantity; the wall clock
+matters at production scale, where a single f-block window compile is
+of order fifteen minutes.  Three closures then cost about forty-five
+minutes against fifteen minutes plus two evaluations in the array
+form.
+
+One restriction belongs to this section.  The geometry-dependent joint
+entry \texttt{make\_nevpt2\_\allowbreak joint\_fn} cannot be traced under
+\texttt{jax.jit} in this pyscfad build, because the SCF it runs inside
+the call raises a tracer-conversion error.  The array-argument form is
+therefore a fixed-geometry device and belongs to the theta-only
+factories.  The correlation contraction itself is inside the jitted
+theta-only function: the NEVPT2 energy in eager and jitted execution
+agrees bit for bit, so the untraceable part is the SCF, not the
+second-order correction.
+
+\section{Repeated core folding in the CI matrix--vector product}
+
+\texttt{core.ci\_matvec} builds the effective one-electron operator
+once per matrix--vector product.  The original code recomputed that
+fold separately inside the apply and diagonal paths, so every product
+paid it twice.  The apply path now receives the folded quantities
+$(h_{\mathrm{eff}}, g, e_{\mathrm{core}})$ from a shared helper, and
+the diagonal path keeps its own call.  The output is unchanged bit for
+bit: the norm of the test vector is $3977.4197449984595$ in every
+interleaved run before and after the change, and the six leading
+components agree as well.
+
+The timing consequence is small.  In eager execution the apply
+routine's cumulative time moved from $5.49$~s to $5.36$~s, about
+$2.5$ percent and inside the load noise; after jitting, one product
+takes $10$--$30$~ms and the before/after distributions are
+indistinguishable.  This is a code-hygiene change, not a performance
+promise.
+
+\section{Choosing among the options}
+
+\begin{center}
+\begin{tabular}{p{0.30\textwidth}p{0.18\textwidth}p{0.42\textwidth}}
+\toprule
+Option & Default & When to change it \\
+\midrule
+\texttt{ci\_solver} & \texttt{'auto'} &
+Keep the default.  Force \texttt{'plain'} only when the exact
+pre-change CI vector must be reproduced; force \texttt{'blocked'} only
+on a large determinant space where the plain tensors do not fit, and
+expect the single-call time to grow. \\
+MO transform & stepwise &
+Always use \texttt{stepwise\_mo\_ints}; the one-shot form is not
+exposed as an option. \\
+jit reference arrays & array form &
+Use \texttt{component\_args} and \texttt{arrays} for every repeated
+geometry.  Do not jit the joint geometry-dependent entry. \\
+\texttt{ci\_matvec} folding & single fold &
+No user action; the change is internal and numerically neutral. \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+Two properties of the measurements above belong to their reading.
+Wall-clock numbers are relative and were taken on one shared node with
+the load recorded; the compile counts, the peak resident memory, and
+the energy and gradient differences are the reproducible quantities.
+The 2000-determinant threshold is a choice between two measured
+anchors, and a user whose determinant count lies between them should
+measure the two routes on that space rather than assume the default.

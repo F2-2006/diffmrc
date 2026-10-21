@@ -1,0 +1,183 @@
+\section{Performance options}
+\label{sec:performance}
+
+Four settings decide most of the cost of a run, and only one of them
+can change a number the user reads.  This chapter shows how to set
+each one and what to expect.  The measured anchors behind the
+recommendations are in the Manual (Chapter on performance and numerical
+hygiene); the example script reproduces the routing and the two
+implementation comparisons on a small system.
+
+\subsection{Choosing the CI solver}
+
+\texttt{canonicalize\_jax} and \texttt{canonicalize\_sa\_jax} take a
+\texttt{ci\_solver} argument with three values:
+
+\begin{itemize}
+  \item \texttt{'auto'} (default): the solver is chosen from the
+    determinant count $N_{\mathrm{det}} = \binom{2 n_{\mathrm{act}}}{n_{\mathrm{ele,act}}}$.
+    At or above 2000 determinants the blocked solver is used, below it
+    the plain solver.
+  \item \texttt{'plain'}: the original inverse-iteration solver.  It is
+    faster in eager execution on small spaces and returns a CI vector
+    with a residual of order $10^{-8}$.
+  \item \texttt{'blocked'}: the $S_z$-blocked solver.  It returns the
+    exact eigenvector and works one block at a time, which is what
+    makes large determinant spaces fit in memory.
+\end{itemize}
+
+\begin{lstlisting}[language=Python]
+from diffmrc.core.nevpt2.impl import canonicalize_jax, resolve_ci_solver
+
+# What would 'auto' select for this active space?
+solver = resolve_ci_solver('auto', nact, nele_act)
+print(solver)          # 'plain' below 2000 determinants, else 'blocked'
+
+C_can, ci_can, eps = canonicalize_jax(
+    C, h1e, eri, ci, ncore=ncore, nact=nact, nele_act=nele_act,
+    ci_solver='auto')
+\end{lstlisting}
+
+Expected behaviour on the two measured anchors:
+
+\begin{center}
+\begin{tabular}{l r l p{0.34\textwidth}}
+\toprule
+Active space & $N_{\mathrm{det}}$ & \texttt{'auto'} selects & Why \\
+\midrule
+CAS(6,6) & 924 & \texttt{'plain'} & blocked is $1.8\times$ slower
+  eager with no memory saving \\
+CAS(8,8) & 12870 & \texttt{'blocked'} & peak memory
+  $37.83 \to 6.78$~GB, and the plain jit graph does not compile \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+The plain solver is not a smaller version of the blocked one: the
+orbitals and orbital energies are bit-identical between the two, and
+the CI vector differs only by a global phase and by the plain solver's
+inverse-iteration residual.  A user who needs the exact pre-change CI
+vector can pass \texttt{'plain'}; a user who forces \texttt{'blocked'}
+on a small space pays a real cost, measured at $1.8$ times on 924
+determinants and $36$ percent on the whole NEVPT2 theta chain at
+CAS(2,2).
+
+The flag affects only the internal re-solves of the canonicalization
+routines.  The main CI solve of the production chain stays on the
+plain solver, because substituting the blocked eigenvector there would
+move the NEVPT2 correlation energy beyond the $10^{-12}$ acceptance
+band.  In the state-averaged routine with more than one root the flag
+has no effect, because no multi-root blocked solver exists.
+
+\subsection{MO integral transforms}
+
+Every MO integral transform in the differentiable chain goes through
+\texttt{core.nevpt2.impl.\allowbreak stepwise\_mo\_ints}.  Use it in
+place of the one-shot four-operand contraction:
+
+\begin{lstlisting}[language=Python]
+from diffmrc.core.nevpt2.impl import stepwise_mo_ints
+
+# Use this:
+h1e_mo, eri_mo = stepwise_mo_ints(C, h1e, eri)
+
+# Not this:
+# h1e_mo = jnp.einsum('ai,ab,bj->ij', C, h1e, C)
+# eri_mo = jnp.einsum('pi,qj,rk,sl,pqrs->ijkl', C, C, C, C, eri)
+\end{lstlisting}
+
+The two forms are algebraically the same.  On the release tree the
+stepwise form reproduces the H2O/6-31G CAS(2,2) energy and theta
+gradient bit for bit, and the largest difference over the checked
+systems is $5.7\times10^{-14}$~Ha on the linear CO case.  On a
+96-orbital physical integral array it is also eleven to thirteen times
+faster ($5.1$--$5.8$~s down to $0.42$--$0.47$~s).  On a small array
+both forms finish in microseconds, so the gain is a production-size
+effect rather than a small-system one.
+
+The reason to keep the four steps is not only speed.  The one-shot
+form was measured at an absolute accuracy of about $10^{-6}$ on the
+large array, and a linear molecule's degenerate Fock pairs have gaps
+near $10^{-15}$; the perturbation rotates the eigenvector basis inside
+the degenerate subspace, which changed the theta gradient by eight
+percent and made the Hessian-vector product NaN.
+
+\subsection{jit with reference arrays as arguments}
+
+The theta-only factories accept the reference arrays either as closure
+constants or as runtime arguments.  Closure constants are compiled
+into the traced graph, so a jitted wrapper must recompile for every
+geometry.  Passing the arrays as arguments keeps one executable for
+all geometries whose arrays share a shape and dtype.
+
+The callable returned by \texttt{make\_nevpt2\_theta\_fn} exposes the
+array-argument function as \texttt{component\_args} and the tuple to
+pass as \texttt{arrays}:
+
+\begin{lstlisting}[language=Python]
+import jax
+
+E_theta = make_nevpt2_theta_fn(mol, ncore, nact, nele, nmo, pairs,
+                               scf_builder)
+E_jit = jax.jit(E_theta.component_args)     # one compilation
+E_ref = E_jit(theta, *E_theta.arrays)       # works for every geometry
+
+# The orbital-point search accepts the same pair:
+converge_orbital_point(E_theta.component_args, len(pairs),
+                       arrays=E_theta.arrays)
+\end{lstlisting}
+
+On three geometries (the reference scaled by $-1$, $0$, and $+1$
+percent) the closure form made three compilations and took $8.60$~s
+for the three calls; the array form made one compilation and took
+$2.67$~s.  At f-block window sizes a single compile is of order
+fifteen minutes, which is where the difference matters.
+
+The joint geometry-dependent entry \texttt{make\_nevpt2\_joint\_fn}
+cannot be traced under \texttt{jax.jit} in this pyscfad build because
+the SCF inside the call raises a tracer-conversion error.  The array
+form is therefore for the fixed-geometry theta-only entry; the NEVPT2
+correlation term is inside that jitted function and agrees with its
+eager evaluation bit for bit.
+
+\subsection{Running the example}
+
+The script \texttt{examples/performance\_options.py} in the repository
+demonstrates all four points on a small system.  From the repository
+root:
+
+\begin{lstlisting}[language=bash]
+PYTHONPATH=src python examples/performance_options.py
+\end{lstlisting}
+
+It prints the routing decision for 924 and 12870 determinants, the
+maximum difference between the stepwise and one-shot transforms on a
+random $10^4$ array, the H2O/6-31G CAS(2,2) comparison of the three
+solver settings, and the compile counts of the two jit forms.  The
+recorded run ends with:
+
+\begin{lstlisting}[language=]
+CAS(6,6)  ndet=   924  auto -> plain
+CAS(8,8)  ndet= 12870  auto -> blocked
+max |d h1|  = 0.000e+00
+max |d eri| = 1.332e-15
+auto     vs plain: max|dC| = 0.0e+00  max|deps| = 0.0e+00  |dE_CAS| = 0.0e+00  max|dci| = 0.0e+00
+blocked  vs plain: max|dC| = 0.0e+00  max|deps| = 0.0e+00  |dE_CAS| = 0.0e+00  max|dci| = 4.7e-10
+array-argument form: jit objects = 1, compilations = 1
+closure form:        jit objects = 3, compilations = 3
+\end{lstlisting}
+
+The H2O energy is $-61.314092285778507$~Eh in all three solver
+settings; the blocked CI vector differs from the plain one by
+$4.7\times10^{-10}$ after phase alignment, which is the plain solver's
+inverse-iteration residual and not a solver error.
+
+\subsection{What to record when timing}
+
+Record the compilation count and the peak resident memory together
+with any wall clock.  The first two are load-independent and decide
+whether a run is feasible; wall clock on a shared node depends on the
+load average and is only a relative quantity.  The example script
+prints the compile counts from the jit objects' cache size, and the
+Manual chapter records the peak memory of each route at the two
+determinant anchors.

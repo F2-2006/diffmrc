@@ -33,8 +33,28 @@ src/diffmrc/    the package
 
 tests/          unit and integration tests
 experiments/    scripts reproducing the results in the paper
+examples/       small runnable examples for the public interfaces
 manual/         Tutorial and Manual (LaTeX sources and built PDFs)
 ```
+
+## Acceleration layer
+
+`diffmrc.core.ri` adds a differentiable resolution-of-identity (RI/DF)
+layer. It supplies three-center factors, the auxiliary metric, the
+symmetric inverse square root with an analytic derivative, and an
+explicit JVP for the four-center tensor. The nuclear-derivative working
+set scales as `nao^2 * naux` per atom instead of `nctr * nao^4`; the
+measured peak memory of the RI integral-derivative chain is 2.11 GB at
+`nao = 96` and 16.05 GB at `nao = 175`, against 55.0 GB and 2033 GB for
+the dense single-array path. The RI approximation is an approximation:
+its physical error is documented in Manual Chapter 12, and the SCF layer
+of the present chain still uses dense integral derivatives.
+
+The performance choices in the differentiable chain are documented in
+Manual Chapter 13: the four-step MO transform, the S_z-blocked CI
+solver and its `auto` selection rule, the array-argument jit form, and
+the CI matvec contraction. The Tutorial chapters 10 and 11 walk through
+the RI and performance examples in `examples/`.
 
 ## Layers
 

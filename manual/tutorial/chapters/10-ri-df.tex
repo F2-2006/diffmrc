@@ -1,0 +1,167 @@
+\section{The RI/DF path: smaller derivative memory}
+\label{sec:ri-df}
+
+The nuclear-derivative path of the dense four-center integrals allocates
+a \texttt{nctr}~$\times$~\texttt{nao}$^4$ array; at \texttt{nao}~$=96$
+that is 55~GB, and at \texttt{nao}~$=175$ it is 2~TB.  The RI/DF layer
+replaces those integrals in the correlation stage by two three-center
+factors and a metric, and exposes a derivative path whose working set is
+\texttt{nao}$^2$~$\times$~\texttt{naux} per atom.  This chapter runs
+that layer on H$_2$O/6-31G with CAS(2,2) and ncore~$=4$, checks the
+assembly and the CI energy against the dense route, and verifies one
+derivative against a central difference.  The manual's RI chapter
+carries the formulas, the full API and the error budget.
+
+\subsection{Build the factors}
+
+\begin{lstlisting}[language=Python]
+import jax
+jax.config.update('jax_enable_x64', True)
+
+from pyscf import gto, scf
+from diffmrc.core import ri
+
+mol = gto.M(atom='O 0 0 0; H 0.7557 0 0.5880; H -0.7557 0 0.5880',
+            basis='6-31g', unit='Angstrom', verbose=0)
+mf = scf.RHF(mol).run(verbose=0)
+auxmol, label = ri.make_auxmol(mol)
+factors = ri.ri_factors(mol, auxmol)
+
+print(label, factors.nao, factors.naux, factors.cond)
+# def2-universal-jkfit 13 113 2.47e+07
+\end{lstlisting}
+
+\texttt{make\_auxmol} tries the fitting bases in
+\texttt{ri.AUX\_BASIS\_PRIORITY} and reports which one it used; the
+returned label is what should be quoted with any RI number.  On this
+system the metric condition number is $2.5\times10^{7}$ and no direction
+is dropped at the default \texttt{rcond}~$=10^{-12}$.
+
+\subsection{Compare the assembled tensor with the dense one}
+
+\begin{lstlisting}[language=Python]
+import numpy as np
+
+eri_ri = ri.ri_eri_ao(mol, auxmol, factors=factors)
+eri_dense = mol.intor('int2e', aosym='s1')
+
+bf = factors.b.reshape(-1, factors.naux)
+ref = bf @ np.linalg.solve(factors.s, bf.T)
+print('identity', np.abs(eri_ri - ref.reshape(eri_ri.shape)).max())
+print('rms     ', np.sqrt(np.mean((eri_ri - eri_dense) ** 2)))
+print('max     ', np.abs(eri_ri - eri_dense).max())
+\end{lstlisting}
+
+The identity check compares the two-step GEMM assembly with an explicit
+metric solve; it is the implementation error and should print at the
+$10^{-12}$ level.  The
+direct comparison with the dense tensor is the RI approximation itself
+and is four to eight orders of magnitude larger.  On this run:
+
+\begin{lstlisting}
+identity 1.068e-12
+rms      8.317e-06
+max      7.967e-04
+\end{lstlisting}
+
+\subsection{RI-CASCI}
+
+The MO path transforms the three-center tensor once and forms the
+four-center MO integrals by one GEMM over the auxiliary index:
+
+\begin{lstlisting}[language=Python]
+from diffmrc.core.casci import cs_casci
+
+c = mf.mo_coeff
+h1_mo, eri_mo_dense = mo_integrals(c, mf.get_hcore(), eri_dense)
+b_mo, eri_mo_ri = ri.ri_eri_mo(c, factors.b, factors.jhalf)
+
+kw = dict(ncore=4, nact=2, nele_act=2, return_ci=True)
+e_dense, ci_dense = cs_casci(h1_mo[:6, :6], eri_mo_dense[:6, :6, :6, :6], **kw)
+e_ri, ci_ri = cs_casci(h1_mo[:6, :6], eri_mo_ri[:6, :6, :6, :6], **kw)
+print(float(e_ri) - float(e_dense))
+# +1.054e-05
+\end{lstlisting}
+
+\texttt{mo\_integrals} is the four-step two-operand transform defined in
+the example script.  The RI shift of the CASCI energy is
+$1.1\times10^{-5}$~Eh (0.007~kcal/mol), and the CI vectors overlap to
+ten digits.  At this size the shift is dominated by the fitting-basis
+error, not by the contraction.
+
+\subsection{Check a derivative against central differences}
+
+\begin{lstlisting}[language=Python]
+def displaced(mol, atom, axis, step):
+    coords = mol.atom_coords(unit='Bohr').copy()
+    coords[atom, axis] += step
+    symbols = [mol.atom_pure_symbol(i) for i in range(mol.natm)]
+    return gto.M(atom=[(s, c) for s, c in zip(symbols, coords)],
+                 basis=mol.basis, unit='Bohr', verbose=0)
+
+step = 1e-4
+for atom in range(mol.natm):
+    d3 = ri.ri_three_center_deriv(mol, auxmol, atom)
+    for axis in range(3):
+        mp = displaced(mol, atom, axis, step)
+        mm = displaced(mol, atom, axis, -step)
+        ap, _ = ri.make_auxmol(mp)
+        am, _ = ri.make_auxmol(mm)
+        fd = (ri.ri_three_center(mp, ap)
+              - ri.ri_three_center(mm, am)) / (2 * step)
+        print(atom, axis,
+              np.abs(d3[axis] - fd).max() / np.abs(fd).max())
+\end{lstlisting}
+
+The auxiliary molecule is rebuilt at each displaced geometry so that the
+fitting basis follows the nuclei.  The worst relative deviation over all
+atoms and axes is
+
+\begin{lstlisting}
+worst relative deviation   3.641e-09  (atom 0, axis 0)
+\end{lstlisting}
+
+The same comparison for the assembled ERI,
+\texttt{ri\_eri\_deriv} against a central difference of
+\texttt{ri\_eri\_ao}, gives $3.7\times10^{-8}$ at the same step.  Part
+of that residual is the finite-difference truncation amplified by the
+metric inverse square root; the manual's error budget separates the two
+contributions.
+
+\subsection{The NEVPT2 comparison}
+
+\texttt{examples/ri\_nevpt2.py} feeds the RI MO integrals to
+\texttt{core.nevpt2.impl.nevpt2\_e2\_full2} and compares the correction
+with the dense route at the same orbitals.  On H$_2$O/6-31G,
+CAS(2,2), ncore~$=4$:
+
+\begin{lstlisting}
+e2 dense              -0.1276536999 Eh
+e2 RI, same CI        -0.1276366317 Eh
+e2 RI, end to end     -0.1276366150 Eh
+RI - dense, same CI   +1.707e-05 Ha
+RI - dense, end to end +1.708e-05 Ha
+\end{lstlisting}
+
+The three numbers separate the integral approximation (same CI) from
+the small CI shift caused by it (end to end).  The absolute correction
+is that of a fixed-orbital calculation, not a production NEVPT2 value;
+what the example validates is the RI-minus-dense difference.
+
+\subsection{Running the examples}
+
+From the repository root, with the package importable:
+
+\begin{lstlisting}[language=bash]
+$ python examples/ri_df.py
+$ python examples/ri_nevpt2.py
+# if the package is not installed:
+$ PYTHONPATH=src python examples/ri_df.py
+\end{lstlisting}
+
+Both scripts set \texttt{JAX\_PLATFORMS=cpu} if it is unset and require
+only \texttt{pyscf}, \texttt{jax}, \texttt{numpy} and \texttt{diffmrc}.
+On the reference machine, \texttt{ri\_df.py} takes 6.4~s of script time
+(8.0~s wall, 0.9~GB peak RSS) and \texttt{ri\_nevpt2.py} takes 36~s of
+script time (40~s wall, 1.6~GB peak RSS); the NEVPT2 part is dominated
+by the first JAX compilation.
