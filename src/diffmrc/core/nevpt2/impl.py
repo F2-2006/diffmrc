@@ -295,8 +295,60 @@ def nevpt2_e2_full2(h1e_mo, eri_mo, c_ci, dets, E0_elec, mo_energy=None,
     return e2_sr + e2_srs, eps
 
 
+def stepwise_mo_ints(Cx, h_, e_):
+    """MO integrals by four sequential contractions.
+
+    XLA lowers the one-shot four-operand form on a 96^4 array with only
+    ~1e-6 absolute accuracy (measured: max|delta| = 1.28e-6 against this
+    transform, active block 8.9e-16), and that perturbation is amplified
+    by the ~1e-15 gaps of the generalized Fock's degenerate pairs --
+    linear molecules carry exact pi/delta degeneracies -- so the
+    eigenvector basis inside the degenerate subspace comes out completely
+    different (perturbation/gap ~ 1e9).  The energy is insensitive to it,
+    but the theta gradient differed by 8% between the two contraction
+    orders and the HVP was NaN for the one-shot form and finite for this
+    one (an earlier measurement).  Every MO transform in the differentiable chain must
+    therefore go through this function.
+    """
+    h1 = jnp.einsum('ai,ab,bj->ij', Cx, h_, Cx)
+    z = jnp.einsum('pi,pqrs->iqrs', Cx, e_)
+    z = jnp.einsum('qj,iqrs->ijrs', Cx, z)
+    z = jnp.einsum('rk,ijrs->ijks', Cx, z)
+    eri = jnp.einsum('sl,ijks->ijkl', Cx, z)
+    return h1, eri
+
+
+# Determinant count above which the blocked CI solver is the default in
+# canonicalization.  Below it the blocked solver's per-S_z-block dispatch
+# loses on eager wall clock (measured 1.8x at 924 determinants) with no
+# memory benefit (both routes stay under 1.5 GB peak); above it the
+# unblocked solver's (ndet, ndet, nso) tensors dominate (37.8 GB at
+# 12870 against 6.8 GB blocked).  2000 lies between the two measured
+# anchors; it is an engineering threshold, not a measured optimum.
+BLOCKED_CI_MIN_DET = 2000
+
+
+def resolve_ci_solver(ci_solver, nact, nele_act):
+    """Map 'auto' to 'blocked'/'plain' from the determinant count.
+
+    'auto' is the default of the canonicalization routines: small spaces
+    keep the plain solver (its inverse iteration is cheaper in eager
+    execution and it is the validated original route), large spaces take
+    the blocked solver (memory, and a jittable graph).  Explicit
+    'blocked'/'plain' always win.
+    """
+    from math import comb
+
+    if ci_solver in ('auto', None):
+        ndet = comb(2 * nact, nele_act)
+        return 'blocked' if ndet >= BLOCKED_CI_MIN_DET else 'plain'
+    if ci_solver not in ('blocked', 'plain'):
+        raise ValueError('unknown ci_solver: {!r}'.format(ci_solver))
+    return ci_solver
+
+
 def canonicalize_jax(C, h1e, eri, c_ci, ncore=0, nact=2, nele_act=2, occ2_idx=(),
-                     occ0_idx=(), eig_solver='eigh'):
+                     occ0_idx=(), eig_solver='eigh', ci_solver='auto'):
     """Differentiable canonicalization, following mcscf.canonicalize with
     cas_nat=True.
 
@@ -313,9 +365,29 @@ def canonicalize_jax(C, h1e, eri, c_ci, ncore=0, nact=2, nele_act=2, occ2_idx=()
     threshold cannot be determined dynamically under differentiation. For
     H2/6-31G the threshold is never approached; for LiH the blocks must be
     supplied from the measured occupation numbers.
+
+    ci_solver selects the CI eigensolver used by the two internal re-solves.
+    'blocked' routes them through ``core.casci.cs_casci_blocked``: the
+    unblocked solver materializes (ndet, ndet, nso) boolean tensors (7.6 GB
+    each at CAS(8,8) with ncore=15), while the blocked solver works one
+    S_z block at a time and the largest block is 4900 of the 12870
+    determinants.  The internal solves enter no returned quantity except
+    ``ci_can`` (the orbitals and orbital energies are built from the input
+    vector c_ci), so the substitution leaves C_can and eps bit-identical;
+    ci_can differs only by the phase and by the accuracy of the vector
+    (the inverse iteration of the plain solver has a ~1e-8 residual, the
+    blocked eigenvector is exact).
+    'plain' keeps the previous route.  The default 'auto' resolves by the
+    determinant count (``BLOCKED_CI_MIN_DET`` = 2000): small spaces keep
+    plain (the blocked solver's per-block dispatch is then a net cost,
+    measured 1.8x slower in eager execution at 924 determinants with no
+    memory saving), large spaces take blocked (37.8 GB against 6.8 GB at
+    12870).  The threshold is an engineering choice between the measured
+    anchors, not an optimum.
     """
     nmo = C.shape[1]
     nocc = ncore + nact
+    ci_solver = resolve_ci_solver(ci_solver, nact, nele_act)
     # Derivative semantics for the two eigensolves below. The default
     # (eigh_safe) is first-order safe; on `eig_solver='lanczos'` the
     # implicit-solve variant moves the decomposition out of the
@@ -323,8 +395,7 @@ def canonicalize_jax(C, h1e, eri, c_ci, ncore=0, nact=2, nele_act=2, occ2_idx=()
     # rule-on-top-of-eigh the chain HVP was off by 375x, with the
     # implicit correction it matches FD/VD; see core/eigh.eigh_cluster_ift).
     eig = eigh_cluster_ift if eig_solver == 'lanczos' else eigh_safe
-    h1e_mo = jnp.einsum("ai,ab,bj->ij", C, h1e, C)
-    eri_mo = jnp.einsum("pi,qj,rk,sl,pqrs->ijkl", C, C, C, C, eri)
+    h1e_mo, eri_mo = stepwise_mo_ints(C, h1e, eri)
     # 1) Active natural orbitals from the one-particle density
     dm1, _, _ = make_dm123_sf(c_ci, cas_dets_for2(ncore, nact, nele_act), nact, ncore)
     w_nat, U_nat = eig(dm1)
@@ -334,10 +405,9 @@ def canonicalize_jax(C, h1e, eri, c_ci, ncore=0, nact=2, nele_act=2, occ2_idx=()
     U_nat = U_nat[:, ::-1]
     C1 = C.at[:, ncore:nocc].set(C[:, ncore:nocc] @ U_nat)
     # Re-solve the CI in the natural-orbital basis
-    h1e_mo1 = jnp.einsum("ai,ab,bj->ij", C1, h1e, C1)
-    eri_mo1 = jnp.einsum("pi,qj,rk,sl,pqrs->ijkl", C1, C1, C1, C1, eri)
+    h1e_mo1, eri_mo1 = stepwise_mo_ints(C1, h1e, eri)
     E0, ci1 = _casci_ci(h1e_mo1, eri_mo1, ncore, nact, nele_act,
-                        eig_solver=eig_solver)
+                        eig_solver=eig_solver, ci_solver=ci_solver)
     # 2) Generalized Fock matrix, F = h + J - K/2, in the ORIGINAL orbital
     #    basis and with the original active density
     dm1_orig, _, _ = make_dm123_sf(c_ci, cas_dets_for2(ncore, nact, nele_act), nact, ncore)
@@ -393,10 +463,9 @@ def canonicalize_jax(C, h1e, eri, c_ci, ncore=0, nact=2, nele_act=2, occ2_idx=()
         eps_map[i] = F[i, i]
     eps = jnp.stack([eps_map[i] for i in range(nmo)])  # reorder by orbital index
     # Final CI solve in the canonical orbital basis
-    h1e_mo2 = jnp.einsum("ai,ab,bj->ij", C2, h1e, C2)
-    eri_mo2 = jnp.einsum("pi,qj,rk,sl,pqrs->ijkl", C2, C2, C2, C2, eri)
+    h1e_mo2, eri_mo2 = stepwise_mo_ints(C2, h1e, eri)
     E0c, ci2 = _casci_ci(h1e_mo2, eri_mo2, ncore, nact, nele_act,
-                         eig_solver=eig_solver)
+                         eig_solver=eig_solver, ci_solver=ci_solver)
     return C2, ci2, eps
 
 
@@ -414,11 +483,29 @@ def cas_dets_for2(ncore=0, nact=2, nele_act=2):
     return dets
 
 
-def _casci_ci(h1e_mo, eri_mo, ncore, nact, nele_act=2, eig_solver='eigh'):
-    """Ground-state CAS energy and CI vector, returned as (E_elec, ci)."""
-    from ..casci import cs_casci
+def _casci_ci(h1e_mo, eri_mo, ncore, nact, nele_act=2, eig_solver='eigh',
+              ci_solver='plain'):
+    """Ground-state CAS energy and CI vector, returned as (E_elec, ci).
+
+    ``ci_solver='blocked'`` routes the solve through
+    ``core.casci.cs_casci_blocked`` (memory and time at large determinant
+    spaces; see ``canonicalize_jax``).  The blocked solver takes its
+    eigen-kernel names from ``eigh_safe``/``lanczos``; a plain ``'eigh'``
+    request maps to ``'eigh_safe'``, which agrees with it on every
+    well-separated block and is first-order safe on degenerate ones.
+    """
+    from ..casci import cs_casci, cs_casci_blocked
+
     nact_mo = ncore + nact
-    e, ci = cs_casci(h1e_mo[:nact_mo, :nact_mo], eri_mo[:nact_mo, :nact_mo, :nact_mo, :nact_mo],
-                     ncore=ncore, nact=nact, nele_act=nele_act, return_ci=True,
-                     eig_solver=eig_solver)
-    return e, ci
+    h1 = h1e_mo[:nact_mo, :nact_mo]
+    e1 = eri_mo[:nact_mo, :nact_mo, :nact_mo, :nact_mo]
+    if ci_solver == 'blocked':
+        blk_eig = ('eigh_safe' if eig_solver in ('eigh', 'default')
+                   else eig_solver)
+        return cs_casci_blocked(h1, e1, ncore=ncore, nact=nact,
+                                nele_act=nele_act, eig_solver=blk_eig)
+    if ci_solver == 'plain':
+        e, ci = cs_casci(h1, e1, ncore=ncore, nact=nact, nele_act=nele_act,
+                         return_ci=True, eig_solver=eig_solver)
+        return e, ci
+    raise ValueError('unknown ci_solver: {!r}'.format(ci_solver))

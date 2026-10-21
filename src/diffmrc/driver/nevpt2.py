@@ -136,16 +136,16 @@ def _stepwise_mo_ints(Cx, h_, e_):
     different (perturbation/gap ~ 1e9).  The energy is insensitive to it,
     but the theta gradient differed by 8% between the two contraction
     orders and the HVP was NaN for the one-shot form and finite for the
-    stepwise one (t222/t224).
-    """
-    from jax import numpy as jnp
+    stepwise one (an earlier measurement).
 
-    h1 = jnp.einsum('ai,ab,bj->ij', Cx, h_, Cx)
-    z = jnp.einsum('pi,pqrs->iqrs', Cx, e_)
-    z = jnp.einsum('qj,iqrs->ijrs', Cx, z)
-    z = jnp.einsum('rk,ijrs->ijks', Cx, z)
-    eri = jnp.einsum('sl,ijks->ijkl', Cx, z)
-    return h1, eri
+    The implementation lives in ``core.nevpt2.impl`` so that the
+    canonicalization routines there and this driver use one copy; two
+    copies would be free to drift apart, and a drift here changes the
+    numerical branch on degenerate systems.
+    """
+    from ..core.nevpt2.impl import stepwise_mo_ints
+
+    return stepwise_mo_ints(Cx, h_, e_)
 
 
 def sa_cas_solution(h1e_mo, eri_mo, *, ncore, nact, nele, nroots,
@@ -176,7 +176,8 @@ def sa_cas_solution(h1e_mo, eri_mo, *, ncore, nact, nele, nroots,
 
 
 def canonicalize_sa_jax(C, h1e, eri, CIs, *, ncore, nact, nele, occ2_idx=(),
-                        occ0_idx=(), weights=None, eig_solver='default'):
+                        occ0_idx=(), weights=None, eig_solver='default',
+                        ci_solver='auto'):
     """Average-density canonicalization for state-averaged solutions.
 
     The same sequence as ``core.nevpt2.impl.canonicalize_jax`` -- active
@@ -192,10 +193,19 @@ def canonicalize_sa_jax(C, h1e, eri, CIs, *, ncore, nact, nele, occ2_idx=(),
     vector this reduces to the core routine bit-for-bit (identity test in
     ``tests/driver/test_sa_pipeline.py``); the single-root path is
     untouched.
+
+    ``ci_solver`` follows ``core.nevpt2.impl.canonicalize_jax``: with one
+    root, 'blocked' routes the internal re-solves through
+    ``core.casci.cs_casci_blocked`` and 'auto' (default) chooses between
+    plain and blocked by the determinant count (threshold
+    ``BLOCKED_CI_MIN_DET``).  With several roots the state-average branch
+    of ``cs_casci`` is required (there is no multi-root blocked solver),
+    so the flag has no effect there.
     """
     from jax import numpy as jnp
 
-    from ..core.nevpt2.impl import cas_dets_for2, make_dm123_sf
+    from ..core.nevpt2.impl import (cas_dets_for2, make_dm123_sf,
+                                    resolve_ci_solver, stepwise_mo_ints)
 
     eig = eigh_cluster_ift if eig_solver == 'lanczos' else eigh_safe
     nmo = C.shape[1]
@@ -223,8 +233,24 @@ def canonicalize_sa_jax(C, h1e, eri, CIs, *, ncore, nact, nele, occ2_idx=(),
     for k in range(1, nroots):
         dm1 = dm1 + make_dm123_sf(CIs[:, k], dets, nact, ncore)[0] * wv[k]
 
-    h1e_mo = jnp.einsum("ai,ab,bj->ij", C, h1e, C)
-    eri_mo = jnp.einsum("pi,qj,rk,sl,pqrs->ijkl", C, C, C, C, eri)
+    ci_mode = resolve_ci_solver(ci_solver, nact, nele)
+
+    def ci_solve(h1e_mo, eri_mo):
+        """Internal re-solve: blocked for one root, state-averaged beyond."""
+        if nroots == 1 and ci_mode == 'blocked':
+            from ..core.casci import cs_casci_blocked
+            blk_eig = ('eigh_safe' if eig_solver in ('eigh', 'default')
+                       else eig_solver)
+            nm_ = ncore + nact
+            E1, ci = cs_casci_blocked(
+                h1e_mo[:nm_, :nm_], eri_mo[:nm_, :nm_, :nm_, :nm_],
+                ncore=ncore, nact=nact, nele_act=nele, eig_solver=blk_eig)
+            return E1, ci[:, None]
+        return sa_cas_solution(h1e_mo, eri_mo, ncore=ncore, nact=nact,
+                               nele=nele, nroots=nroots,
+                               eig_solver=eig_solver)
+
+    h1e_mo, eri_mo = stepwise_mo_ints(C, h1e, eri)
     # 1) Active natural orbitals from the average density.  The columns
     #    are reversed because eigh returns ascending eigenvalues while
     #    the reference orders by descending occupation number.
@@ -235,10 +261,8 @@ def canonicalize_sa_jax(C, h1e, eri, CIs, *, ncore, nact, nele, occ2_idx=(),
     # routine, which performs this solve as well; it enters no returned
     # quantity there, and the identity test holds both routines to the
     # same computation).
-    h1e_mo1 = jnp.einsum("ai,ab,bj->ij", C1, h1e, C1)
-    eri_mo1 = jnp.einsum("pi,qj,rk,sl,pqrs->ijkl", C1, C1, C1, C1, eri)
-    sa_cas_solution(h1e_mo1, eri_mo1, ncore=ncore, nact=nact, nele=nele,
-                    nroots=nroots, eig_solver=eig_solver)
+    h1e_mo1, eri_mo1 = stepwise_mo_ints(C1, h1e, eri)
+    ci_solve(h1e_mo1, eri_mo1)
     # 2) Generalized Fock matrix, F = h + J - K/2, in the original orbital
     #    basis and with the original (average) active density.
     D = jnp.zeros((nmo, nmo))
@@ -274,11 +298,8 @@ def canonicalize_sa_jax(C, h1e, eri, CIs, *, ncore, nact, nele, occ2_idx=(),
         eps_map[i] = F[i, i]
     eps = jnp.stack([eps_map[i] for i in range(nmo)])
     # 3) Final state-averaged CI solve in the canonical orbital basis.
-    h1e_mo2 = jnp.einsum("ai,ab,bj->ij", C2, h1e, C2)
-    eri_mo2 = jnp.einsum("pi,qj,rk,sl,pqrs->ijkl", C2, C2, C2, C2, eri)
-    _, CIs2 = sa_cas_solution(h1e_mo2, eri_mo2, ncore=ncore, nact=nact,
-                              nele=nele, nroots=nroots,
-                              eig_solver=eig_solver)
+    h1e_mo2, eri_mo2 = stepwise_mo_ints(C2, h1e, eri)
+    _, CIs2 = ci_solve(h1e_mo2, eri_mo2)
     return C2, CIs2, eps
 
 
@@ -636,8 +657,26 @@ def make_nevpt2_theta_fn(mol, ncore, nact, nele, nmo, pairs, scf_builder,
                                      want_e2=(e2_scale != 0.0), **kw)
         return E_cas + e2_scale * e2
 
+    def E_theta_args(th_, C0__, h__, e__):
+        """Array-argument form: the reference arrays are traced arguments.
+
+        The closure form burns C0_, h_ and e_ into the traced graph, so a
+        jitted wrapper compiles once per geometry (~15 min per compile on
+        the f-block windows).  This form keeps one executable for
+        every geometry whose arrays have the same shape and dtype.  enuc
+        stays closed over because the form is documented for a fixed
+        geometry (its variation across geometries is a scalar offset);
+        callers that need several geometries pass it as an argument in
+        their own wrapper.
+        """
+        E_cas, e2 = _components_from(C0__, h__, e__, enuc, th_,
+                                     want_e2=(e2_scale != 0.0), **kw)
+        return E_cas + e2_scale * e2
+
     E_theta.components = lambda th_: _components_from(  # noqa: E731
         C0_, h_, e_, enuc, th_, **kw)
+    E_theta.component_args = E_theta_args
+    E_theta.arrays = (C0_, h_, e_)
     return E_theta
 
 
@@ -980,6 +1019,17 @@ def make_sa_energy_fn(mol, scf_builder, *, ncore, nact, nele, nmo, pairs,
                                   eig_solver=eig_solver)
         return e_sa + enuc
 
+    def E_sa_of_args(th_, C0__, h__, e__):
+        """Array-argument form (same contract as the full components)."""
+        C2 = C0__ @ block_rotation(th_, nmo, pairs)
+        h1_, eri_ = _stepwise_mo_ints(C2, h__, e__)
+        e_sa, _ = sa_cas_solution(h1_, eri_, ncore=ncore, nact=nact,
+                                  nele=nele, nroots=nroots,
+                                  eig_solver=eig_solver)
+        return e_sa + enuc
+
+    E_sa_of.component_args = E_sa_of_args
+    E_sa_of.arrays = (C0_, h_, e_)
     return E_sa_of
 
 
@@ -1032,7 +1082,13 @@ def sa_mcpdft_table(mol, scf_builder, *, ncore, nact, nele, nroots,
         converge_kw['optimize_tol'] = float(optimize_tol)
     if refine_target is not None:
         converge_kw['refine_target'] = float(refine_target)
-    point = converge_orbital_point(E_sa_light, len(pairs), **converge_kw)
+    # The AO integrals travel as jit arguments, not as closure constants
+    # (see make_nevpt2_theta_fn.component_args): without this the first
+    # call of every geometry recompiles the whole rotation + CI graph.
+    converge_kw.setdefault('arrays', getattr(E_sa_light, 'arrays', ()))
+    point = converge_orbital_point(
+        getattr(E_sa_light, 'component_args', E_sa_light), len(pairs),
+        **converge_kw)
     out = comp(point.theta)
     rows, groups = sa_nevpt2_state_table(out, dets)
 

@@ -431,3 +431,31 @@ def test_the_relaxed_gradient_takes_a_precomputed_response_operator():
     g_frozen = np.asarray(nevpt2_nuclear_gradient(
         mol, lambda m_: f1(m_, theta)))
     assert np.abs(g0 - g_frozen).max() < 1e-13
+
+
+def test_the_theta_array_argument_form_matches_the_closure():
+    """The jitted theta chain must take its reference arrays as arguments.
+
+    Closure constants are burned into the jaxpr, so one jitted closure
+    compiles once per geometry (~15 min on the f-block windows);
+    the array-argument form shares one executable across every geometry
+    of the same shape.  This test pins the two forms to the same value.
+    """
+    from pyscfad import gto, scf
+
+    from diffmrc.driver.nevpt2 import make_nevpt2_theta_fn
+
+    mol = gto.Mole()
+    mol.atom = "H 0 0 0; H 0 0 0.74"
+    mol.basis = "6-31g"
+    mol.verbose = 0
+    mol.build()
+    nmo = mol.nao_nr()
+    pairs = _pairs(0, 2, nmo)
+    builder = lambda m: scf.RHF(m)  # noqa: E731
+    th_fn = make_nevpt2_theta_fn(mol, 0, 2, 2, nmo, pairs, builder,
+                                 e2_scale=1.0)
+    theta = jnp.asarray(0.01 * np.arange(len(pairs)))
+    a = float(th_fn(theta))
+    b = float(th_fn.component_args(theta, *th_fn.arrays))
+    assert b == pytest.approx(a, abs=1e-12)

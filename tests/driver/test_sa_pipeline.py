@@ -383,3 +383,56 @@ def test_sa_mcpdft_table_matches_the_engine_per_state():
     e_eng = np.atleast_1d(np.asarray(
         eng.e_states if hasattr(eng, 'e_states') else eng.e_tot, dtype=float))
     assert np.abs(e_tpbe[:2] - e_eng[:2]).max() < 1e-7
+
+
+def test_canonicalize_blocked_shares_the_orbitals_of_the_plain_solver():
+    """The blocked and plain CI solvers inside canonicalize_jax differ only
+    in the returned CI vector: the natural-orbital transform and the
+    subspace Fock diagonalization are built from the input vector, so the
+    orbitals and orbital energies are bit-identical.  The vector itself
+    agrees up to phase and to the plain solver's inverse-iteration error,
+    residual/gap: 4.7e-10 on H2O/6-31G CAS(2,2) and 5.4e-8 on CO/6-31G
+    CAS(4,4) (measured), while this random scaffold's narrow
+    gap leaves ~2e-4.  The vector check is therefore a parallelism check,
+    not an accuracy check."""
+    from diffmrc.core.casci import cs_casci
+    from diffmrc.core.nevpt2.impl import canonicalize_jax
+
+    h, eri = _symmetric_ints(4)
+    # Split orbital 0 far below the rest: on the random matrix the ground
+    # gap can be small, and the plain solver's ~1e-8 inverse-iteration
+    # residual is then amplified by 1/gap (measured 2.7e-3 on this
+    # scaffold). The solver substitution is a semantic question about
+    # C and eps; a well-separated ground state keeps the CI comparison
+    # meaningful as well.
+    h = h + jnp.diag(jnp.asarray([-10.0, 0.0, 0.0, 0.0]))
+    ncore, nact, nele = 0, 2, 2
+    _, ci = cs_casci(h, eri, ncore=ncore, nact=nact, nele_act=nele,
+                     return_ci=True)
+    C = jnp.eye(4)
+    Cb, cib, epsb = canonicalize_jax(C, h, eri, ci, ncore=ncore, nact=nact,
+                                     nele_act=nele, ci_solver='blocked')
+    Cp, cip, epsp = canonicalize_jax(C, h, eri, ci, ncore=ncore, nact=nact,
+                                     nele_act=nele, ci_solver='plain')
+    assert np.allclose(np.asarray(Cb), np.asarray(Cp), atol=1e-12)
+    assert np.allclose(np.asarray(epsb), np.asarray(epsp), atol=1e-12)
+    a, b = np.asarray(cib), np.asarray(cip)
+    phase = 1.0 if a @ b >= 0 else -1.0
+    assert np.allclose(a, phase * b, atol=5e-3)
+
+
+def test_ci_solver_auto_threshold():
+    """The canonicalization default is 'auto': small determinant spaces keep
+    the plain solver, large ones take the blocked solver.  The threshold
+    sits between the two measured anchors (924 determinants: blocked is
+    1.8x slower in eager execution with no memory saving; 12870: it saves
+    5.6x of peak RSS)."""
+    from diffmrc.core.nevpt2.impl import (BLOCKED_CI_MIN_DET,
+                                          resolve_ci_solver)
+
+    assert BLOCKED_CI_MIN_DET == 2000
+    assert resolve_ci_solver('auto', 2, 2) == 'plain'       # 6
+    assert resolve_ci_solver('auto', 6, 6) == 'plain'       # 924
+    assert resolve_ci_solver('auto', 8, 8) == 'blocked'     # 12870
+    assert resolve_ci_solver('blocked', 2, 2) == 'blocked'
+    assert resolve_ci_solver('plain', 8, 8) == 'plain'

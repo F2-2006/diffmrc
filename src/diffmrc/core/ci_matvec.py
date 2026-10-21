@@ -181,9 +181,15 @@ def _folded(h1e_mo, eri_mo, ncore, nact):
     return h_eff, g, e_core
 
 
-def _diagonal(h1e_mo, eri_mo, tab, ncore, nact):
-    """Diagonal of the block Hamiltonian, in the block's determinant order."""
-    h_eff, g, e_core = _folded(h1e_mo, eri_mo, ncore, nact)
+def _diagonal_from(h_eff, g, e_core, tab):
+    """Diagonal of the block Hamiltonian from the already folded integrals.
+
+    The arithmetic is the original one verbatim: ``jnp.diag`` on a 2-D
+    input extracts its diagonal, so ``occ @ jnp.diag(h_eff)`` is the
+    matrix-vector product with the diagonal -- there is no diagonal
+    matrix to avoid materializing.  The only change is that the folded
+    integrals arrive as arguments instead of being recomputed here.
+    """
     occ_a, occ_b = tab['occ_a'], tab['occ_b']
     wd = jnp.einsum('iijj->ij', g) - jnp.einsum('ijji->ij', g)
     da = (occ_a @ jnp.diag(h_eff)
@@ -192,6 +198,12 @@ def _diagonal(h1e_mo, eri_mo, tab, ncore, nact):
           + (occ_b @ jnp.triu(wd, 1) * occ_b).sum(axis=1))
     coul = occ_a @ jnp.einsum('iijj->ij', g) @ occ_b.T
     return (da[:, None] + db[None, :] + coul + e_core).reshape(-1)
+
+
+def _diagonal(h1e_mo, eri_mo, tab, ncore, nact):
+    """Diagonal of the block Hamiltonian, in the block's determinant order."""
+    h_eff, g, e_core = _folded(h1e_mo, eri_mo, ncore, nact)
+    return _diagonal_from(h_eff, g, e_core, tab)
 
 
 def _acc_alpha(sig, src, tgt, sign, cpl, x2):
@@ -293,7 +305,10 @@ def _apply(h1e_mo, eri_mo, tab, ncore, nact, x):
     nI, nJ = tab['nI'], tab['nJ']
     orb = jnp.arange(int(tab['nact']))
     x2 = x.reshape(nI, nJ)
-    sig = _diagonal(h1e_mo, eri_mo, tab, ncore, nact).reshape(nI, nJ) * x2
+    # The diagonal is built from the already folded integrals: the
+    # previous form called _folded a second time inside _diagonal, so
+    # every matvec paid the core folding twice.
+    sig = _diagonal_from(h_eff, g, e_core, tab).reshape(nI, nJ) * x2
 
     # alpha singles: (h + same-spin exchange) on the alpha side, the beta
     # spectator Coulomb on the beta side. The j = i self-term of the
