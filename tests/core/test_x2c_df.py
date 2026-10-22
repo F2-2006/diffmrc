@@ -1,7 +1,7 @@
 """Contracts of the density-fitted two-component X2C HF layer.
 
 The conventions under test are documented in ``diffmrc.core.x2c_df`` and
-were pinned numerically against pyscf 2.14 / libcint on the 101 server:
+were pinned numerically against pyscf 2.14 / libcint:
 
   * the X2C one-electron Hamiltonian reproduces ``SpinorX2CHelper``;
   * the spinor RI-JK factors reproduce pyscf's exact complex-GHF J and K

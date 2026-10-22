@@ -10,7 +10,7 @@ Reports, on H2O/6-31G with the def2-universal-jkfit auxiliary basis:
   * the analytic gradient against 3-point and 5-point differences of the
     converged DF energy, plus translation/rotation invariants.
 
-Run on 101 with the pyscfad214 environment, single-thread BLAS:
+Run with the pyscf/pyscfad environment and single-thread BLAS:
 
     python df_x2c_gradient_validation.py [output.json]
 """

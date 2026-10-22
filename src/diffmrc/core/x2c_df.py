@@ -79,13 +79,13 @@ Daleckii-Krein form already implemented in :mod:`diffmrc.core.ri`.
 
 THE X2C TRANSFORM DERIVATIVE
 
-dH_X2C/dR comes from the Wave 3 two-component derivative work: analytic
+dH_X2C/dR comes from the earlier two-component derivative work: analytic
 nuclear derivatives of the four input integrals, the implicit eigenbasis
 derivative of the picture-change matrix X (complement-space sum, safe at
 the exact Kramers degeneracy), and a transform-layer central difference
 along the analytic integral directions for the polynomial and matrix
-square-root chain.  The transform-layer step is 1e-4 Bohr; the Wave 3
-report measures its error at about 1e-7 relative on H2O.
+square-root chain.  The transform-layer step is 1e-4 Bohr; that work
+measures its error at about 1e-7 relative on H2O.
 
 SCOPE AND LIMITS
 
@@ -94,7 +94,7 @@ SCOPE AND LIMITS
   inherits that limit.
 * This is the HF layer.  The state-specific SA-CASSCF response terms
   (target-state CI response and orbital Z-vector) are not implemented
-  here; see the Wave 7 report for the design.
+  here; their design is documented separately.
 * The gradient is validated against finite differences of the same DF
   energy and against the independent translation/rotation invariants;
   the DF J/K matrices are validated against the exact spinor ERI.
@@ -212,7 +212,8 @@ def _derivative_integral(dint, p0, p1, op=None, z=0.0):
     ``dint`` is a ``(n, n)`` bra-derivative integral; ``op`` is the
     operator-derivative integral for the nuclear-attraction operators.
     The recipe (including the hermitian completion and the separate
-    operator term) is the one fixed numerically in Wave 3.
+    operator term) is the one fixed numerically in the earlier
+    two-component derivative work.
     """
     y = np.zeros_like(dint)
     y[p0:p1, :] = dint[p0:p1, :]
@@ -349,8 +350,9 @@ class X2CTransform:
         The integral derivatives are analytic; the polynomial and matrix
         square-root chain is differentiated by a transform-layer central
         difference along those analytic directions, and the X response
-        comes from :meth:`dx_implicit`.  The Wave 3 report measured the
-        transform-layer error at about 1e-7 relative on H2O.
+        comes from :meth:`dx_implicit`.  The earlier two-component
+        derivative work measured the transform-layer error at about 1e-7
+        relative on H2O.
         """
         dints = self.d_integrals()
         dx = self.dx_implicit(dints)
