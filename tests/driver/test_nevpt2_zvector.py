@@ -240,6 +240,26 @@ def test_rcond_cuts_the_soft_mode_from_the_response():
     assert np.abs(z_loose).max() > 1e5
 
 
+def test_the_relaxed_wrapper_with_injected_pieces():
+    """With every expensive piece injected, the public wrapper performs
+    exactly the adjoint solve and the Lagrangian contraction; mol, the two
+    energy callables and theta are only carried for the default paths."""
+    from diffmrc.driver.nevpt2_zvector import nevpt2_relaxed_gradient_zvector
+
+    h, soft = _symmetric_with_a_soft_mode()
+    rng = np.random.default_rng(9)
+    s = rng.normal(size=h.shape[0])
+    s -= soft * (s @ soft)      # the response operator cuts the soft mode
+    m = rng.normal(size=(h.shape[0], 6))
+    g0 = rng.normal(size=6)
+    g, info = nevpt2_relaxed_gradient_zvector(
+        None, np.zeros(h.shape[0]), None, None, rcond=1e-7, H_tt=h, M=m,
+        source=s, g_frozen=g0)
+    z = np.linalg.pinv(h, rcond=1e-7) @ s
+    assert np.abs(g - (g0 - m.T @ z)).max() < 1e-12
+    assert info['residual_relative'] < 1e-10
+
+
 # ---------------------------------------------------------------------------
 # The chain-level assembly (needs pyscfad)
 # ---------------------------------------------------------------------------
