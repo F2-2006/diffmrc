@@ -37,8 +37,10 @@ SYSTEMS = {
                 charge=1, spin=0),
     "xe": dict(atom=[("Xe", (0.0, 0.0, 0.0))],
                unit="Bohr", basis="cc-pvtz-dk", charge=0, spin=0),
-    # Small all-electron basis for a fast four-component reference; the
-    # cc-pVTZ-DK runs above are the production-quality comparison.
+    # Negative control, not a production comparison: the 3-21g decontraction
+    # is ill-conditioned for the X2C transform (Xe 1s X2C vs 4c DHF differs
+    # by 13 Eh, total energy by 32 Eh).  Kept so the failure is reproducible;
+    # use cc-pVTZ-DK for any accuracy claim.
     "xe321": dict(atom=[("Xe", (0.0, 0.0, 0.0))],
                   unit="Bohr", basis="3-21g", charge=0, spin=0),
     "xeh321": dict(atom=[("Xe", (0.0, 0.0, 0.0)), ("H", (0.0, 0.0, 1.75))],
