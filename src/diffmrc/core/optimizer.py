@@ -51,9 +51,12 @@ import jax
 jax.config.update("jax_enable_x64", True)
 from jax import numpy as jnp
 
+from .trust_region import TrustRegionStop, trust_region_minimize
+
 logger = logging.getLogger(__name__)
 
-__all__ = ['optimize_theta', 'optimize_theta_scipy', 'optimize_theta_hand']
+__all__ = ['optimize_theta', 'optimize_theta_scipy', 'optimize_theta_hand',
+           'optimize_theta_trust_region']
 
 # Step-size floor for the handwritten fallback. The original used 1e-8, which
 # twenty halvings never reach; 1e-6 is attainable.
@@ -204,6 +207,99 @@ def optimize_theta_hand(E_of, npar, steps=400, g_conv=1e-9, theta0=None,
 
     return E_jit, theta, gnorm, dict(ok=(gnorm < 1e-6), msg='hand',
                                      nit=it + 1, E=float(E_jit(theta, *arrays)))
+
+
+def optimize_theta_trust_region(E_of, npar, steps=400, g_conv=1e-8,
+                                theta0=None, label='', log_interval=0,
+                                arrays=(), initial_radius=1.0,
+                                max_radius=10.0):
+    """Trust-region Newton-CG path, same return contract as the others.
+
+    The step solves the local quadratic model inside an adaptive ball
+    with Steihaug's truncated CG (``core.trust_region``); the Hessian
+    reaches the solver only through Hessian-vector products, a ``jvp``
+    of the gradient. That is the same second-order object as
+    ``driver.orbitals.hessp_of`` and the same reason for not using
+    ``jax.hessian``: the fwd-over-fwd Hessian broadcasts every
+    intermediate over npar^2 tangents (measured 402 GB on the M5-C batch
+    at npar ~ 500).
+
+    Why this stage exists next to L-BFGS: L-BFGS has no model of
+    negative curvature, so it can stop where the gradient vanishes on a
+    saddle (measured on H2O/6-31g: |g| = 3.9e-14, three negative
+    eigenvalues). Trust-region steps follow a negative-curvature
+    direction to the boundary, where the model is lowest, and the
+    acceptance test uses the measured energy.
+
+    Parameters
+    ----------
+    E_of : callable
+        ``E_of(theta, *arrays) -> scalar``, differentiable by JAX.
+    npar : int
+        Parameter count, used when ``theta0`` is omitted.
+    steps : int
+        Subproblem-solve budget.
+    g_conv : float
+        Gradient target.
+    theta0 : array_like, optional
+        Starting point; zeros when omitted.
+    label, log_interval : str, int
+        Logging controls, matching ``optimize_theta_scipy``.
+    arrays : tuple
+        Extra runtime arguments appended to every ``E_of`` call (the
+        ``optimize_theta_scipy`` contract: large reference arrays must
+        travel this way, not through a closure).
+    initial_radius, max_radius : float
+        Trust-region radius controls.
+
+    Returns
+    -------
+    (E_jit, theta, gnorm, info)
+        The same shape as ``optimize_theta_scipy``. On an exception in
+        the stage, ``E_jit`` is None and ``info['ok']`` is False, so the
+        caller can fall back to the existing optimizer.
+    """
+    E_jit = jax.jit(E_of)
+    g_plain = jax.grad(E_of)
+    g_jit = jax.jit(g_plain)
+
+    @jax.jit
+    def hvp_jit(x, v, *arr):
+        return jax.jvp(lambda t: g_plain(t, *arr), (x,), (v,))[1]
+
+    def fun(x):
+        return float(E_jit(jnp.asarray(x), *arrays))
+
+    def jac(x):
+        return np.asarray(g_jit(jnp.asarray(x), *arrays), dtype=float)
+
+    def hvp(x, v):
+        return np.asarray(
+            hvp_jit(jnp.asarray(x), jnp.asarray(v), *arrays), dtype=float)
+
+    x0 = (np.zeros(npar) if theta0 is None
+          else np.asarray(theta0, dtype=float))
+    try:
+        res = trust_region_minimize(
+            fun, jac, x0, hvp=hvp, gtol=g_conv, maxiter=steps,
+            initial_radius=initial_radius, max_radius=max_radius)
+    except Exception as ex:
+        return None, jnp.asarray(x0), float('nan'), dict(
+            ok=False, msg=f'{type(ex).__name__}: {str(ex)[:50]}', nit=-1)
+
+    info = dict(
+        ok=bool(res.stop_reason is TrustRegionStop.CONVERGED),
+        msg=f'trust_region:{res.stop_reason.value}',
+        nit=int(res.n_iter), E=float(res.fun),
+        n_accept=int(res.n_accept), n_reject=int(res.n_reject),
+        radius=float(res.radius), n_cg=int(res.n_cg),
+        n_hvp=int(res.n_hvp))
+    if log_interval:
+        logger.info('[%s trust-region] E = %.10f  |g| = %.2e  it=%d '
+                    'accept=%d reject=%d radius=%.2e',
+                    label, res.fun, res.grad_norm, res.n_iter,
+                    res.n_accept, res.n_reject, res.radius)
+    return E_jit, jnp.asarray(res.x), float(res.grad_norm), info
 
 
 def optimize_theta(mol, C0, E_of, npar, steps=400, g_conv=1e-8,

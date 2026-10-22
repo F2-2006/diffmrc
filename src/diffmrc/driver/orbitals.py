@@ -35,11 +35,13 @@ from dataclasses import dataclass
 
 import numpy as np
 
-from ..core.optimizer import optimize_theta_hand, optimize_theta_scipy
+from ..core.optimizer import (optimize_theta_hand, optimize_theta_scipy,
+                              optimize_theta_trust_region)
 from ..core.stationary import (StopReason, StationaryPoint,
                                refine_stationary_point)
 
 __all__ = ['OrbitalPoint', 'converge_orbital_point', 'hessp_of',
+           'optimize_theta_trust_region',
            'OPTIMIZER_GRAD_TOL', 'REFINE_TARGET']
 
 OPTIMIZER_GRAD_TOL = 1e-6
@@ -134,6 +136,8 @@ class OrbitalPoint:
     the optimizer stopped at, before refinement. ``optimizer_reached``
     says whether the loose stage met its own target -- a run that misses
     it is not a failure, it is the case refinement exists for.
+    ``optimizer_name`` says which stage ran: ``'lbfgs-b'`` is the
+    default path, ``'trust-region'`` is opt-in.
     """
 
     theta: object
@@ -145,6 +149,7 @@ class OrbitalPoint:
     optimizer_reached: bool
     refinement: object
     polished: bool = False
+    optimizer_name: str = 'lbfgs-b'
 
     @property
     def is_stationary(self):
@@ -168,7 +173,8 @@ def converge_orbital_point(E_theta, npar, theta0=None,
                            optimize_tol=OPTIMIZER_GRAD_TOL,
                            refine_target=REFINE_TARGET,
                            max_steps=MAX_STEPS,
-                           refine_max_iter=REFINE_MAX_ITER, arrays=()):
+                           refine_max_iter=REFINE_MAX_ITER, arrays=(),
+                           use_trust_region=False):
     """Optimize with a loose target, then refine to the tight one.
 
     Parameters
@@ -189,15 +195,29 @@ def converge_orbital_point(E_theta, npar, theta0=None,
         Extra runtime arguments appended to every ``E_theta(theta, *arrays)``
         call (see ``optimizer.optimize_theta_scipy``); pass the AO
         integrals here, not through the closure.
+    use_trust_region : bool
+        When True the first stage is ``optimize_theta_trust_region``
+        (Newton-CG with an adaptive trust region) instead of L-BFGS-B.
+        The refinement and polish stages are unchanged. The default stays
+        L-BFGS-B, so existing results are reproduced bit for bit.
 
     Returns
     -------
     OrbitalPoint
     """
-    info = {}
-    E_jit, theta, g_after, info = optimize_theta_scipy(
-        E_theta, npar, steps=max_steps, g_conv=optimize_tol, theta0=theta0,
-        arrays=arrays)
+    optimizer_name = 'lbfgs-b'
+    E_jit = None
+    if use_trust_region:
+        E_jit, theta, g_after, info = optimize_theta_trust_region(
+            E_theta, npar, steps=max_steps, g_conv=optimize_tol,
+            theta0=theta0, arrays=arrays)
+        if E_jit is not None:
+            optimizer_name = 'trust-region'
+    if E_jit is None:
+        info = {}
+        E_jit, theta, g_after, info = optimize_theta_scipy(
+            E_theta, npar, steps=max_steps, g_conv=optimize_tol,
+            theta0=theta0, arrays=arrays)
     if E_jit is None:
         # scipy raised; the handwritten fallback keeps the run alive.
         E_jit, theta, g_after, info = optimize_theta_hand(
@@ -243,6 +263,7 @@ def converge_orbital_point(E_theta, npar, theta0=None,
         optimizer_reached=bool(g_after <= optimize_tol),
         refinement=sp,
         polished=polished,
+        optimizer_name=optimizer_name,
     )
 
 
