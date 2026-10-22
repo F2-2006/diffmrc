@@ -77,7 +77,7 @@ IMPLEMENTATION NOTES
   sph2spinor transformation or a dressed-Boys 3-centre kernel; raising is
   preferable to returning a silently wrong matrix.
 * Only the value layer is claimed here.  The nuclear-coordinate derivative
-  design is documented in the Wave 7 report; the derivative integrals
+  design is documented in the design note; the derivative integrals
   (``int3c2e_ip1`` / ``int3c2e_ip2`` for V^e and
   ``int3c2e_ipspsp1_spinor`` / ``int3c2e_spsp1ip2_spinor`` for W^e) are
   available in libcint but are not wired into a production gradient.

@@ -5,7 +5,7 @@ Run with the PySCF/pyscfad environment on the compute server:
     python x2c_sap_smoke.py --system h2o --out h2o.json
 
 The script prints a JSON block with the matrix checks and the SCF energies
-needed for the Wave 7 report.  It is not a pytest file; the numerical
+needed for the benchmark report.  It is not a pytest file; the numerical
 assertions live in tests/core/test_x2c_sap.py.
 """
 import argparse
