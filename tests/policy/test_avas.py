@@ -56,6 +56,14 @@ def test_custom_shells_are_per_element():
     assert sub.indices.tolist() == [1, 2, 3, 4, 5, 6]
 
 
+def test_custom_shells_respect_the_element_restriction():
+    labels = ['0 O 2s', '0 O 2px', '1 H 1s', '2 H 1s']
+    sub = avas.target_ao_indices(
+        None, labels=labels, symbols=['O', 'H', 'H'], elements=['O'],
+        shells={'O': ['2s', '2p'], 'H': ['1s']})
+    assert sub.indices.tolist() == [0, 1]
+
+
 def test_a_rule_that_matches_nothing_refuses():
     with pytest.raises(ValueError):
         avas.target_ao_indices(None, labels=['0 O 1s', '1 H 1s'],

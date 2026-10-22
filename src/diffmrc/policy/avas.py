@@ -371,7 +371,11 @@ def target_ao_indices(mol, *, rule=None, elements=None, shells=None,
     else:
         if isinstance(shells, dict):
             spec = {str(e): list(tokens) for e, tokens in shells.items()}
-            allowed = set(spec) if elements is None else set(elements)
+            if elements is not None:
+                keep = set(elements)
+                spec = {e: tokens for e, tokens in spec.items()
+                        if e in keep}
+            allowed = set(spec)
         else:
             allowed = set(symbols) if elements is None else set(elements)
             tokens = list(shells)
