@@ -56,16 +56,24 @@ def test_table_coefficients_sum_to_minus_z():
         assert np.all(table[z]["alpha"] > 0.0)
 
 
-def test_sap_potential_decays_and_hits_the_nucleus():
-    mol = gto.M(atom=[("Xe", (0.0, 0.0, 0.0))], unit="Bohr",
-                basis="cc-pvtz-dk", verbose=0)
-    far = np.array([[25.0, 0.0, 0.0], [0.0, -40.0, 0.0]])
+@pytest.mark.parametrize("z,symbol,basis", [
+    (54, "Xe", "cc-pvtz-dk"),
+    (70, "Yb", {"Yb": [[0, [1.0, 1.0]]]}),
+])
+def test_sap_potential_decays_and_hits_the_nucleus(z, symbol, basis):
+    # The basis is only used to build the Mole; sap_potential needs the
+    # nuclear charges and coordinates, not the orbital basis.
+    mol = gto.M(atom=[(symbol, (0.0, 0.0, 0.0))], unit="Bohr",
+                basis=basis, verbose=0)
+    # The Yb fit contains diffuse exponents, so the asymptotic regime starts
+    # farther out than for Xe; at 60 and 90 bohr both are below 1e-8.
+    far = np.array([[60.0, 0.0, 0.0], [0.0, -90.0, 0.0]])
     v_far = xs.sap_potential(mol, far)
     assert np.max(np.abs(v_far)) < 1e-8
 
     near = np.array([[1e-3, 0.0, 0.0]])
     v_near = xs.sap_potential(mol, near)
-    bare = -54.0 / 1e-3
+    bare = -float(z) / 1e-3
     # inside the 1s shell the bare Coulomb term dominates; at 1e-3 bohr the
     # residual screening is below 2% of the bare value
     assert abs(v_near[0] / bare - 1.0) < 0.02
