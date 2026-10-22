@@ -1,0 +1,108 @@
+{
+  "oh": {
+    "system": "oh",
+    "nao": 11,
+    "nelec": 9,
+    "nelecas": [
+      4,
+      3
+    ],
+    "ncas": 6,
+    "ncore": 1,
+    "nstates": 2,
+    "cas_energy": -75.40080503672229,
+    "scalar_gap_cm": 0.00032883731376665915,
+    "density_trace": [
+      9.000000000000002,
+      9.000000000000005,
+      9.0
+    ],
+    "density_state_diff": 0.3702984449043404,
+    "ao_check": {
+      "explicit_vs_direct_maxdiff": 7.105427357601002e-15,
+      "operator_maxabs": 23.173108660824802,
+      "relative": 3.06623831165693e-16,
+      "antisym_explicit": 3.552713678800501e-15,
+      "antisym_direct": 2.4950524828512807e-16
+    },
+    "one_electron_cm": 206.51976765757826,
+    "somf_cm": 129.2272956455486,
+    "somf_state_density_cm": [
+      129.22729565802427,
+      129.2272956330729
+    ],
+    "somf_state_density_spread_cm": 2.4951361865532817e-08,
+    "hermiticity": [
+      5.496033906352716e-20,
+      5.827124601264375e-20
+    ],
+    "orca": {
+      "one_electron": 205.88,
+      "somf": 128.83
+    },
+    "deviation_1e_cm": 0.6397676575782612,
+    "deviation_1e_rel": 0.0031074784222763804,
+    "deviation_somf_cm": 0.39729564554858143,
+    "deviation_somf_rel": 0.0030838752274204876,
+    "ratio_this": 0.6257381417347657,
+    "ratio_orca": 0.6257528657470371,
+    "ratio_rel": -2.3530075653508628e-05,
+    "scale_corrected_somf_cm": 128.82696862035357,
+    "scale_corrected_dev_cm": -0.0030313796464440657,
+    "scale_corrected_dev_rel": -2.353007565352841e-05,
+    "wall_s": 1.161757230758667
+  },
+  "of": {
+    "system": "of",
+    "nao": 18,
+    "nelec": 17,
+    "nelecas": [
+      7,
+      6
+    ],
+    "ncas": 8,
+    "ncore": 2,
+    "nstates": 2,
+    "cas_energy": -174.12875135775383,
+    "scalar_gap_cm": 1.9249987201045406e-05,
+    "density_trace": [
+      17.000000000000007,
+      17.00000000000001,
+      17.000000000000004
+    ],
+    "density_state_diff": 0.4348216853103829,
+    "ao_check": {
+      "explicit_vs_direct_maxdiff": 1.0658141036401503e-14,
+      "operator_maxabs": 36.54528046029354,
+      "relative": 2.9164206436947656e-16,
+      "antisym_explicit": 7.105427357601002e-15,
+      "antisym_direct": 8.881784197001252e-16
+    },
+    "one_electron_cm": 273.0635560741446,
+    "somf_cm": 176.76989598732789,
+    "somf_state_density_cm": [
+      176.7698955382031,
+      176.76989643645265
+    ],
+    "somf_state_density_spread_cm": 8.982495671716606e-07,
+    "hermiticity": [
+      1.0842021724855044e-19,
+      5.421010862427522e-20
+    ],
+    "orca": {
+      "one_electron": 272.06,
+      "somf": 176.12
+    },
+    "deviation_1e_cm": 1.003556074144626,
+    "deviation_1e_rel": 0.0036887306996420868,
+    "deviation_somf_cm": 0.6498959873278807,
+    "deviation_somf_rel": 0.0036900748769468582,
+    "ratio_this": 0.6473580675823681,
+    "ratio_orca": 0.6473572006175109,
+    "ratio_rel": 1.3392372192831466e-06,
+    "scale_corrected_somf_cm": 176.12023586645907,
+    "scale_corrected_dev_cm": 0.00023586645906448211,
+    "scale_corrected_dev_rel": 1.3392372193077568e-06,
+    "wall_s": 3.82871675491333
+  }
+}
