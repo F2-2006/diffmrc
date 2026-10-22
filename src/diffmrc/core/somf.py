@@ -2,8 +2,8 @@
 
 WHY THIS MODULE EXISTS
 
-The SOC layer of this stack (``code/t452_soc_ecp_si.py``) assembles the
-state-interaction (SI) matrix from the one-electron Breit-Pauli operator
+The SOC layer of this stack assembles the state-interaction (SI) matrix
+from the one-electron Breit-Pauli operator
 ``int1e_pnucxp`` only.  On OH the one-electron operator gives a 2Pi
 splitting of 206.52 cm^-1, against 205.88 cm^-1 for ORCA with
 ``SOCFlags 1,0,0,0`` (0.31%), while the ORCA default SOMF operator gives
@@ -53,14 +53,14 @@ The index patterns are not guessed: they were fixed by comparing against
 pyscf's own SOMF machinery (``pyscf.prop.gtensor.uhf.get_jk``, which
 contracts ``int2e_p1vxp1`` through ``_vhf.direct_mapdm``).  Explicit
 einsum versus that route agrees to 7.1e-15 on OH/6-31G; see
-``experiments/somf/probe_somf_contraction_101.py``.
+``experiments/somf/probe_somf_contraction.py``.
 
 PREFACTOR
 
 Neither ``int1e_pnucxp`` nor ``int2e_p1vxp1`` carries ``alpha^2/2`` or
 ``i``.  The returned array therefore follows the convention of
 ``int1e_pnucxp``: real and antisymmetric, and the SI assembly multiplies
-by ``i * alpha^2/2`` (the convention validated in Wave 3 and in t452).
+by ``i * alpha^2/2`` (the reference SI convention of this stack).
 ``prefactor=True`` returns ``(alpha^2/2) * h`` (units Eh, still real;
 the caller then uses ``i * sum_k h_k s_k``).
 

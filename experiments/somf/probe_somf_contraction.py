@@ -3,7 +3,7 @@
 pyscf's SOMF direct (J) and exchange (K) maps, so that diffmrc can implement
 the operator with plain numpy einsum and a documented index convention.
 
-Run on 101: JAX_PLATFORMS=cpu python probe_somf_contraction_101.py
+Run with pyscf available: JAX_PLATFORMS=cpu python probe_somf_contraction.py
 """
 import os
 for _v in ('OMP_NUM_THREADS', 'MKL_NUM_THREADS', 'OPENBLAS_NUM_THREADS',

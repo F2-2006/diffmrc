@@ -16,14 +16,14 @@ Three criteria are reported:
       codes.  A scale-corrected SOMF value
       ``our_somf * orca_1e / our_1e`` is also printed.
 
-SI assembly follows the t452 convention (``C_SOC边界_报告`` section 3.1):
+SI assembly follows the reference SI convention of this stack:
 H_{Is,Js'} = E_I delta_IJ delta_ss' + i (alpha^2/2) sum_k T^IJ_k s_k,
 with T^IJ_k = sum_pq D^IJ_pq h_k[pq].  The module returns the raw operator
 in the ``int1e_pnucxp`` convention, so the same prefactor is used for the
 one-electron and SOMF operators.
 
-Run on 101:
-  PYTHONPATH=<pkg>/src JAX_PLATFORMS=cpu python validate_oh_of_101.py \
+Run:
+  PYTHONPATH=<pkg>/src JAX_PLATFORMS=cpu python validate_oh_of.py \
       --out results_somf.json
 """
 import os

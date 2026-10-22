@@ -14,8 +14,8 @@ Reference values (ORCA 6.1.1, same geometry / basis / CAS / roots):
   OH: one-electron 205.88 cm^-1, SOMF 128.83 cm^-1
   OF: one-electron 272.06 cm^-1, SOMF 176.12 cm^-1
 
-Run on 101 (pyscfad214 env):
-  JAX_PLATFORMS=cpu python probe_somf_101.py
+Run with pyscf available (pyscf >= 2.5; no JAX is required):
+  JAX_PLATFORMS=cpu python probe_somf.py
 """
 import os
 for _v in ('OMP_NUM_THREADS', 'MKL_NUM_THREADS', 'OPENBLAS_NUM_THREADS',
