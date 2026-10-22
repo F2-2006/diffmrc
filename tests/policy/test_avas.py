@@ -3,8 +3,8 @@
 The construction tests run on hand-built labels and identity matrices,
 where the overlap eigenvalues are exact 0/1.  The molecule tests need
 PySCF and are skipped when it is absent: they pin the textbook H2O
-CAS(8,6) and the Valence-F rule on the three ECP f-block oxides used by
-the t307 smoke (CeO, YbO, ThO).
+CAS(8,6) and the Valence-F rule on the three ECP f-block oxides of the
+f-block smoke set (CeO, YbO, ThO).
 """
 import numpy as np
 import pytest
