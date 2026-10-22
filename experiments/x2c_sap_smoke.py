@@ -37,6 +37,13 @@ SYSTEMS = {
                 charge=1, spin=0),
     "xe": dict(atom=[("Xe", (0.0, 0.0, 0.0))],
                unit="Bohr", basis="cc-pvtz-dk", charge=0, spin=0),
+    # Small all-electron basis for a fast four-component reference; the
+    # cc-pVTZ-DK runs above are the production-quality comparison.
+    "xe321": dict(atom=[("Xe", (0.0, 0.0, 0.0))],
+                  unit="Bohr", basis="3-21g", charge=0, spin=0),
+    "xeh321": dict(atom=[("Xe", (0.0, 0.0, 0.0)), ("H", (0.0, 0.0, 1.75))],
+                   unit="Bohr", basis={"Xe": "3-21g", "H": "3-21g"},
+                   charge=1, spin=0),
     "yb": dict(atom=[("Yb", (0.0, 0.0, 0.0))],
                unit="Bohr", basis="cc-pvdz-dk", charge=0, spin=0),
 }
