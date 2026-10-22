@@ -31,13 +31,16 @@ WHAT THE GRADIENTS MEAN
 
 Every gradient here is a *fixed-coefficient* (skeleton) gradient: the
 MO coefficients are held fixed at their reference values and only the
-integrals and the nuclear repulsion move.  At a converged SCF density
-the orbital-response term vanishes, so the skeleton gradient equals the
-full SCF gradient to within the SCF convergence threshold; away from
-stationarity the difference is the response term and this module does
-not supply it.  This is stated in every public gradient docstring
-because a skeleton gradient reported as an SCF gradient would be a
-silent error of the same class as an unconverged reference.
+integrals and the nuclear repulsion move.  A skeleton gradient is not
+the SCF gradient, even at a converged density.  The total derivative
+also carries the orbital-response term, which for a converged RHF
+density reduces to the overlap-derivative (energy-weighted density)
+term; without it the skeleton sum differs from the SCF gradient by
+O(1) Eh/Bohr because the individual terms cancel strongly.  The
+overlap completion is supplied by ``driver.ri_scf_driver``.  This is
+stated in every public gradient docstring because a skeleton gradient
+reported as an SCF gradient would be a silent error of the same class
+as an unconverged reference.
 
 EXCHANGE HANDLING
 
