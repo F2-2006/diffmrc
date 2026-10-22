@@ -84,6 +84,12 @@ def main():
     res['scf_converged'] = bool(scf.converged)
     res['scf_gradient_norm'] = scf.gradient_norm
     res['scf_n_iter'] = scf.n_iter
+    res['e_components'] = {
+        'one_electron': scf.e_one_electron,
+        'coulomb': scf.e_coulomb,
+        'exchange': scf.e_exchange,
+        'nuclear': scf.e_nuc,
+    }
 
     d = mf.make_rdm1()
     vj, vk = mf.get_jk(mol, d)
