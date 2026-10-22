@@ -48,6 +48,7 @@ from diffmrc.core.optimizer import (optimize_theta_scipy,       # noqa: E402
 from diffmrc.core.orblib import orbital_pairs                   # noqa: E402
 from diffmrc.core.rotation import block_rotation                # noqa: E402
 from diffmrc.core.stationary import curvature_report            # noqa: E402
+from diffmrc.driver.orbitals import converge_orbital_point      # noqa: E402
 
 SYSTEMS = {
     'H2O': ('O 0 0 0; H 0.7557 0 0.5880; H -0.7557 0 0.5880', 4, 2, 2),
@@ -137,18 +138,70 @@ def run_case(system, basis):
     return rows
 
 
+def run_pipeline_case(system, basis):
+    """The production path: stage, damped-Newton refinement, polish.
+
+    The stage table above compares optimizers on one problem. This table
+    compares what a caller actually gets from ``converge_orbital_point``:
+    the final gradient (after refinement), the stage that ran, and the
+    Hessian spectrum at the endpoint. The default path must stay
+    L-BFGS-B; the trust-region path is opt-in.
+    """
+    E_theta, npar, blocks, nmo = build(system, basis)
+    rng = np.random.default_rng(SEED)
+    pad = PERTURB * rng.standard_normal(npar)
+    starts = [('zeros', np.zeros(npar)), ('rand0', pad)]
+
+    print(f'\n{"=" * 96}')
+    print(f'{system}/{basis}  CAS{blocks}  npar={npar}  production pipeline')
+    print(f'{"=" * 96}')
+    header = (f'{"start":>8} {"stage":>13} {"E (Ha)":>17} {"|g| final":>11} '
+              f'{"|g| stage":>11} {"nit":>5} {"n_neg":>6} {"stop":>18}')
+    print(header)
+    print('-' * len(header))
+
+    rows = []
+    for name, theta0 in starts:
+        for use_tr in (False, True):
+            point = converge_orbital_point(
+                E_theta, npar, theta0=theta0, max_steps=2000,
+                use_trust_region=use_tr)
+            theta = np.asarray(point.theta)
+            sp = spectrum(E_theta, theta)
+            row = dict(system=system, basis=basis, start=name,
+                       path=point.optimizer_name,
+                       energy=float(point.energy),
+                       grad_norm=float(point.grad_norm),
+                       stage_grad_norm=float(point.optimizer_grad_norm),
+                       nit=int(point.optimizer_nit),
+                       n_negative=int(sp.n_negative),
+                       stop=str(point.stop_reason.value),
+                       polished=bool(point.polished))
+            rows.append(row)
+            print(f'{name:>8} {point.optimizer_name:>13} '
+                  f'{row["energy"]:>17.12f} {row["grad_norm"]:>11.2e} '
+                  f'{row["stage_grad_norm"]:>11.2e} {row["nit"]:>5} '
+                  f'{row["n_negative"]:>6} {row["stop"]:>18}')
+    return rows
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser()
     ap.add_argument('system', nargs='?', default='all',
                     choices=['H2O', 'CO', 'all'])
     ap.add_argument('basis', nargs='?', default='6-31g')
     ap.add_argument('--json', default=None)
+    ap.add_argument('--pipeline', action='store_true',
+                    help='also run the full converge_orbital_point path')
     args = ap.parse_args(argv)
 
     systems = list(SYSTEMS) if args.system == 'all' else [args.system]
     rows = []
     for system in systems:
         rows.extend(run_case(system, args.basis))
+    if args.pipeline:
+        for system in systems:
+            rows.extend(run_pipeline_case(system, args.basis))
 
     if args.json:
         with open(args.json, 'w', encoding='utf-8') as fh:
