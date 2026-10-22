@@ -100,6 +100,32 @@ def test_the_exact_form_is_smooth_at_the_zero_channel():
     assert abs(ad_mask) < 1e-4 * abs(ad)
 
 
+# Measured on LiH/6-31G CAS(2,2) at its CASSCF stationary point: the single
+# Si channel is below the release mask, so the release chain drops it whole.
+_LIH = dict(norm=-6.040442e-14, ener=1.822874e-13, diff=2.45300)
+
+
+def test_a_second_system_channel_lies_below_the_mask():
+    """LiH/6-31G ncore=1 has one Si channel with n = -6.0e-14; the release
+    mask returns zero, the exact form -1.07e-13 with df/dn = -4.15.  The
+    second-system gradient validation runs the exact branch."""
+    from diffmrc.driver.nevpt2_zvector import si_energy_from_invariants
+
+    n = jnp.asarray([_LIH['norm']])
+    h = jnp.asarray([_LIH['ener']])
+    d = jnp.asarray([_LIH['diff']])
+    exact = float(si_energy_from_invariants(n, h, d, mode='exact'))
+    masked = float(si_energy_from_invariants(n, h, d, mode='masked'))
+    assert masked == 0.0
+    assert exact == pytest.approx(-1.0695e-13, rel=1e-3)
+    den = _LIH['diff'] * _LIH['norm'] + _LIH['ener']
+    dfdn = -(2 * _LIH['norm'] * den - _LIH['norm'] ** 2 * _LIH['diff']) / den ** 2
+    # The slope is O(1); its precise value is sensitive to the cancellation
+    # in d*n + h at the fourth digit of the rounded invariants above (the
+    # full-precision probe gives -4.15).
+    assert abs(dfdn) > 1.0
+
+
 # ---------------------------------------------------------------------------
 # The differentiable reference alignment
 # ---------------------------------------------------------------------------
@@ -311,6 +337,41 @@ def test_the_exact_si_chain_matches_the_release_total_with_a_core():
     # the CASSCF energy across dispatches on this fixture is 6e-14, the
     # same re-dispatch roundoff the release anchor test documents.
     assert abs(float(f0_new(mol, theta)) - float(f0_ref(mol, theta))) < 1e-12
+
+
+def test_the_exact_si_chain_on_a_second_system_with_a_masked_channel():
+    """LiH/6-31G CAS(2,2), ncore=1: the single Si channel is below the
+    release mask, so this chain runs the exact branch; both assemblies
+    must still agree at the base geometry (the exact channel is worth
+    1e-13 there)."""
+    pytest.importorskip("pyscfad")
+    from pyscfad import gto, scf
+
+    from diffmrc.core.orblib import orbital_pairs
+    from diffmrc.driver.nevpt2 import make_nevpt2_joint_fn
+    from diffmrc.driver.nevpt2_zvector import make_nevpt2_joint_fn_si_exact
+
+    mol = gto.Mole()
+    mol.atom = "Li 0 0 0; H 0 0 1.595"
+    mol.basis = "6-31g"
+    mol.build()
+    nmo = mol.nao_nr()
+    ncore, nact, nele = 1, 2, 2
+    pairs = orbital_pairs(ncore, nact, nmo, include_cv=True)
+    theta = jnp.zeros(len(pairs))
+    builder = lambda m: scf.RHF(m)  # noqa: E731
+    f_ref = make_nevpt2_joint_fn(ncore, nact, nele, nmo, pairs, builder,
+                                 e2_scale=1.0, ci_solver="blocked")
+    mf = builder(mol)
+    mf.conv_tol = 1e-13
+    mf.conv_tol_grad = 1e-10
+    mf.kernel()
+    bounds = [(0, ncore), (ncore, ncore + nact), (ncore + nact, nmo)]
+    f_new = make_nevpt2_joint_fn_si_exact(
+        ncore, nact, nele, nmo, pairs, builder, e2_scale=1.0,
+        ci_solver="blocked", align_ref=jnp.asarray(mf.mo_coeff),
+        align_bounds=bounds)
+    assert abs(float(f_new(mol, theta)) - float(f_ref(mol, theta))) < 1e-10
 
 
 def test_the_exact_si_chain_is_the_release_chain_without_a_core():
