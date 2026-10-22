@@ -352,9 +352,13 @@ def caspt2_contracted_e2(h1e_mo, eri_mo, ci, dets, *, ncore, nact, nele, eps):
       ``K = E(p1 q1) E(p2 q2) +- E(p1 q2) E(p2 q1)`` acting on the CI
       vector (spin-summed E; full-electron integrals -- the frozen-core
       VHF shortcut is invalid once core holes appear).
-    - Molcas normalisation (mkrhsh.F90): VP = cross sum; VM = sqrt(3) *
-      cross difference (exists only when q1 != q2 and p1 != p2).  Both
-      components enter e2 independently.
+    - Molcas normalisation (mkrhsh.F90): VP = cross + direct; VM =
+      sqrt(3) * (cross - direct) (exists only when q1 != q2 and
+      p1 != p2).  The sqrt(3) is an overall scale: it multiplies the
+      whole VM function and cancels in ``W^2 / (A - E0 S)``, so the
+      operator content used here is ``cross - direct``, i.e. the two
+      orderings carry relative weight -1.  Both components enter e2
+      independently.
     - ``W = <0|H|K>``, ``S = <K|K>``, ``A = <K|F|K>`` with F approximated
       by its semicanonical diagonal eps;  ``e2 = -W^2 / (A - E0 * S)``
       with E0 the reference's F expectation.
@@ -379,10 +383,13 @@ def caspt2_contracted_e2(h1e_mo, eri_mo, ci, dets, *, ncore, nact, nele, eps):
       (v == u), and are solved per block as the projected amplitude
       equation (see the class block below).
 
-    Anchors (ratios to ORCA CASPT2 over the five dominant classes):
-    H2O/6-31G CAS(2,2) 1.02 / 0.94 / 1.00 / 0.89 / 0.96 (V0_ijab, Vm1_iab,
-    Vm2_ab, V1_ija, V2_ij);  V0_ia target -0.011135 (ORCA);
-    CO/6-31G CAS(2,2) total within 0.03%.
+    Anchors (ratios to the ORCA CASPT2 class table, full-FIC column):
+    H2O/6-31G CAS(2,2) 1.017 / 1.011 / 0.999 / 1.009 / 0.955 (V0_ijab,
+    Vm1_iab, Vm2_ab, V1_ija, V2_ij), eight-class total 1.0103;
+    CO/6-31G CAS(2,2) 1.009 / 1.011 / 0.963 / 0.999 / 0.987, total
+    1.0026;  V0_ia target -0.011135 (ORCA H2O).  This path keeps the
+    diagonal-Fock zeroth order (the CASPT2-D-level approximation); the
+    full-Fock coupled path is ``caspt2_contracted_e2_coupled``.
 
     Returns (e2_total, breakdown) with breakdown keyed by class name.
     """
@@ -423,7 +430,9 @@ def caspt2_contracted_e2(h1e_mo, eri_mo, ci, dets, *, ncore, nact, nele, eps):
         else:
             q1, q2 = qs
             p1, p2 = ps
-            fac = -np.sqrt(3.0) if vm else 1.0
+            # mkrhsh writes VM = sqrt(3) (cross - direct); the sqrt(3)
+            # scales the whole function and cancels in W^2/(A - E0 S).
+            fac = -1.0 if vm else 1.0
             kacc = defaultdict(float)
             for I, cI in ref_pairs:
                 if pair in ('both', 'direct'):
@@ -711,8 +720,10 @@ def caspt2_contracted_e2_jax(h1e_mo, eri_mo, ci, dets, *, ncore, nact, nele,
                 else:
                     acc += contrib(forms(v_two(ps[0], qs[0], ps[1], qs[1])))
                     if qs[0] != qs[1] and ps[0] != ps[1]:
+                        # VM relative weight -1, as in the numpy engine
+                        # (the mkrhsh sqrt(3) is an overall scale).
                         acc += contrib(forms(v_two(ps[0], qs[0], ps[1], qs[1],
-                                                   fac=-np.sqrt(3.0))))
+                                                   fac=-1.0)))
         breakdown[name] = acc
         total += acc
 
