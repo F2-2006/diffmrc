@@ -74,7 +74,9 @@ def test_density_from_coeffs_closed_shell(water):
     mol, _, c = water
     dm = rs.density_from_coeffs(c)
     assert dm.shape == (mol.nao_nr(), mol.nao_nr())
-    assert abs(np.trace(dm) - mol.nelectron) < 1e-10
+    # MO coefficients are orthonormal in the AO overlap, so the electron
+    # count is Tr(D S), not Tr(D).
+    assert abs(np.trace(dm @ mol.intor('int1e_ovlp')) - mol.nelectron) < 1e-10
     assert np.abs(dm - dm.T).max() < 1e-14
     with pytest.raises(ValueError):
         rs.density_from_coeffs(np.zeros((3, 2, 2)))
@@ -188,11 +190,13 @@ def test_cosx_prototype_grid_convergence(water):
     e_ex = -0.25 * float(np.sum(dm * k_ex))
     e1, info1 = rs.cosx_exchange_energy(mol, c, level=1, return_info=True)
     e3, info3 = rs.cosx_exchange_energy(mol, c, level=3, return_info=True)
-    # the construction is symmetric before any local fitting domain is
-    # introduced; the diagnostic is kept because a local-domain COSX
-    # would not be
-    assert info1['asym'] < 1e-10
-    assert info3['asym'] < 1e-10
+    # The semi-numerical factorization applies the quadrature to one AO
+    # pair, so K is only approximately symmetric; measured asymmetry is
+    # 1.7e-5 (level 1), 2.6e-7 (level 3) and decreases with the grid.
+    # Symmetrization is therefore part of the construction, not a
+    # cosmetic step.
+    assert 0.0 < info1['asym'] < 1e-3
+    assert info3['asym'] < 1e-5
     assert info1['ngrid'] < info3['ngrid']
     # measured: level 1 error 2.0e-5, level 3 error 4.4e-8 Ha
     assert abs(e1 - e_ex) < 1e-4
