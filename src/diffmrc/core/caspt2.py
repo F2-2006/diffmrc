@@ -46,7 +46,8 @@ if os.environ.get('CASPT2_DEBUG'):
     _log.setLevel(logging.DEBUG)
 
 __all__ = ['caspt2_double_external_e2', 'caspt2_full_e2',
-           'caspt2_contracted_e2', 'caspt2_contracted_e2_jax']
+           'caspt2_contracted_e2', 'caspt2_contracted_e2_jax',
+           'caspt2_contracted_e2_coupled']
 
 
 def _sc_kernel(h1e_mo, eri_mo):
@@ -755,3 +756,300 @@ def caspt2_contracted_e2_jax(h1e_mo, eri_mo, ci, dets, *, ncore, nact, nele,
     breakdown['V0_ia'] = acc_ia
     total += acc_ia
     return total, breakdown
+
+
+# ---------------------------------------------------------------------------
+# Coupled internally contracted CASPT2 (full generalized-Fock zeroth order)
+# ---------------------------------------------------------------------------
+
+def _apply_chain(ref_pairs, ops):
+    """Apply E(p1 q1) E(p2 q2) ... to the reference CI expansion.
+
+    ``ops`` is the product written left to right; the rightmost operator
+    acts first.  Returns a determinant -> coefficient dict (the same
+    representation the class builders use).
+    """
+    acc = defaultdict(float)
+    for I, cI in ref_pairs:
+        vec = {I: cI}
+        for p, q in reversed(ops):
+            nxt = defaultdict(float)
+            for dd, cc in vec.items():
+                for tgt, sgn in _e1(dd, p, q):
+                    nxt[tgt] += cc * sgn
+            vec = nxt
+        for tgt, cc in vec.items():
+            acc[tgt] += cc
+    return dict(acc)
+
+
+def _state_1rdm(ref_pairs, nmo):
+    """Spin-summed state 1-RDM ``D[p, q] = <0|E(p, q)|0>``."""
+    D = np.zeros((nmo, nmo))
+    for p in range(nmo):
+        for q in range(nmo):
+            acc = defaultdict(float)
+            for I, cI in ref_pairs:
+                for tgt, sgn in _e1(I, p, q):
+                    acc[tgt] += cI * sgn
+            D[p, q] = sum(cJ * acc.get(J, 0.0) for J, cJ in ref_pairs)
+    return D
+
+
+def _generalized_fock(h1e_mo, eri_mo, D):
+    """State-specific generalized Fock matrix.
+
+    ``f[p, q] = h[p, q] + sum_rs D[r, s] ((pq|rs) - (pr|qs)/2)``.  Its
+    diagonal is the semicanonical orbital energy array ``eps`` when the
+    reference orbitals are semicanonical; the off-diagonal blocks connect
+    different orbital pools and are the source of the inter-class
+    coupling in CASPT2 (the diagonal approximation drops them).
+    """
+    return (h1e_mo
+            + np.einsum('rs,pqrs->pq', D, eri_mo)
+            - 0.5 * np.einsum('rs,prqs->pq', D, eri_mo))
+
+
+def _pairs_with_repetition(a, b):
+    """Index pairs of one class: ordered cross products for different
+    pools, unordered pairs with repetition inside one pool."""
+    if b is None:
+        return [(x,) for x in a]
+    if a is b:
+        return [(a[i], a[j]) for i in range(len(a)) for j in range(i, len(a))]
+    return [(x, y) for x in a for y in b]
+
+
+def _class_function_vectors(ref_pairs, ncore, nact, nmo):
+    """All internally contracted functions of the eight CASPT2 classes.
+
+    The operators follow the Molcas case structure: one function per
+    unordered internal index pair (and per external pair), with the
+    two-orderings combination of the doubly excited classes.  The
+    relative combination is the Molcas ``mkrhsh`` one, ``VP = A + B`` and
+    ``VM = A - B`` (the sqrt(3) in the source is an overall scale that
+    cancels in ``W**2 / (A - E0 S)`` and in the linear solve).
+    """
+    nocc = ncore + nact
+    core = list(range(ncore))
+    act = list(range(ncore, nocc))
+    vir = list(range(nocc, nmo))
+    functions = []
+
+    classes = [
+        ('V0_ijab', core, core, vir, vir),
+        ('Vm1_iab', act, core, vir, vir),
+        ('Vm2_ab', act, act, vir, vir),
+        ('V1_ija', core, core, act, vir),
+        ('V2_ij', core, core, act, act),
+        ('Vm1_a', act, None, vir, None),
+        ('V1_i', core, None, act, None),
+    ]
+    for name, o1, o2, i1, i2 in classes:
+        for qs in _pairs_with_repetition(o1, o2):
+            for ps in _pairs_with_repetition(i1, i2):
+                if len(qs) == 1:
+                    functions.append(
+                        (name, _apply_chain(ref_pairs,
+                                            [(ps[0], qs[0])])))
+                    continue
+                p1, p2 = ps
+                q1, q2 = qs
+                ka = _apply_chain(ref_pairs, [(p1, q1), (p2, q2)])
+                if p1 == p2 or q1 == q2:
+                    functions.append((name, ka))
+                    continue
+                kb = _apply_chain(ref_pairs, [(p1, q2), (p2, q1)])
+                vp = defaultdict(float)
+                vm = defaultdict(float)
+                for dd, cc in ka.items():
+                    vp[dd] += cc
+                    vm[dd] += cc
+                for dd, cc in kb.items():
+                    vp[dd] += cc
+                    vm[dd] -= cc
+                functions.append((name, dict(vp)))
+                functions.append((name, dict(vm)))
+
+    # V0_ia (Molcas case D / ORCA ITUA-ITAU): one inactive hole, one
+    # virtual particle and an active-pair reorganization.  Per unordered
+    # active pair (u <= v), inactive j and virtual a the two operator
+    # products are independent amplitudes; for u == v they coincide and
+    # only one function is kept.
+    for iu, u in enumerate(act):
+        for v in act[iu:]:
+            modes = ('cross',) if v == u else ('cross', 'direct')
+            for j in core:
+                for a in vir:
+                    for mode in modes:
+                        ops = ([(a, j), (v, u)] if mode == 'cross'
+                               else [(a, u), (v, j)])
+                        functions.append(
+                            ('V0_ia', _apply_chain(ref_pairs, ops)))
+    return functions
+
+
+def _h0_action(vec, f, nmo, det_cache):
+    """Apply ``H0 = sum_pq f[p, q] E(p, q)`` to a function vector."""
+    acc = defaultdict(float)
+    for dd, c in vec.items():
+        hmap = det_cache.get(dd)
+        if hmap is None:
+            m = defaultdict(float)
+            for p in range(nmo):
+                for q in range(nmo):
+                    fpq = f[p, q]
+                    if abs(fpq) > 1e-14:
+                        for tgt, sgn in _e1(dd, p, q):
+                            m[tgt] += fpq * sgn
+            hmap = dict(m)
+            det_cache[dd] = hmap
+        for tgt, sgn in hmap.items():
+            acc[tgt] += c * sgn
+    return acc
+
+
+def caspt2_contracted_e2_coupled(h1e_mo, eri_mo, ci, dets, *, ncore, nact,
+                                 nele, fock=None, rtol=1e-8,
+                                 return_system=False):
+    """Contracted CASPT2 with the full generalized-Fock zeroth order.
+
+    This is the coupled (inter-class) companion of
+    :func:`caspt2_contracted_e2`.  The diagonal path evaluates each
+    contracted function with its own denominator
+
+        e2 = -W**2 / (A - E0 S),
+
+    which is the CASPT2-D approximation.  The full zeroth-order
+    Hamiltonian is the state-specific generalized Fock operator
+
+        H0 = sum_pq f[p, q] E(p, q),
+
+    whose off-diagonal blocks (inactive-active, active-virtual,
+    inactive-virtual) connect determinants of different excitation
+    classes.  The amplitudes then solve the projected linear system
+
+        (A - E0 S) x = -W,
+        A[p, q] = <K_p|H0|K_q>,  S[p, q] = <K_p|K_q>,
+        W[p] = <K_p|H|0>,        E0 = <0|H0|0>,
+
+    and the class decomposition of the non-variational energy is
+    ``e2_class = sum_{p in class} W[p] x[p]``.  The functions are the
+    eight-class internally contracted basis of
+    :func:`_class_function_vectors`; ``S`` is regularly linearly
+    dependent, so it is diagonalized and eigenvectors with eigenvalue
+    below ``rtol * max(1, eig_max)`` are dropped (the ``NThresh`` role
+    in the reference implementation).
+
+    Parameters
+    ----------
+    h1e_mo, eri_mo : array
+        MO one- and two-electron integrals (chemist notation).
+    ci : array
+        Reference CI vector over ``dets``.
+    dets : sequence of int
+        Determinant bitmaps (core spin orbitals first).
+    ncore, nact, nele : int
+        Space definition.
+    fock : array, optional
+        Generalized Fock matrix.  When omitted it is built from the CI
+        vector and the integrals (state-specific 1-RDM).
+    rtol : float
+        Relative eigenvalue cutoff of the overlap matrix.
+    return_system : bool
+        Also return the assembled system (matrices, solution, labels) for
+        diagnostics and tests.
+
+    Returns
+    -------
+    (e2_total, breakdown) or (e2_total, breakdown, system)
+
+    Notes
+    -----
+    This path is a numpy pilot implementation: the assembly costs
+    ``nfn**2`` function-pair contractions plus one ``H0`` application per
+    function, intended for small active spaces (the same regime as the
+    existing contracted engine).  It has no jax twin; the differentiable
+    path remains :func:`caspt2_contracted_e2_jax`.
+    """
+    h1e_mo = np.asarray(h1e_mo)
+    eri_mo = np.asarray(eri_mo)
+    ci = np.asarray(ci).ravel()
+    nmo = h1e_mo.shape[0]
+    if h1e_mo.shape != (nmo, nmo) or eri_mo.shape != (nmo,) * 4:
+        raise ValueError('integral array shapes do not match')
+
+    ref_pairs = [(int(d), float(c)) for d, c in zip(dets, ci)
+                 if abs(c) > 1e-14]
+    D = _state_1rdm(ref_pairs, nmo)
+    if fock is None:
+        f = _generalized_fock(h1e_mo, eri_mo, D)
+    else:
+        f = np.asarray(fock, dtype=float)
+        if f.shape != (nmo, nmo):
+            raise ValueError('fock matrix shape does not match')
+
+    h_elem, _ = _sc_kernel(h1e_mo, eri_mo)
+    g_cache = {}
+
+    def g_of(dd):
+        if dd not in g_cache:
+            g_cache[dd] = sum(cJ * h_elem(J, dd) for J, cJ in ref_pairs
+                              if (J ^ dd).bit_count() <= 4)
+        return g_cache[dd]
+
+    functions = _class_function_vectors(ref_pairs, ncore, nact, nmo)
+    nfn = len(functions)
+    labels = [name for name, _ in functions]
+
+    S = np.zeros((nfn, nfn))
+    A = np.zeros((nfn, nfn))
+    W = np.zeros(nfn)
+    h0_cache = {}
+    h0_vec = [None] * nfn
+    for i, (_, vec) in enumerate(functions):
+        W[i] = sum(c * g_of(dd) for dd, c in vec.items())
+        h0_vec[i] = _h0_action(vec, f, nmo, h0_cache)
+    for i in range(nfn):
+        vi = functions[i][1]
+        for j in range(i, nfn):
+            vj = functions[j][1]
+            shared = vi.keys() & vj.keys()
+            S[i, j] = S[j, i] = sum(vi[dd] * vj[dd] for dd in shared)
+            aij = sum(vi[dd] * h0_vec[j].get(dd, 0.0) for dd in vi)
+            A[i, j] = A[j, i] = aij
+    S = 0.5 * (S + S.T)
+    A = 0.5 * (A + A.T)
+
+    e0 = float(np.sum(f * D))
+
+    ev, evec = np.linalg.eigh(S)
+    ev_max = max(float(ev.max()), 1.0)
+    keep = ev > rtol * ev_max
+    if not np.any(keep):
+        raise np.linalg.LinAlgError('empty overlap spectrum')
+    T = evec[:, keep] / np.sqrt(ev[keep])
+    M = T.T @ (A - e0 * S) @ T
+    b = -T.T @ W
+    if not np.all(np.isfinite(M)) or not np.all(np.isfinite(b)):
+        raise np.linalg.LinAlgError('non-finite coupled CASPT2 system')
+    try:
+        y = np.linalg.solve(M, b)
+    except np.linalg.LinAlgError:
+        _log.warning('coupled CASPT2: singular reduced matrix, using '
+                     'least squares')
+        y = np.linalg.lstsq(M, b, rcond=1e-12)[0]
+    x = T @ y
+    e2 = float(W @ x)
+
+    breakdown = {name: 0.0 for name in
+                 ('V0_ijab', 'Vm1_iab', 'Vm2_ab', 'V1_ija', 'V2_ij',
+                  'V0_ia', 'Vm1_a', 'V1_i')}
+    for name, wi, xi in zip(labels, W, x):
+        breakdown[name] += wi * xi
+
+    if return_system:
+        system = dict(S=S, A=A, W=W, E0=e0, x=x, T=T, labels=labels,
+                      fock=f, dm1=D, functions=functions)
+        return e2, breakdown, system
+    return e2, breakdown
