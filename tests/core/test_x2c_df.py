@@ -139,20 +139,28 @@ def test_derivative_factors_against_geometry_fd(water):
 
 
 def test_gradient_against_finite_difference(water, scf):
-    """Analytic gradient against a 3-point central difference (h=1e-3)."""
+    """Analytic gradient against 3-point and 5-point differences (h=1e-3).
+
+    The 5-point reference is the criterion reported for this layer: the
+    3-point difference at h=1e-3 carries its own 7e-6 scatter, so it can
+    only support a looser bound.
+    """
     mol, _, _ = water
     grad, parts = x2c_df.df_x2c_hf_gradient(mol, result=scf)
     coords = mol.atom_coords()
     step = 1e-3
-    g_fd = np.zeros((mol.natm, 3))
+    g3 = np.zeros((mol.natm, 3))
+    g5 = np.zeros((mol.natm, 3))
     for ia in range(mol.natm):
         for x in range(3):
-            cp = coords.copy(); cp[ia, x] += step
-            cm = coords.copy(); cm[ia, x] -= step
-            ep = x2c_df.df_x2c_hf(_build_mol(cp)).e_tot
-            em = x2c_df.df_x2c_hf(_build_mol(cm)).e_tot
-            g_fd[ia, x] = (ep - em) / (2 * step)
-    assert _rel(grad, g_fd) < 2e-5
+            e = {}
+            for k in (-2, -1, 1, 2):
+                c = coords.copy(); c[ia, x] += k * step
+                e[k] = x2c_df.df_x2c_hf(_build_mol(c)).e_tot
+            g3[ia, x] = (e[1] - e[-1]) / (2 * step)
+            g5[ia, x] = (-e[2] + 8 * e[1] - 8 * e[-1] + e[-2]) / (12 * step)
+    assert _rel(grad, g3) < 2e-5
+    assert _rel(grad, g5) < 2e-6
 
     trans, rot = _invariance(grad, mol)
     assert trans < 1e-6
