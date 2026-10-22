@@ -137,6 +137,8 @@ def test_invalid_inputs_raise(water):
     with pytest.raises(ValueError):
         dsomf.somf_two_electron(mol, p, contract='nonsense')
     with pytest.raises(ValueError):
+        dsomf.somf_two_electron(mol, p, contract='explicit', aosym='s8')
+    with pytest.raises(ValueError):
         dsomf.somf_matrix(mol, C=np.ones((mol.nao_nr() - 1, 2)), P=p)
     with pytest.raises(ValueError):
         dsomf.somf_matrix(mol, None, 2.0 * p, check=True)  # trace 2N

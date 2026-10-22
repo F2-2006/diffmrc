@@ -141,10 +141,10 @@ def somf_two_electron(mol, P, contract="auto", memory_limit=None,
         Molecule providing ``int2e_p1vxp1``.
     P : array_like, shape (nao, nao)
         Spin-summed reference charge density matrix in the AO basis,
-        ``trace(P S) = N_elec``.  It need not be symmetric in principle,
-        but the SOMF contraction is defined for a symmetric charge
-        density; a non-symmetric input is symmetrized only if
-        ``check=True`` is requested through :func:`somf_matrix`.
+        ``trace(P S) = N_elec``.  The SOMF contraction is defined for a
+        symmetric charge density; this function does not symmetrize the
+        input, so a non-symmetric ``P`` produces a non-antisymmetric
+        operator (caught by ``check=True`` in :func:`somf_matrix`).
     contract : {'auto', 'explicit', 'direct'}
         Integral contraction route, see the module docstring.
     memory_limit : float, optional
@@ -179,6 +179,8 @@ def somf_two_electron(mol, P, contract="auto", memory_limit=None,
 
 
 def _two_electron_explicit(mol, P, aosym="s1"):
+    if aosym != "s1":
+        raise ValueError("the explicit route requires aosym='s1'")
     nao = mol.nao_nr()
     g = np.asarray(mol.intor("int2e_p1vxp1", aosym=aosym), dtype=float)
     g = g.reshape(3, nao, nao, nao, nao)
