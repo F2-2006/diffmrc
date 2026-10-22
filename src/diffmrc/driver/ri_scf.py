@@ -227,6 +227,10 @@ def ri_j_gradient(mol, C, aux=None, occ=None, factors=None,
         returned array then has ``len(atoms)`` rows in that order.
     """
     dm = density_from_coeffs(C, occ)
+    if factors is not None and aux is None:
+        raise ValueError(
+            'pass the auxiliary molecule used to build factors; otherwise '
+            'the factor derivatives would be taken with a different metric')
     auxmol = _as_auxmol(mol, aux)
     if factors is None:
         factors = dri.ri_factors(mol, auxmol, rcond=rcond)

@@ -113,6 +113,26 @@ def test_ri_j_gradient_matches_fd(water, co):
         assert np.abs(g.sum(axis=0)).max() < 1e-8
 
 
+def test_aux_forms_and_atom_subset(water):
+    mol, _, c = water
+    auxmol, _ = dri.make_auxmol(mol, auxbasis=AUX)
+    e_str = rs.ri_j_energy(mol, c, aux=AUX)
+    e_mol = rs.ri_j_energy(mol, c, aux=auxmol)
+    assert abs(e_str - e_mol) < 1e-14
+    g = rs.ri_j_gradient(mol, c, aux=AUX)
+    g_sub = rs.ri_j_gradient(mol, c, aux=auxmol, atoms=[1])
+    assert g_sub.shape == (1, 3)
+    assert np.abs(g_sub[0] - g[1]).max() < 1e-14
+
+
+def test_ri_j_gradient_requires_aux_with_factors(water):
+    mol, _, c = water
+    auxmol, _ = dri.make_auxmol(mol, auxbasis=AUX)
+    factors = dri.ri_factors(mol, auxmol)
+    with pytest.raises(ValueError):
+        rs.ri_j_gradient(mol, c, factors=factors)
+
+
 def test_ri_j_gradient_equals_core_ri_contraction(water):
     mol, _, c = water
     dm = rs.density_from_coeffs(c)
