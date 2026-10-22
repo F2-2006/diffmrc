@@ -61,6 +61,14 @@ The SCF working set is ``nao**2 * naux`` for the RI-J factors plus the
 dense ``nao**4`` exact-K tensor (owned by pyscfad).  The coordinate
 tangent materializes one ``(3, nao, nao, naux)`` factor-derivative array
 per atom, sequentially.
+
+GEOMETRY CHANGES
+
+Build a fresh ``Mole`` and mean-field object per geometry.  The RI
+factor cache is keyed on the built ``Mole._env``, and pyscfad's own
+``_eri`` cache and integral path are not reliably refreshed when an
+already-built molecule is edited in place; both sides assume a new
+molecule.  ``rijonx_scf`` always constructs a fresh object.
 """
 from __future__ import annotations
 

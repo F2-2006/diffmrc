@@ -151,6 +151,16 @@ def test_batched_density(h2o):
     assert np.abs(np.asarray(vj)[0] - np.asarray(vj)[1]).max() < 1e-12
 
 
+def test_auxbasis_option_is_used():
+    """A named auxiliary basis reaches the factor build."""
+    mol = _mol(H2O)
+    default = drv.rijonx_scf(mol)
+    alternate = drv.rijonx_scf(mol, auxbasis='cc-pvdz-ri')
+    assert alternate.converged and default.converged
+    assert (alternate.ri_state(mol).naux
+            != default.ri_state(mol).naux)
+
+
 def test_range_separated_coulomb_is_refused(h2o):
     mol, ref, mf = h2o
     with pytest.raises(NotImplementedError):
