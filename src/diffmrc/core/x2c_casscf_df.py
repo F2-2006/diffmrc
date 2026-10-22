@@ -96,6 +96,12 @@ by finite differences of the same gradient with respect to a nuclear
 displacement, rebuilding the integrals and the (geometry-dependent)
 reference orbitals at the displaced geometry.  ``H`` is pseudoinverted
 with a relative cutoff and the retained/dropped eigenvalues are reported.
+The direct term ``dE_t/dR|_theta`` is evaluated as a central difference
+of the target-state energy along the same envelope path: at the SA
+orbitals the target state is not stationary, so the closed-form
+single-state formula (which assumes a stationary target) is not this
+quantity.  A fully analytic CP-MCSCF direct term with the S^R constraint
+is the designed extension.
 
 SCOPE AND LIMITS
 
@@ -966,12 +972,16 @@ def df_x2c_sa_state_gradient(mol, result=None, state=None, fd_step=1e-3,
                              auxbasis=None, return_info=False):
     """State-specific nuclear gradient of a state-averaged DF-X2C CASSCF.
 
-    The direct term is analytic (as in :func:`df_x2c_casscf_gradient`).
-    The orbital response solves ``H z = -g_t`` with ``H`` the state-averaged
-    orbital Hessian (finite differences of the analytic state-averaged
-    orbital gradient, so the CI response is included) and the mixed
-    derivative ``M = d g_SA / dR`` (finite differences over displaced
-    geometries, with the geometry-dependent reference orbitals).
+    The direct term is the central difference of the target-state energy
+    along the envelope path (reference orbitals following the geometry,
+    rotation parameters fixed at the converged point); the target state is
+    not stationary at the SA orbitals, so the closed-form single-state
+    gradient is not this quantity.  The orbital response solves
+    ``H z = -g_t`` with ``H`` the state-averaged orbital Hessian (finite
+    differences of the analytic state-averaged orbital gradient, so the CI
+    response is included) and the mixed derivative ``M = d g_SA / dR``
+    (finite differences over displaced geometries, with the
+    geometry-dependent reference orbitals).
 
     Returns ``(grad, info)`` when ``return_info`` is True, else ``grad``.
     ``info`` carries the response vector, the Hessian spectrum, the number
