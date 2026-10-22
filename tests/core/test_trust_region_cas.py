@@ -15,19 +15,29 @@ project's theta-landscape work already recorded:
   10.76 kcal/mol apart, so the start selects the branch; from the same
   start the two stages must land on the same one.
 
-Measured on 101 (2026-10-22), first stage at gtol = 1e-8:
+Measured on 101 (2026-10-22). First stage at gtol = 1e-8:
 
-    H2O zeros  L-BFGS      -75.984881801160  |g| 1.26e-05  n_neg 3
-    H2O zeros  trust-region -76.006040722893 |g| 1.02e-07  n_neg 0
-    H2O rand0  L-BFGS      -76.006039978306  |g| 2.88e-05  n_neg 1
-    H2O rand0  trust-region -76.006040722545 |g| 8.56e-08  n_neg 0
-    CO  zeros  L-BFGS      -111.221407084316 |g| 4.35e-06  n_neg 0
+    H2O zeros  L-BFGS       -75.984881801160  |g| 1.26e-05  n_neg 3
+    H2O zeros  trust-region -76.006040722893  |g| 1.02e-07  n_neg 0
+    H2O rand0  L-BFGS       -76.006039978306  |g| 2.88e-05  n_neg 1
+    H2O rand0  trust-region -76.006040722545  |g| 8.56e-08  n_neg 0
+    CO  zeros  L-BFGS       -111.221407084316 |g| 4.35e-06  n_neg 0
     CO  zeros  trust-region -111.221407084318 |g| 8.17e-09  n_neg 0
 
-The finding these tests pin: from the standard start the trust region
-reaches the variationally lower solution, while the L-BFGS path stops on
-the saddle. That is a basin-selection effect of the step rule, not a
-difference in the energy function.
+Production pipeline (``optimize_tol = 1e-6``, then refinement):
+
+    H2O zeros  L-BFGS       -75.984881801724  |g| 9.27e-12  n_neg 3
+    H2O zeros  trust-region -75.984881801724  |g| 4.38e-12  n_neg 3
+    H2O rand0  L-BFGS       -76.006040723089  |g| 3.42e-08  n_neg 0
+    H2O rand0  trust-region -76.006040723089  |g| 1.00e-08  n_neg 0
+
+The point these tests pin: the trust region reaches the saddle in 9
+iterations at the production target, because the saddle's residual
+gradient (2.15e-08) is already below 1e-06. Only when the target is
+tighter than that residual does the iteration continue, and then the
+negative-curvature direction carries it to the lower branch. Saddle
+escape is therefore a property of the stopping target, not of the
+method alone.
 """
 import numpy as np
 import pytest
@@ -97,15 +107,14 @@ def h2o():
     return _theta_energy(H2O_ATOM, ncore=4, nact=2, nele=2)
 
 
-def test_h2o_theta_zero_selects_different_basins_for_the_two_paths(h2o):
-    """The standard start: L-BFGS stops on the saddle, the trust region
-    reaches the lower branch.
+def test_h2o_theta_zero_at_the_production_target_keeps_the_saddle(h2o):
+    """At the production stage target both paths stop on the recorded
+    saddle.
 
-    The L-BFGS endpoint reproduces the recorded saddle energy and still
-    has negative curvature; the trust-region endpoint reproduces the
-    lower branch and is a minimum. Both are stationary points of the
-    same energy function -- the difference is which one the step rule
-    follows from theta = 0.
+    The trust region reaches it in 9 iterations with |g| = 2.15e-08,
+    already below the 1e-06 target; the refinement then takes it to the
+    stationary point. The endpoint still has three negative eigenvalues,
+    which is the surface's property, not the optimizer's.
     """
     E_theta, npar = h2o
     default = converge_orbital_point(E_theta, npar, theta0=np.zeros(npar),
@@ -117,26 +126,48 @@ def test_h2o_theta_zero_selects_different_basins_for_the_two_paths(h2o):
     assert trust.optimizer_name == 'trust-region'
     assert abs(default.energy - H2O_SADDLE_E) < 1e-5, (
         default.energy, H2O_SADDLE_E)
-    assert abs(trust.energy - H2O_LOWER_E) < 1e-5, (
-        trust.energy, H2O_LOWER_E)
+    assert abs(trust.energy - H2O_SADDLE_E) < 1e-5, (
+        trust.energy, H2O_SADDLE_E)
 
     sp_default = _spectrum(E_theta, np.asarray(default.theta))
     sp_trust = _spectrum(E_theta, np.asarray(trust.theta))
     assert sp_default.n_negative >= 1, sp_default
-    assert sp_trust.n_negative == 0, sp_trust
-
+    assert sp_trust.n_negative >= 1, sp_trust
     assert default.grad_norm < 1e-6
     assert trust.grad_norm < 1e-6
 
 
-def test_h2o_lower_branch_from_the_documented_perturbed_start(h2o):
-    """From rand0 both paths reach the lower branch; the trust region
-    leaves a smaller gradient.
+def test_a_target_below_the_saddle_residual_escapes_to_the_lower_branch(h2o):
+    """The escape condition, measured: gtol = 1e-8 < the saddle's 2.15e-08.
 
-    The project's L-BFGS protocol stalled on this basin at |g| ~ 4e-4;
-    the table in the module docstring gives the measured 2.9e-5 after
-    refinement. The trust region reaches 1e-7 or better at the same
-    energy, and the endpoint is a minimum.
+    Both stages start at theta = 0 with the same gradient target. The
+    trust region passes through the saddle, finds the target unmet, and
+    follows negative curvature to the boundary until it reaches the
+    lower branch (0 negative eigenvalues). L-BFGS-B cannot: its line
+    search floor leaves |g| = 1.26e-05, so it reports the saddle branch.
+    """
+    E_theta, npar = h2o
+    _, th_tr, g_tr, _ = optimize_theta_trust_region(
+        E_theta, npar, steps=2000, g_conv=1e-8, theta0=np.zeros(npar))
+    _, th_lb, g_lb, _ = optimize_theta_scipy(
+        E_theta, npar, steps=2000, g_conv=1e-8, theta0=np.zeros(npar))
+    E_tr = float(E_theta(jnp.asarray(th_tr)))
+    E_lb = float(E_theta(jnp.asarray(th_lb)))
+
+    assert abs(E_tr - H2O_LOWER_E) < 1e-5, (E_tr, H2O_LOWER_E)
+    assert abs(E_lb - H2O_SADDLE_E) < 1e-5, (E_lb, H2O_SADDLE_E)
+    assert g_tr < 1e-6
+    assert g_lb > 1e-6
+    sp = _spectrum(E_theta, np.asarray(th_tr))
+    assert sp.n_negative == 0, sp
+
+
+def test_h2o_lower_branch_from_the_documented_perturbed_start(h2o):
+    """From rand0 both production paths reach the lower branch.
+
+    The project's L-BFGS protocol stalled on this basin; after the
+    refinement and polish stages both paths report |g| <= 3.5e-08 and a
+    minimum (no negative curvature).
     """
     E_theta, npar = h2o
     rng = np.random.default_rng(SEED)
@@ -148,9 +179,6 @@ def test_h2o_lower_branch_from_the_documented_perturbed_start(h2o):
     assert abs(trust.energy - H2O_LOWER_E) < 1e-5, (
         trust.energy, H2O_LOWER_E)
     assert abs(default.energy - trust.energy) < 1e-4
-    # Both pipelines end with the same refinement and polish stages, so
-    # the final gradients are compared to the target, not to each other;
-    # the stage-level ordering is measured in the benchmark table.
     assert trust.grad_norm < 1e-6
     assert default.grad_norm < 1e-6
     sp = _spectrum(E_theta, np.asarray(trust.theta))
