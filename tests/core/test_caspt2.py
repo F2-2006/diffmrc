@@ -1,4 +1,5 @@
 """Contracted CASPT2 engine: ORCA-anchored classes and the jax twin."""
+from collections import defaultdict
 from itertools import combinations
 
 import numpy as np
@@ -34,13 +35,21 @@ def _ints(Cm, h1e, eri):
 
 
 def test_h2o_contracted_classes_regression():
-    """H2O/6-31G CAS(2,2): pinned from the 2026-10-02 server run (t328w,
-    rep-act diagonal-complete scheme).  ORCA per-class anchors live in
-    server/caspt2_anchor/h2o_cas22.log; measured ratios to ORCA are
-    V0_ijab 1.02 / Vm1_iab 0.94 / Vm2_ab 1.00 / V1_ija 0.89 / V2_ij 0.96.
-    The V0_ia class (Molcas case D) is asserted against its ORCA value
-    within the 5% acceptance band; the total is asserted within 10% of
-    the ORCA total (the pre-V0_ia total sat at 12%).
+    """H2O/6-31G CAS(2,2): pinned from the 2026-10-02 server run
+    (rep-act diagonal-complete scheme) and updated after the 2026-10-22
+    VM-convention fix (the two orderings of the VM component now carry
+    relative weight -1; the mkrhsh sqrt(3) is an overall scale that
+    cancels in W^2/(A - E0 S)).  The post-fix class values are
+    V0_ijab -0.047252 / Vm1_iab -0.032623 / Vm2_ab -0.008006 /
+    V1_ija -0.024115 / V2_ij -0.005060; the old pins (-0.047421 /
+    -0.030215 / -0.021235) carried the wrong VM relative weight.
+    Measured ratios to the ORCA full-FIC class table are then
+    V0_ijab 1.017 / Vm1_iab 1.011 / Vm2_ab 0.999 / V1_ija 1.009 /
+    V2_ij 0.955.  ORCA anchors live in server/caspt2_anchor/
+    h2o_cas22.log.  The V0_ia class (Molcas case D, block projection,
+    unaffected by the VM fix) is asserted against its ORCA value within
+    the 5% acceptance band; the total is asserted within 10% of the ORCA
+    total.
     """
     pyscf = pytest.importorskip("pyscf")
     pytest.importorskip("pyscfad")  # the diffmrc chain imports it
@@ -68,10 +77,11 @@ def test_h2o_contracted_classes_regression():
     dets = cas_dets_for2(4, 2, 2)
     total, bd = caspt2_contracted_e2(h1_mo2, eri_mo2, ci2, dets,
                                      ncore=4, nact=2, nele=2, eps=eps)
-    assert bd['V0_ijab'] == pytest.approx(-0.047421, abs=3e-4)
-    assert bd['Vm1_iab'] == pytest.approx(-0.030215, abs=3e-4)
+    # Post-VM-fix pins (relative weight -1 for the second ordering).
+    assert bd['V0_ijab'] == pytest.approx(-0.047252, abs=3e-4)
+    assert bd['Vm1_iab'] == pytest.approx(-0.032623, abs=3e-4)
     assert bd['Vm2_ab'] == pytest.approx(-0.008006, abs=3e-4)
-    assert bd['V1_ija'] == pytest.approx(-0.021235, abs=3e-4)
+    assert bd['V1_ija'] == pytest.approx(-0.024115, abs=3e-4)
     assert bd['V2_ij'] == pytest.approx(-0.005060, abs=3e-4)
     # Brillouin-forbidden singles: ORCA reports -0.000000000 / -0.000000002.
     assert abs(bd['Vm1_a']) < 1e-8
@@ -151,6 +161,89 @@ def test_jax_twin_grad_ad_vs_fd():
                    - float(energy(jnp.asarray(e_m)))) / (2 * delta)
     assert np.all(np.isfinite(g_ad))
     assert np.allclose(g_ad, g_fd, rtol=1e-5, atol=1e-8)
+
+
+def _double_class_reference(fac, h1, e4, eps, dets, ci, qs_list, ps_list):
+    """Independent reconstruction of one double class with the two
+    orderings of every function weighted ``1 : fac``.
+
+    ``fac=+1`` is the VP component; ``fac=-1`` is the VM component in the
+    OpenMolcas ``mkrhsh`` convention, whose overall ``sqrt(3)`` cancels in
+    ``W^2 / (A - E0 S)``.  The lists passed by the caller are exactly the
+    rows the production class loop visits (the replicated same-orbital
+    rows of the active pool are dropped there)."""
+    from diffmrc.core.caspt2 import _apply2, _sc_kernel
+
+    h_elem, so_bits = _sc_kernel(h1, e4)
+    ref = [(int(d), float(c)) for d, c in zip(dets, ci) if abs(c) > 1e-14]
+    nmo = len(eps)
+
+    def g_of(dd):
+        return sum(cJ * h_elem(J, dd) for J, cJ in ref
+                   if (J ^ dd).bit_count() <= 4)
+
+    n0 = np.zeros(nmo)
+    for dd, c in ref:
+        for so in so_bits(dd):
+            n0[so // 2] += c * c
+    e0 = float(eps @ n0)
+
+    def function_e2(qs, ps, weight):
+        q1, q2 = qs
+        p1, p2 = ps
+        k = defaultdict(float)
+        for I, cI in ref:
+            for dd, cc in _apply2(I, p1, q1, p2, q2).items():
+                k[dd] += cI * cc
+            for dd, cc in _apply2(I, p1, q2, p2, q1).items():
+                k[dd] += weight * cI * cc
+        w = sum(cc * g_of(dd) for dd, cc in k.items())
+        s = sum(cc * cc for cc in k.values())
+        n = np.zeros(nmo)
+        for dd, cc in k.items():
+            for so in so_bits(dd):
+                n[so // 2] += cc * cc
+        dnm = float(eps @ n) - e0 * s
+        return -w * w / dnm if abs(dnm) > 1e-10 else 0.0
+
+    acc = 0.0
+    for qs in qs_list:
+        for ps in ps_list:
+            acc += function_e2(qs, ps, 1.0)
+            if qs[0] != qs[1] and ps[0] != ps[1]:
+                acc += function_e2(qs, ps, fac)
+    return acc
+
+
+def test_default_path_vm_relative_coefficient_is_minus_one():
+    """Pin the operator content of the VM component: the two orderings
+    enter with relative weight -1, not -sqrt(3).
+
+    OpenMolcas builds ``VM = sqrt(3)(cross - direct)``; the ``sqrt(3)`` is
+    an overall scale that cancels in ``W^2 / (A - E0 S)``, so the operator
+    is the ``1 : -1`` combination.  The synthetic case has no core
+    orbitals, making Vm2_ab the only double class; the two candidate
+    coefficients differ visibly there, so the test discriminates rather
+    than passing through a small contribution.
+    """
+    from diffmrc.core.caspt2 import caspt2_contracted_e2
+
+    h1, e4, eps, dets, ci = _synthetic_case(seed=7, ncore=0, nact=2,
+                                            nele=2, nmo=4)
+    # Active pairs (0, 0) and (0, 1): the production loop drops (1, 1)
+    # as a replicated same-orbital row.  Virtual pairs all survive.
+    qs_list = [(0, 0), (0, 1)]
+    ps_list = [(2, 2), (2, 3), (3, 3)]
+
+    e_minus_one = _double_class_reference(-1.0, h1, e4, eps, dets, ci,
+                                          qs_list, ps_list)
+    e_minus_sqrt3 = _double_class_reference(-np.sqrt(3.0), h1, e4, eps,
+                                            dets, ci, qs_list, ps_list)
+    assert abs(e_minus_one - e_minus_sqrt3) > 1e-6
+
+    _, bd = caspt2_contracted_e2(h1, e4, ci, dets, ncore=0, nact=2,
+                                 nele=2, eps=eps)
+    assert bd['Vm2_ab'] == pytest.approx(e_minus_one, abs=1e-12)
 
 
 # --- coupled (full generalized-Fock) path: inter-class coupling -------------
