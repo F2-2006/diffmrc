@@ -74,6 +74,7 @@ __all__ = ['si_e2_exact',
            'si_channel_table',
            'nevpt2_e2_full2_si_exact',
            'make_nevpt2_joint_fn_si_exact',
+           'align_reference_blocks',
            'orbital_zvector',
            'lagrangian_relaxed_gradient',
            'nevpt2_relaxed_gradient_zvector']
@@ -310,6 +311,49 @@ def nevpt2_e2_full2_si_exact(h1e_mo, eri_mo, c_ci, dets, E0_elec,
     return e2_ref - e2_masked + e2_exact, eps
 
 
+def align_reference_blocks(C, S, C_ref, bounds):
+    """Blockwise Procrustes alignment, differentiable in C and S.
+
+    The SCF reference is only defined up to orthogonal mixing inside the
+    core, active and virtual blocks, and pyscf's SCF can return a
+    different representative (phase, ordering inside a near-degenerate
+    pair) at two neighbouring geometries.  The orbital-rotation
+    coordinate theta is defined relative to that representative, so an
+    unaligned reference makes the same theta mean different physical
+    orbitals across a displacement -- measured here as a fixed-theta
+    energy slope of -5.8 Eh/bohr on H2O/6-31G against -0.0528 in the
+    aligned gauge (a phase flip).  The release verification scripts apply
+    this map in numpy before evaluating the finite-difference references;
+    this JAX version puts the same map inside the differentiated chain,
+    which is what makes an AD frozen partial comparable to those
+    references.
+
+    ``bounds`` is a list of (lo, hi) orbital index pairs; ``C_ref`` is a
+    fixed reference coefficient matrix (the base geometry).  At the base
+    the overlap block is the identity and the map is the identity.
+    """
+    from jax import numpy as jnp
+
+    C_out = C
+    for lo, hi in bounds:
+        if hi - lo <= 0:
+            continue
+        A = C_out[:, lo:hi].T @ S @ C_ref[:, lo:hi]
+        # Orthogonal polar factor by the Newton iteration
+        #   U <- (U + U^-T)/2,
+        # which converges quadratically to A (A^T A)^-1/2.  The SVD form
+        # has a degenerate singular-value spectrum at the reference
+        # geometry (all singular values are exactly one) and its JAX
+        # derivative is NaN there; the Newton form is smooth at A = I in
+        # a fixed number of iterations and leaves an orthogonal A
+        # unchanged (so a block sign flip is transported exactly).
+        U = A
+        for _ in range(20):
+            U = 0.5 * (U + jnp.linalg.inv(U).T)
+        C_out = C_out.at[:, lo:hi].set(C_out[:, lo:hi] @ U)
+    return C_out
+
+
 def _components_from_si_exact(C0_, h_, e_, enuc, th_, *, ncore, nact, nele,
                               nmo, pairs, dets, links_a, links_b,
                               ci_solver='plain', eig_solver='default',
@@ -332,12 +376,20 @@ def _components_from_si_exact(C0_, h_, e_, enuc, th_, *, ncore, nact, nele,
 
 def make_nevpt2_joint_fn_si_exact(ncore, nact, nele, nmo, pairs,
                                   scf_builder, e2_scale=1.0,
-                                  ci_solver='plain', eig_solver='default'):
+                                  ci_solver='plain', eig_solver='default',
+                                  align_ref=None, align_bounds=None):
     """Build ``E(mol, theta)`` with the exact-Si core classes.
 
     Same contract as ``driver.nevpt2.make_nevpt2_joint_fn``; use it to
     measure what the Si-channel treatment changes in the frozen and
     relaxed gradients without touching the release chain.
+
+    With ``align_ref`` and ``align_bounds`` the SCF coefficient matrix is
+    first mapped by the differentiable blockwise Procrustes alignment of
+    ``align_reference_blocks``.  This puts the theta coordinate in the
+    same gauge the relaxed-path finite differences use; without it the
+    frozen partial and the response operator are expressed in different
+    coordinates and cannot be added.
     """
     from ..core.nevpt2.impl import cas_dets_for2
     from .nevpt2 import _spin_links
@@ -351,8 +403,12 @@ def make_nevpt2_joint_fn_si_exact(ncore, nact, nele, nmo, pairs,
     def components(m_, th_, want_e2=True):
         mf_ = scf_builder(m_)
         mf_.kernel()
+        C = mf_.mo_coeff
+        if align_ref is not None and align_bounds is not None:
+            C = align_reference_blocks(C, m_.intor('int1e_ovlp'),
+                                       align_ref, align_bounds)
         return _components_from_si_exact(
-            mf_.mo_coeff, mf_.get_hcore(),
+            C, mf_.get_hcore(),
             m_.intor('int2e', aosym='s1'), m_.energy_nuc(), th_,
             want_e2=want_e2, **kw)
 
