@@ -212,6 +212,14 @@ def main():
     e_rdm = (np.einsum('pq,pq->', g, hso)
              + 0.5 * np.einsum('pqrs,pqrs->', eso, G))
     out['e_rdm_minus_ci'] = float(e_rdm - e_ci)
+    # same-spin-pair sum: the object both the energy and the Fock use
+    G4f = G.reshape(nm, 2, nm, 2, nm, 2, nm, 2)
+    G_pair = (G4f[:, 0, :, 0, :, 0, :, 0] + G4f[:, 0, :, 0, :, 1, :, 1]
+              + G4f[:, 1, :, 1, :, 0, :, 0] + G4f[:, 1, :, 1, :, 1, :, 1])
+    e1_mo = np.einsum('pq,pq->', g[0::2, 0::2] + g[1::2, 1::2], h_ca)
+    e2_pair = 0.5 * np.einsum('pqrs,pqrs->', G_pair, e_ca)
+    out['e2_pair_minus'] = float(e2_pair - (e_ci - e1_mo))
+
     # determinant limit of the RDM machinery
     psi_det = np.zeros(1)
     psi_det[0] = 1.0
@@ -229,6 +237,14 @@ def main():
     out['det_e2_rdm'] = float(e2_det_rdm)
     out['det_e2_direct'] = float(e2_det_direct)
     out['det_e2_diff'] = float(e2_det_rdm - e2_det_direct)
+    Gd4 = Gd.reshape(nm, 2, nm, 2, nm, 2, nm, 2)
+    Gsp_det = Gd4.sum(axis=(1, 3, 5, 7))
+    Dm = np.zeros((nm, nm))
+    for i in range(NCORE + NELE // 2):
+        Dm[i, i] = 1.0
+    ref = (4 * np.einsum('pq,rs->pqrs', Dm, Dm)
+           - 4 * np.einsum('ps,rq->pqrs', Dm, Dm))
+    out['det_gsp_diff'] = float(np.abs(Gsp_det - ref).max())
     # gamma against a symmetric finite difference in the spatial h1e
     eps = 1e-6
     g_fd = np.zeros((nm, nm))
