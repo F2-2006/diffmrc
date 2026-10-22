@@ -328,9 +328,11 @@ def exact_k_gradient(mol, C, occ=None, ip1=None, ip2=None,
 # Core Hamiltonian and nuclear repulsion
 # ---------------------------------------------------------------------------
 def core_hamiltonian_energy(mol, C, occ=None):
-    """``Tr(D h)`` with ``h = T + V``."""
+    """``Tr(D h)`` with ``h = T + V`` (plus the ECP scalar term when present)."""
     dm = density_from_coeffs(C, occ)
     h = mol.intor('int1e_kin') + mol.intor('int1e_nuc')
+    if mol.has_ecp():
+        h = h + mol.intor('ECPscalar')
     return float(np.sum(dm * h))
 
 
