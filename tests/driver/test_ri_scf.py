@@ -1,6 +1,6 @@
 """Contracts of the SCF-stage RI-J route.
 
-The numerical claims are the ones measured on 101 with pyscf 2.14.0:
+The numerical claims are the ones measured with pyscf 2.14.0:
 the RI-J matrix agrees with pyscf's own RI-J construction to 4e-12, the
 fixed-coefficient RI-J gradient agrees with central differences to about
 3e-8 relative at h=1e-4 Bohr, and the RIJONX gradient agrees with

@@ -24,9 +24,8 @@ ENERGY EXPRESSIONS (closed shell, chemist notation)
     E_nuc              = nuclear repulsion.
 
 ``rijonx_energy`` returns ``E_nuc + E_1e + E_J(RI) + E_x(exact)``.  The
-combination is the RIJONX route discussed in the Wave 7 survey: the
-Coulomb term is fitted, the exchange term is not.  It is not RI-JK and
-it is not RIJCOSX.
+combination is the RIJONX route: the Coulomb term is fitted, the
+exchange term is not.  It is not RI-JK and it is not RIJCOSX.
 
 WHAT THE GRADIENTS MEAN
 
