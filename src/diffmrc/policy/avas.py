@@ -88,7 +88,7 @@ __all__ = ['AVAS_DEFAULT_THRESHOLD', 'AVAS_GAP_MIN',
            'AVAS_OCCUPATION_LOW', 'AVAS_OCCUPATION_HIGH',
            'ACTINIDES', 'THREE_D_METALS',
            'TargetSubspace', 'OccupationDiagnostics', 'GapDiagnostics',
-           'AvasDiagnostics', 'target_ao_indices',
+           'AvasDiagnostics', 'target_ao_indices', 'target_electron_count',
            'occupation_diagnostics', 'orbital_gap_diagnostics',
            'avas_selection']
 
@@ -170,6 +170,7 @@ class AvasDiagnostics:
     nexternal: int = 0
     target_aos: np.ndarray = field(default_factory=lambda: np.array([], dtype=int))
     target_rule: str = ''
+    target_electrons: float = 0.0
     C_rotated: np.ndarray = field(default_factory=lambda: np.array([]))
     blocks: dict = field(default_factory=dict)
     overlap_eigenvalues: dict = field(default_factory=dict)
@@ -402,13 +403,12 @@ def target_ao_indices(mol, *, rule=None, elements=None, shells=None,
     return TargetSubspace(indices, rule_name, evidence, warnings)
 
 
-def _whitened_overlap_svd(S, C_block, target):
-    """Overlap eigenvalues (descending) and rotation of one MO block.
+def _target_metric(S, target):
+    """Selector and inverse square root of the target AO overlap.
 
-    ``Y = sigma^-1/2 X^T S C_block`` is the target overlap whitened by
-    the target-space metric; its thin SVD gives ``lambda = s^2`` (the
-    fraction of target character, in [0, 1]) and the rotation ``V`` whose
-    columns are the rotated orbitals in ``C_block @ V``.
+    Returns ``X`` (``nao x ntarget``) and ``sigma^-1/2`` for
+    ``sigma = X^T S X``.  A linearly dependent target set is refused
+    rather than whitened into noise.
     """
     nao = S.shape[0]
     X = np.zeros((nao, target.size))
@@ -422,7 +422,18 @@ def _whitened_overlap_svd(S, C_block, target):
             f'the target AOs are linearly dependent in the overlap metric '
             f'(smallest eigenvalue {w[0]:.3e} of {w[-1]:.3e}); remove the '
             f'duplicate target functions')
-    sigma_inv_sqrt = (U * w ** -0.5) @ U.T
+    return X, (U * w ** -0.5) @ U.T
+
+
+def _whitened_overlap_svd(S, C_block, target):
+    """Overlap eigenvalues (descending) and rotation of one MO block.
+
+    ``Y = sigma^-1/2 X^T S C_block`` is the target overlap whitened by
+    the target-space metric; its SVD gives ``lambda = s^2`` (the fraction
+    of target character, in [0, 1]) and the rotation ``V`` whose columns
+    are the rotated orbitals in ``C_block @ V``.
+    """
+    X, sigma_inv_sqrt = _target_metric(S, target)
     Y = sigma_inv_sqrt @ (X.T @ S @ C_block)
     # The block usually has more orbitals than the target has functions
     # (a 7-AO f target against a large virtual block).  A thin SVD then
@@ -430,11 +441,65 @@ def _whitened_overlap_svd(S, C_block, target):
     # the square rotation the block needs; the full SVD fills the null
     # space, whose directions carry zero target character.
     nb = C_block.shape[1]
-    _, s, Vt = np.linalg.svd(Y, full_matrices=True)
-    lam = np.zeros(nb)
-    lam[:s.size] = s * s
+    if Y.shape[0] >= nb:
+        _, s, Vt = np.linalg.svd(Y, full_matrices=False)
+        lam = s * s
+    else:
+        _, s, Vt = np.linalg.svd(Y, full_matrices=True)
+        lam = np.zeros(nb)
+        lam[:s.size] = s * s
     lam = np.clip(lam, 0.0, 1.0)
     return lam, Vt.T
+
+
+def target_electron_count(S, C, occ, target):
+    """Number of mean-field electrons in the target AO subspace.
+
+    With the AO density ``D = C diag(occ) C^T`` the count is the trace of
+    the density projected onto the target subspace in the target's own
+    metric,
+
+        N_target = Tr(sigma^-1/2 X^T S D S X sigma^-1/2).
+
+    For a Valence-F target this is the mean-field f occupation: about 14
+    for a filled 4f shell, near zero for an empty one, and a non-integer
+    value in between when the SCF solution mixes the target with ligand
+    orbitals.  The number is a diagnostic, not an integer count -- the
+    electron count of a CAS is the caller's choice.
+
+    Parameters
+    ----------
+    S : array_like
+        AO overlap, shape ``(nao, nao)``.
+    C : array_like
+        MO coefficients, shape ``(nao, nmo)``.
+    occ : array_like
+        MO occupations, one per MO.
+    target : sequence of int
+        Target AO indices.
+
+    Returns
+    -------
+    float
+    """
+    S = np.asarray(S, dtype=float)
+    C = np.asarray(C, dtype=float)
+    occ = np.asarray(occ, dtype=float).reshape(-1)
+    if C.ndim != 2 or S.shape != (C.shape[0], C.shape[0]):
+        raise ValueError(f'C {C.shape} and S {S.shape} do not describe '
+                         f'the same AO space')
+    if occ.size != C.shape[1]:
+        raise ValueError(f'occ has {occ.size} entries for {C.shape[1]} '
+                         f'orbitals')
+    target = np.array(sorted({int(i) for i in target}), dtype=int)
+    if target.size == 0 or target[0] < 0 or target[-1] >= C.shape[0]:
+        raise ValueError(f'target AOs {target.tolist()} outside the '
+                         f'{C.shape[0]}-AO space')
+    X, sigma_inv_sqrt = _target_metric(S, target)
+    density = (C * occ) @ C.T
+    projected = (sigma_inv_sqrt @ (X.T @ S @ density @ S @ X)
+                 @ sigma_inv_sqrt)
+    return float(np.trace(projected))
 
 
 def _classify_occupations(occ, tol=1e-4):
@@ -716,6 +781,9 @@ def avas_selection(mol, C, target_AO=None, nact=None, nele=None, *,
                              f'{nao}-AO space')
         target_rule = 'explicit'
         evidence.append(f'explicit target: {target.size} AO(s)')
+    target_elec = target_electron_count(S, C, occ, target)
+    evidence.append(
+        f'target subspace holds {target_elec:.4f} mean-field electron(s)')
 
     lam_d, V_d = (_whitened_overlap_svd(S, C[:, double], target)
                   if double.size else (np.zeros(0), np.zeros((0, 0))))
@@ -824,7 +892,7 @@ def avas_selection(mol, C, target_AO=None, nact=None, nele=None, *,
     diag = AvasDiagnostics(
         active=active, nact=int(nact), nele=int(n_ele), ncore=ncore,
         nexternal=n_external, target_aos=target, target_rule=target_rule,
-        C_rotated=C_rot,
+        target_electrons=target_elec, C_rotated=C_rot,
         blocks={'doubly_occupied': double.tolist(),
                 'singly_occupied': single.tolist(),
                 'empty': empty.tolist()},
