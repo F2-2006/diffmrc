@@ -14,9 +14,10 @@ import os
 import time
 
 os.environ.setdefault("JAX_PLATFORMS", "cpu")
-os.environ.setdefault("OMP_NUM_THREADS", "1")
-os.environ.setdefault("MKL_NUM_THREADS", "1")
-os.environ.setdefault("OPENBLAS_NUM_THREADS", "1")
+_threads = os.environ.get("DIFFMRC_THREADS", "1")
+for _key in ("OMP_NUM_THREADS", "MKL_NUM_THREADS", "OPENBLAS_NUM_THREADS",
+             "NUMEXPR_NUM_THREADS"):
+    os.environ[_key] = _threads
 os.environ.setdefault("MKL_CBWR", "COMPATIBLE")
 
 import numpy as np
@@ -114,7 +115,7 @@ def main():
         "we_norm_spinor": float(np.linalg.norm(we_2)),
         "we_herm_spinor": float(np.abs(we_2 - we_2.conj().T).max()),
         "scalar_trace_vs_spinor_half_trace": float(
-            np.trace(ve_s) - 0.5 * np.trace(ve_2)),
+            np.trace(ve_s) - 0.5 * np.real(np.trace(ve_2))),
     }
 
     # --- 1eX2C reproduction (SAP off) --------------------------------------
