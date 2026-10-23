@@ -1,0 +1,636 @@
+\part{New in version 0.3}
+\chapter{New modules in version 0.3}
+\label{ch:new-modules}
+
+Version 0.3 adds five layers to the public surface: a relaxed-path
+NEVPT2 nuclear gradient, a coupled CASPT2 contraction, a valence-level
+spin-orbit mean field for effective-core potentials, a RIJONX
+self-consistent-field driver, and a scalar density-fitted X2C CASSCF
+layer.  Each is additive: no existing signature changed, and the
+release core described in Chapter~\ref{ch:differentiable-chain} is
+untouched.  This chapter states, for each layer, what the entry point
+computes, what the caller must supply, and where the implementation
+stops.  The RI factor conventions reused by two of the layers are those
+of Chapter~\ref{ch:ri-df}.
+
+\begin{center}
+\small
+\begin{tabularx}{\textwidth}{>{\raggedright\arraybackslash}p{0.33\textwidth}>{\raggedright\arraybackslash}p{0.36\textwidth}X}
+\toprule
+Module & Main entry point & Layer \\
+\midrule
+\texttt{driver.nevpt2\_zvector} &
+  \texttt{nevpt2\_relaxed\_gradient\_zvector} &
+  response on top of the differentiated chain \\
+\texttt{core.caspt2} &
+  \texttt{caspt2\_contracted\_e2\_coupled} &
+  value (NumPy) \\
+\texttt{core.somf\_ecp} &
+  \texttt{valence\_somf\_matrix} &
+  value (NumPy) \\
+\texttt{driver.ri\_scf}, \texttt{driver.ri\_scf\_driver} &
+  \texttt{rijonx\_scf}, \texttt{rijonx\_scf\_gradient} &
+  SCF (pyscfad) \\
+\texttt{core.x2c\_casscf\_df} &
+  \texttt{df\_x2c\_casscf} &
+  value and analytic gradient \\
+\bottomrule
+\end{tabularx}
+\end{center}
+
+\section{Relaxed NEVPT2 nuclear gradients}
+\label{sec:new-nevpt2-zvector}
+
+\texttt{driver.nevpt2.nevpt2\_nuclear\_gradient} differentiates the
+frozen-theta energy: the SCF reference and the CI vector are rebuilt at
+every displaced geometry, but the orbital-rotation parameters
+$\theta$ stay at their stationary values.  Along the physical path
+$\theta$ follows the CASSCF stationarity condition, and NEVPT2 is not
+variational in the orbitals, so the frozen partial is not the relaxed
+derivative.  The correction is the Z-vector response
+
+\begin{equation}
+  g_{\mathrm{relaxed}} = g_{\mathrm{frozen}} - M^{T} H_{\theta\theta}^{-1} s,
+  \qquad
+  H_{\theta\theta} = \frac{\partial^2 E_{\mathrm{CASSCF}}}
+    {\partial\theta^{2}}, \quad
+  M = \frac{\partial^2 E_{\mathrm{CASSCF}}}
+    {\partial\theta\,\partial R}, \quad
+  s = \frac{\partial e_2}{\partial\theta},
+  \label{eq:new-zvector}
+\end{equation}
+
+with $e_2 = E_{\mathrm{NEVPT2}} - E_{\mathrm{CASSCF}}$.  The vector
+$z = H_{\theta\theta}^{-1} s$ is the orbital Z-vector: one linear solve
+per state serves every Cartesian direction.  The CI coordinates need no
+separate multiplier in this reduced space, because both energy
+functions solve the CI eigenvalue problem internally; the CI block of
+the full Hessian is replaced by its Schur complement, which is
+$H_{\theta\theta}$ as written.
+
+\begin{center}
+\small
+\begin{tabularx}{\textwidth}{>{\raggedright\arraybackslash}p{0.43\textwidth}>{\raggedright\arraybackslash}X}
+\toprule
+Entry point & Returns and purpose \\
+\midrule
+\texttt{make\_nevpt2\_joint\_fn\_si\_exact(...)} &
+  $E(\mathrm{mol},\theta)$ with the exact near-zero \texttt{Si}
+  channels; same contract as
+  \texttt{driver.nevpt2.make\_nevpt2\_joint\_fn}.  Takes the space
+  definition, the orbital pairs, the SCF builder, \texttt{e2\_scale},
+  and optionally \texttt{align\_ref} and \texttt{align\_bounds}. \\
+\texttt{align\_reference\_blocks(...)} &
+  Differentiable blockwise alignment of the SCF coefficients onto a
+  fixed reference; arguments \texttt{(C, S, C\_ref, bounds)}, where
+  \texttt{bounds} is a list of \texttt{(lo, hi)} orbital ranges. \\
+\texttt{orbital\_zvector(...)} &
+  Solves $H_{\theta\theta} z = s$ by truncated pseudo-inverse; arguments
+  \texttt{(H\_tt, source, rcond=None, symmetrize=True)}; returns
+  \texttt{(z, info)} with the spectrum, condition number and residual. \\
+\texttt{lagrangian\_relaxed\_gradient(...)} &
+  The contraction $g_{\mathrm{frozen}} - M^{T} z$; arguments
+  \texttt{(g\_frozen, z, M)}. \\
+\texttt{nevpt2\_relaxed\_gradient\_zvector(...)} &
+  The assembled relaxed gradient; returns \texttt{(gradient, info)}.
+  Required arguments: \texttt{mol}, \texttt{theta}, \texttt{E\_casscf},
+  \texttt{E\_nevpt2}; optional \texttt{rcond}, \texttt{H\_tt},
+  \texttt{M}, \texttt{source}, \texttt{g\_frozen}. \\
+\texttt{si\_energy\_from\_invariants(...)} &
+  The \texttt{Si} channel sum over \texttt{(norm, ener, diff)};
+  \texttt{mode='masked'} reproduces the release value mask for
+  diagnostics only. \\
+\bottomrule
+\end{tabularx}
+\end{center}
+
+Three settings carry the accuracy of the response.
+
+\begin{itemize}
+\item \emph{Reference convergence.}  The reference SCF is converged with
+  \texttt{conv\_tol} of $10^{-13}$ and \texttt{conv\_tol\_grad} of
+  $10^{-10}$ at every geometry.  The response operator is a second
+  derivative of the same chain, so its accuracy is bounded by the
+  orbital-gradient convergence of the reference, not by the energy
+  convergence alone.
+\item \emph{Blockwise alignment.}  The SCF solution is defined only up
+  to orthogonal mixing inside the core, active and virtual blocks, and
+  two neighbouring geometries can return different representatives (a
+  phase flip, or an ordering change inside a near-degenerate pair).
+  Because $\theta$ is defined relative to that representative, an
+  unaligned reference makes the same $\theta$ mean different orbitals:
+  on H$_2$O/6-31G the measured fixed-theta energy slope was
+  $-5.8$~Eh/bohr against $-0.0528$~Eh/bohr in the aligned gauge.  Pass
+  the base-geometry coefficients as \texttt{align\_ref} and the block
+  bounds as \texttt{align\_bounds}; the map is the identity at the base
+  geometry.
+\item \emph{Exact near-zero \texttt{Si} channels.}  The release core
+  evaluates the \texttt{Si} class as
+  $-\sum_i n_i/(d_i + h_i/n_i)$ with a value mask $|n_i| > 10^{-12}$,
+  where $n_i$ is the channel norm, $d_i$ its zeroth-order denominator
+  and $h_i$ the core-coupling term.  Symmetry can drive an individual
+  $n_i$ to $10^{-13}$: dropping such a channel changes the energy by
+  about $10^{-13}$~Eh but its derivative by order $0.1$--$1$, because
+  the mask is a discontinuity in the energy, not a removable
+  singularity.  The module evaluates the same algebra as
+  $-\sum_i n_i^2/(d_i n_i + h_i)$ with the guard moved to the
+  denominator.  Only the \texttt{Si} class is treated this way; the
+  other four contraction classes keep the release masks.
+\end{itemize}
+
+The validation covers closed-shell, frozen-core H$_2$O/6-31G and
+LiH/6-31G, CAS(2,2), against finite differences of the relaxed path.
+Open-shell, ECP, f-block and large-basis systems are outside the
+validated range.  A minimal call is
+
+\begin{lstlisting}[language=Python]
+import jax.numpy as jnp
+from pyscfad import scf
+
+from diffmrc.core.orblib import orbital_pairs
+from diffmrc.driver.nevpt2_zvector import (
+    make_nevpt2_joint_fn_si_exact, nevpt2_relaxed_gradient_zvector)
+
+ncore, nact, nele = 1, 2, 2
+nmo = mol.nao_nr()
+pairs = orbital_pairs(ncore, nact, nmo, include_cv=True)
+
+def builder(m):
+    mf = scf.RHF(m)
+    mf.conv_tol = 1e-13
+    mf.conv_tol_grad = 1e-10
+    return mf
+
+mf = builder(mol)
+mf.kernel()
+bounds = [(0, ncore), (ncore, ncore + nact), (ncore + nact, nmo)]
+ref = jnp.asarray(mf.mo_coeff)
+
+# theta: CASSCF stationary parameters at this geometry
+E_casscf = make_nevpt2_joint_fn_si_exact(
+    ncore, nact, nele, nmo, pairs, builder, e2_scale=0.0,
+    align_ref=ref, align_bounds=bounds)
+E_nevpt2 = make_nevpt2_joint_fn_si_exact(
+    ncore, nact, nele, nmo, pairs, builder, e2_scale=1.0,
+    align_ref=ref, align_bounds=bounds)
+
+grad, info = nevpt2_relaxed_gradient_zvector(
+    mol, theta, E_casscf, E_nevpt2, rcond=1e-7)
+\end{lstlisting}
+
+The cutoff \texttt{rcond} is a relative cutoff on the pseudo-inverse.
+The H$_2$O CASSCF Hessian carries one soft mode (eigenvalue
+$3.8\times10^{-6}$, condition number $2.3\times10^{7}$) whose response
+is not part of the correlation source; $10^{-7}$ cuts it, while a looser
+cutoff keeps it and amplifies roundoff.
+
+\section{Coupled CASPT2}
+\label{sec:new-caspt2-coupled}
+
+\texttt{core.caspt2} has two contraction schemes of the same eight-class
+internally contracted basis.  The diagonal path
+(\texttt{caspt2\_contracted\_e2}) evaluates each contracted function
+with its own denominator,
+
+\begin{equation}
+  e_2 = -\frac{W^2}{A - E_0 S},
+  \label{eq:new-caspt2-diagonal}
+\end{equation}
+
+which is the CASPT2-D approximation.  The coupled path replaces the
+diagonal zeroth-order Hamiltonian by the state-specific generalized
+Fock operator $H_0 = \sum_{pq} f_{pq} E_{pq}$.  Its off-diagonal blocks
+(inactive--active, active--virtual, inactive--virtual) connect
+determinants of different excitation classes, and the amplitudes solve
+the projected linear system
+
+\begin{equation}
+  (A - E_0 S)\,x = -W, \qquad
+  A_{pq} = \langle K_p | H_0 | K_q \rangle, \quad
+  S_{pq} = \langle K_p | K_q \rangle, \quad
+  W_p = \langle K_p | H | 0 \rangle,
+  \label{eq:new-caspt2-coupled}
+\end{equation}
+
+with $e_2 = \sum_p W_p x_p$ and the class decomposition
+$e_{2,\mathrm{class}} = \sum_{p \in \mathrm{class}} W_p x_p$.  The
+overlap matrix $S$ is regularly linearly dependent; it is diagonalized
+and eigenvectors with eigenvalue below
+$\texttt{rtol} \times \max(1, \lambda_{\max})$ are dropped.
+
+\begin{center}
+\small
+\begin{tabularx}{\textwidth}{>{\raggedright\arraybackslash}p{0.40\textwidth}>{\raggedright\arraybackslash}X}
+\toprule
+Entry point & Returns and purpose \\
+\midrule
+\texttt{caspt2\_contracted\_e2\_coupled(...)} &
+  \texttt{(e2\_total, breakdown)}, plus the assembled \texttt{S},
+  \texttt{A}, \texttt{W}, \texttt{E0}, \texttt{x} and the class labels
+  when \texttt{return\_system=True}.  Arguments: the MO integrals, the
+  CI vector and determinant bitmaps, \texttt{ncore}, \texttt{nact},
+  \texttt{nele}; optional \texttt{fock} and \texttt{rtol}.  With
+  \texttt{fock} omitted, the state-specific generalized Fock is built
+  from the CI vector and the integrals. \\
+\texttt{caspt2\_contracted\_e2}, \texttt{caspt2\_contracted\_e2\_jax} &
+  The diagonal-Fock path and its differentiable twin; the latter is the
+  jax chain that can be traced in the CI coefficients. \\
+\bottomrule
+\end{tabularx}
+\end{center}
+
+The relative weight of the \texttt{VM} class follows the reference
+implementation: with the two orderings written cross and direct, the
+Molcas normalisation is $V_P = \text{cross} + \text{direct}$ and
+$V_M = \sqrt{3}\,(\text{cross} - \text{direct})$.  The factor
+$\sqrt{3}$ multiplies the whole \texttt{VM} function and cancels in
+$W^2/(A - E_0 S)$, so the operator content carried here is
+$\text{cross} - \text{direct}$, that is, a relative weight of $-1$
+between the two orderings.  Both components enter the energy
+independently for off-diagonal pairs and coincide for diagonal pairs.
+Version 0.3 corrects the previous convention for this component.
+
+The coupled total against the reference CASPT2 class table is $1.0081$
+on H$_2$O/6-31G and $1.0100$ on CO/6-31G, both CAS(2,2).  The path is a
+NumPy value layer: it has no jax twin, and the differentiable CASPT2
+route remains the diagonal-Fock
+contraction \texttt{caspt2\_contracted\_e2\_jax} at the CASPT2-D level.
+The cost is $n_{\mathrm{fn}}^2$ function-pair contractions plus one
+$H_0$ application per function, intended for small and medium active
+spaces.
+
+\begin{lstlisting}[language=Python]
+from diffmrc.core.caspt2 import caspt2_contracted_e2_coupled
+
+# h1e_mo, eri_mo: MO integrals in chemist notation, from the CASSCF
+# orbitals; ci: reference CI vector; dets: determinant bitmaps.
+e2, breakdown = caspt2_contracted_e2_coupled(
+    h1e_mo, eri_mo, ci, dets, ncore=ncore, nact=nact, nele=nele)
+
+# With an explicit state-specific generalized Fock matrix, and the
+# assembled system for diagnostics:
+e2, breakdown, system = caspt2_contracted_e2_coupled(
+    h1e_mo, eri_mo, ci, dets, ncore=ncore, nact=nact, nele=nele,
+    fock=fock, return_system=True)
+\end{lstlisting}
+
+\section{Valence-level SOMF for effective-core potentials}
+\label{sec:new-somf-ecp}
+
+The all-electron SOMF operator of \texttt{core.somf} uses the bare
+nuclear charges and the full electron density.  With an effective core
+potential the core electrons are absent, and the spin-orbit part of the
+ECP replaces their contribution; adding the all-electron formula
+unchanged would use the ECP effective charge in
+\texttt{int1e\_pnucxp} and a valence-only density.  The module defines
+the valence-level operator
+
+\begin{equation}
+  h^{\mathrm{SOMF\text{-}ECP}}_k
+  = \frac{\alpha^{2}}{2}\left[h^{\mathrm{nuc}}_k + h^{2e}_k[P]\right]
+    - V^{\mathrm{ECP}}_k,
+  \label{eq:new-somf-ecp}
+\end{equation}
+
+with $h^{\mathrm{nuc}}_k$ the nuclear one-electron term on centers
+without a spin-orbit ECP, $h^{2e}_k[P]$ the valence
+$J - \tfrac{3}{2}K$ mean field of the spin-summed density $P$
+($\mathrm{tr}(PS) = \texttt{mol.nelectron}$), and $V^{\mathrm{ECP}}_k$
+the three-component \texttt{ECPso} integral.  On a center carrying a
+spin-orbit ECP the ECP term replaces the nuclear term: the ECP is
+fitted to reproduce the all-electron spin-orbit splitting of the
+valence configuration and already contains the nuclear one-electron
+term and the core-valence screening for that center.  The
+Breit--Pauli terms carry the factor $\alpha^2/2$; \texttt{ECPso} is
+already an effective operator in energy units and is subtracted.
+
+\begin{center}
+\small
+\begin{tabularx}{\textwidth}{>{\raggedright\arraybackslash}p{0.40\textwidth}>{\raggedright\arraybackslash}X}
+\toprule
+Entry point & Returns and purpose \\
+\midrule
+\texttt{valence\_somf\_matrix(...)} &
+  The operator, shape \texttt{(3, nao, nao)}.  Arguments:
+  \texttt{(mol, P)}, then \texttt{nuclear='auto'}, \texttt{ecp\_term},
+  \texttt{contract}, \texttt{memory\_limit}, \texttt{convention='i'},
+  \texttt{check}.  \texttt{nuclear} selects which centers keep the
+  nuclear term (\texttt{'auto'} excludes spin-orbit ECP centers);
+  \texttt{convention='i'} returns
+  $H_{\mathrm{SO}} = i\sum_k h_k s_k$. \\
+\texttt{ecp\_soc(mol)} &
+  The three-component \texttt{ECPso} integral, shape
+  \texttt{(3, nao, nao)}, with no $\alpha^2/2$ factor. \\
+\texttt{nuclear\_soc(mol, atoms=None)} &
+  The nuclear one-electron SOC in the \texttt{int1e\_pnucxp}
+  convention, optionally restricted to a list of centers. \\
+\texttt{so\_ecp\_centers(mol)}, \texttt{nuclear\_centers(mol)} &
+  Atom indices that carry a spin-orbit ECP, and those that do not. \\
+\texttt{somf\_density\_response(...)} &
+  The density-response matrix $M_{rs} = \sum_{pq} D_{pq}
+  [g_{pqrs} - \tfrac{3}{2} g_{prsq} - \tfrac{3}{2} g_{sqpr}]$ for
+  \texttt{(mol, D)}; only \texttt{contract='explicit'} is implemented. \\
+\texttt{somf\_definition(mol)} &
+  A dictionary recording which centers contribute which term and the
+  approximations that are not fixed by the ECP. \\
+\bottomrule
+\end{tabularx}
+\end{center}
+
+The two-electron kernel is not symmetric under the pair exchange
+$(pq) \leftrightarrow (rs)$.  Consequently the derivative of
+$\mathrm{tr}(D\,h^{2e}[P])$ with respect to $P$ is not
+$h^{2e}[D]$; a gradient of an SOC matrix element must use
+\texttt{somf\_density\_response}, or the equivalent bilinear form.
+The value layer is NumPy; orbital and CI response are the caller's
+responsibility, and only the explicit contraction is implemented in the
+response kernel.
+
+There is no unique first-principles decomposition of an ECP into one-
+and two-electron spin-orbit parts: the ECP is fitted to atomic
+reference states, so part of the valence--valence mean field is already
+folded into its parameters.  Adding the explicit valence
+$J - \tfrac{3}{2}K$ term is therefore an approximation with a
+double-counting error that cannot be removed without the ECP generation
+data.  The operator is a prototype for relative comparisons and is not
+a production absolute-SOC method.  The pieces are exposed independently
+(\texttt{nuclear=}, \texttt{ecp\_term=}) so that variants can be
+compared and the error bounded.
+
+\begin{lstlisting}[language=Python]
+from pyscf import gto
+
+from diffmrc.core import somf_ecp
+
+mol = gto.M(atom='Yb 0 0 0; F 0 0 3.6',
+            basis={'Yb': 'stuttgart_rsc', 'F': '6-31g'},
+            ecp={'Yb': 'ecpds28mwbso'}, unit='Bohr', verbose=0)
+
+# P: spin-summed density of the electrons present in the calculation,
+# trace(P S) = mol.nelectron.  D: the same density, or the transition
+# 1-RDM for a matrix element between two scalar states.
+h_soc = somf_ecp.valence_somf_matrix(mol, P, convention='i')
+m_resp = somf_ecp.somf_density_response(mol, D)
+\end{lstlisting}
+
+On the YbF test molecule the \texttt{ECPso} norm on Yb is $17.04$ per
+component, while the raw nuclear operator norm on the same center is of
+order $10^{4}$; adding both would be dominated by an operator that the
+ECP was built to replace.
+
+\section{RIJONX SCF}
+\label{sec:new-rijonx}
+
+The reference SCF of the multireference chain still formed the
+four-center Coulomb tensor through the dense integral path.  The RIJONX
+route fits the Coulomb term and keeps the exchange exact:
+
+\begin{equation}
+  E = E_{\mathrm{nuc}} + \mathrm{Tr}(Dh)
+    + \tfrac{1}{2}\mathrm{Tr}(D J_{\mathrm{RI}})
+    - \tfrac{1}{4}\mathrm{Tr}(D K_{\mathrm{exact}}),
+  \qquad
+  J_{\mathrm{RI}} = W D W^{T},
+  \label{eq:new-rijonx}
+\end{equation}
+
+with $W = B S^{-1/2}$ the metric-folded three-center tensor of
+Chapter~\ref{ch:ri-df}.  The exchange branch is the dense four-center
+integral, so the method is RIJONX: not RI-JK, which has no analytic
+gradient here, and not RIJCOSX, whose fixed-grid prototype is outside
+the production surface.
+
+\begin{center}
+\small
+\begin{tabularx}{\textwidth}{>{\raggedright\arraybackslash}p{0.40\textwidth}>{\raggedright\arraybackslash}X}
+\toprule
+Entry point & Returns and purpose \\
+\midrule
+\texttt{rijonx\_scf(...)} &
+  A converged pyscfad mean-field object; arguments \texttt{(mol,
+  auxbasis=None, rcond, **kernel\_kwargs)}.  \texttt{RIJONX\_ROHF} is
+  selected when \texttt{mol.spin} is non-zero, and a non-converged run
+  raises. \\
+\texttt{rijonx\_scf\_gradient(...)} &
+  Full nuclear gradient of the converged closed-shell energy, shape
+  \texttt{(natm, 3)} in Eh/bohr; arguments \texttt{(mf, auxbasis,
+  rcond)}. \\
+\texttt{rijonx\_energy(mol, C, ...)} &
+  The energy of Eq.~\eqref{eq:new-rijonx} at fixed coefficients. \\
+\texttt{rijonx\_gradient(mol, C, ...)} &
+  The fixed-coefficient (skeleton) gradient: RI-J analytic, exchange
+  dense, plus core and nuclear terms. \\
+\texttt{ri\_j\_*}, \texttt{exact\_k\_*}, \texttt{core\_hamiltonian\_*}, \texttt{nuclear\_repulsion\_gradient} &
+  The individual energy and gradient pieces. \\
+\texttt{make\_cosx\_grid}, \texttt{cosx\_exchange\_matrix}, \texttt{cosx\_exchange\_energy} &
+  A fixed-grid COSX prototype for exchange; not a production route. \\
+\bottomrule
+\end{tabularx}
+\end{center}
+
+The gradient convention is the point that matters.  The functions in
+\texttt{driver.ri\_scf} return a fixed-coefficient gradient: the
+coefficients are held at their reference values and only the integrals
+and the nuclear repulsion move.  That is not the SCF gradient even at a
+converged density; the missing orbital-response term reduces to the
+overlap-derivative (energy-weighted density) contribution,
+$-2\sum_{\mu \in A} Y_{\mu\nu}\,\partial S_{\mu\nu}/\partial R$, with
+$Y = 2 C_{\mathrm{occ}}\epsilon C_{\mathrm{occ}}^{T}$.  Without it the
+individual terms cancel strongly and the skeleton sum differs from the
+SCF gradient by order $1$~Eh/bohr.  \texttt{rijonx\_scf\_gradient}
+supplies the completion and is the entry point to use for a converged
+SCF.
+
+The auxiliary basis defaults to \texttt{def2-universal-jkfit} and is
+resolved by \texttt{make\_auxmol} in \texttt{core.ri}, which falls back
+to the orbital basis when a fitting set does not cover every element.
+Build a fresh molecule and mean-field object per geometry: the RI factor
+cache
+and the pyscfad integral caches are keyed on the built molecule and are
+not reliably refreshed by an in-place geometry edit.
+
+The exact exchange branch still forms and caches the dense
+\texttt{nao}$^{4}$ tensor and, under geometry differentiation, its
+dense derivative.  RI-J removes the Coulomb part of that work, not the
+exchange part.  The explicit open-shell gradient is not implemented;
+\texttt{rijonx\_scf\_gradient} refuses fractional or single
+occupations, and the implicit route \texttt{mf.energy\_grad()} is the
+only open-shell path and has not been checked against finite
+differences.  Range-separated Coulomb is refused because the factors
+are built for the full operator.  ECP molecules work when the molecule
+is built with an explicit \texttt{ecp} argument.
+
+\begin{lstlisting}[language=Python]
+from diffmrc.driver.ri_scf_driver import rijonx_scf, rijonx_scf_gradient
+
+mf = rijonx_scf(mol, auxbasis='def2-universal-jkfit')
+e_tot = mf.e_tot
+
+# Closed-shell full gradient (skeleton plus overlap completion):
+grad = rijonx_scf_gradient(mf)
+
+# Open shell: only the implicit path is available.
+# grad_open = mf.energy_grad().coords
+\end{lstlisting}
+
+The energy and gradient are validated on H$_2$O and CO (closed shell),
+the OH radical (open-shell energy), and HI/def2-svp with an ECP
+(gradient against central differences).  The explicit and implicit
+closed-shell gradients agree to $10^{-6}$~Eh/bohr; the measured
+RIJONX-minus-dense energy difference on HI is $-2.6\times10^{-5}$~Eh,
+which is the J fit, not an implementation error.
+
+\section{Scalar DF-X2C CASSCF}
+\label{sec:new-x2c-casscf}
+
+\texttt{core.x2c\_casscf\_df} adds a state-specific and state-averaged
+CASSCF layer on the scalar (spin-free) X2C one-electron Hamiltonian
+with a density-fitted two-electron part:
+
+\begin{equation}
+  E = \sum_{pq}\gamma_{pq} h_{pq}
+    + \tfrac{1}{2}\sum_{pqrs}\Gamma_{pqrs}(pq|rs) + E_{\mathrm{nuc}},
+  \qquad
+  (pq|rs) \approx \sum_{P} w_{pqP} w_{rsP},
+  \label{eq:new-x2c}
+\end{equation}
+
+with $h$ the spin-free Foldy--Wouthuysen one-electron Hamiltonian,
+$w = B S^{-1/2}$ and no picture-change correction on the Coulomb
+operator.  The wavefunction is a real spin-adapted determinant
+expansion; the orbitals carry no spin-orbit coupling.
+
+\begin{center}
+\small
+\begin{tabularx}{\textwidth}{>{\raggedright\arraybackslash}p{0.40\textwidth}>{\raggedright\arraybackslash}X}
+\toprule
+Entry point & Returns and purpose \\
+\midrule
+\texttt{df\_x2c\_casscf(...)} &
+  A \texttt{DFX2CCASSCFResult} with the converged orbitals, the CI
+  vectors, the state energies, the state-averaged energy and the
+  orbital-gradient norm.  Required arguments \texttt{(mol, ncore, nact,
+  nele)}; optional auxiliary basis, \texttt{nroots}, \texttt{weights},
+  \texttt{target}, convergence controls, \texttt{theta0} and
+  \texttt{rhf}.  \texttt{nroots=1} is the single-state calculation;
+  \texttt{weights} default to equal weights. \\
+\texttt{df\_x2c\_casscf\_gradient(...)} &
+  \texttt{(grad, parts)} for one CI root, shape \texttt{(natm, 3)} in
+  Eh/bohr, with the one-electron, two-electron, Pulay and nuclear
+  contributions separated.  Arguments \texttt{(mol, result,
+  state=None)}; pass the result object, which carries the CAS space
+  definition and the factor derivatives. \\
+\texttt{df\_x2c\_energies\_at(...)} &
+  The state energies at a new geometry with the rotation parameters
+  held fixed; arguments \texttt{(mol, result, theta=None)}.  The
+  reference orbitals follow the geometry through a displaced SCF and
+  are aligned to \texttt{result.c\_ref}. \\
+\texttt{df\_x2c\_sa\_state\_gradient(...)} &
+  The state-specific gradient of a state-averaged calculation; requires
+  \texttt{result.nroots >= 2}.  Arguments \texttt{(mol, result,
+  state=None)}, with finite-difference steps \texttt{fd\_step} and
+  \texttt{theta\_step}, a pseudo-inverse cutoff \texttt{rcond}, and
+  \texttt{return\_info}.  Returns \texttt{(grad, info)} when
+  \texttt{return\_info} is true. \\
+\texttt{df\_x2c\_rhf(...)} &
+  The closed-shell reference SCF on the same Hamiltonian; arguments
+  \texttt{(mol, factors, auxmol, auxbasis, conv\_tol, max\_cycle,
+  dm0)}. \\
+\texttt{sfx2c\_hcore(mol)}, \texttt{spatial\_df\_factors(mol, ...)} &
+  The Hamiltonian and the spatial RI factors. \\
+\bottomrule
+\end{tabularx}
+\end{center}
+
+At a converged CASSCF point the orbital and CI responses vanish, so the
+single-state gradient is the direct derivative at fixed orbitals and CI
+vector: the one-electron term uses the spin-free X2C hcore derivative,
+the two-electron term uses the three-center and metric derivatives of
+Chapter~\ref{ch:ri-df}, and the Pulay term uses
+$-\sum_{pq}F_{pq}\,\partial S_{pq}/\partial R$.
+
+A state-averaged calculation is different: the orbitals minimize
+$E_{\mathrm{SA}}$, so the target-state orbital gradient $g_t$ does not
+vanish.  The state-specific gradient is
+
+\begin{equation}
+  \frac{dE_t}{dR} = \left.\frac{dE_t}{dR}\right|_{\theta}
+    + z^{T} M, \qquad H z = -g_t,
+    \qquad H = \frac{\partial^2 E_{\mathrm{SA}}}{\partial\theta^{2}},
+  \label{eq:new-x2c-sa}
+\end{equation}
+
+with $M = \partial g_{\mathrm{SA}}/\partial R$.  Both $H$ and $M$ are
+evaluated by finite differences of the analytic state-averaged orbital
+gradient: $H$ over $\theta$ (the CI vectors are re-diagonalized at every
+step, so the CI response is included) and $M$ over displaced
+geometries, rebuilding the integrals and the geometry-dependent
+reference orbitals.  The direct term is a central difference of the
+target-state energy along the same envelope path; the closed-form
+single-state formula does not apply because the target state is not
+stationary at the SA orbitals.
+
+The single-state energy and gradient are validated on H$_2$O/6-31G
+(6-31G orbital basis, \texttt{def2-universal-jkfit}, CAS(2,2), four
+core spatial orbitals) against a density-fitted sfx2c1e CASSCF in
+pyscf: the energy agrees within $10^{-5}$~Eh, the gradient within
+$10^{-4}$ relative, the envelope finite difference within
+$5\times10^{-6}$~Eh/bohr, and the state-averaged state gradients
+satisfy the weighted sum rule to $10^{-5}$~Eh/bohr.  The layer is
+scalar (spin-free): full-electron basis sets only, because the spin-free
+X2C helper raises \texttt{NotImplementedError} for ECP molecules.
+Complex two-component CI, Kramers-restricted response and ECP support
+are not implemented.  The CI, RDM and Fock contractions are dense in
+the spin-orbital space (\texttt{nso}$^{4}$ for the 2-RDM), so the
+prototype is sized for small validation systems; production f-block
+active spaces need a factorized 2-RDM route.
+
+\begin{lstlisting}[language=Python]
+from diffmrc.core import x2c_casscf_df as xc
+
+res = xc.df_x2c_casscf(mol, ncore=4, nact=2, nele=2,
+                       auxbasis='def2-universal-jkfit')
+grad, parts = xc.df_x2c_casscf_gradient(mol, res)
+e_states = xc.df_x2c_energies_at(mol, res)
+
+res_sa = xc.df_x2c_casscf(mol, ncore=4, nact=2, nele=2, nroots=2,
+                          weights=[0.5, 0.5],
+                          auxbasis='def2-universal-jkfit')
+g_state, info = xc.df_x2c_sa_state_gradient(
+    mol, res_sa, state=0, return_info=True)
+\end{lstlisting}
+
+\section{Validation scope and boundaries}
+\label{sec:new-scope}
+
+The table collects the validated systems and the boundaries of the five
+layers.  A system absent from the second column is not validated, and
+the absence is a statement about coverage, not about expected accuracy.
+
+\begin{center}
+\begin{tabularx}{\textwidth}{>{\raggedright\arraybackslash}p{0.19\textwidth}>{\raggedright\arraybackslash}p{0.34\textwidth}X}
+\toprule
+Module & Validated on & Not covered \\
+\midrule
+\texttt{nevpt2\_zvector} &
+  H$_2$O/6-31G, LiH/6-31G, CAS(2,2), closed shell, frozen core &
+  open shell, ECP, f block, large basis; the exact treatment covers the
+  \texttt{Si} class only \\
+\texttt{caspt2} coupled &
+  H$_2$O/6-31G and CO/6-31G, CAS(2,2), against the reference class
+  table &
+  differentiable coupled path; large active spaces \\
+\texttt{somf\_ecp} &
+  GeF with a spin-orbit ECP; YbF \texttt{ECPso} norms; operator and
+  response identities &
+  production absolute SOC; orbital and CI response \\
+\texttt{ri\_scf}, \texttt{ri\_scf\_driver} &
+  H$_2$O, CO, OH (energy), HI/def2-svp with an ECP (gradient) &
+  open-shell analytic gradient; RI-JK; production COSX \\
+\texttt{x2c\_casscf\_df} &
+  H$_2$O/6-31G, CAS(2,2) and SA(2), against density-fitted sfx2c1e
+  CASSCF &
+  ECP; complex two-component CI; Kramers response; large active spaces \\
+\bottomrule
+\end{tabularx}
+\end{center}
