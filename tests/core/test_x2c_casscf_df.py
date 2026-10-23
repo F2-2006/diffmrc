@@ -299,6 +299,13 @@ def test_sa_n1_reduces_to_single_state(water, casscf):
     assert np.abs(g_sa - g_ss).max() < 1e-6
 
 
+def test_gradient_requires_converged_result(water):
+    """The gradient entry point does not silently re-run the CASSCF."""
+    mol = water[0]
+    with pytest.raises(ValueError, match="converged result"):
+        xc.df_x2c_casscf_gradient(mol)
+
+
 def test_sa_state_gradient_satisfies_sum_rule(water, pyscf_sa):
     """The weighted state gradients reproduce pyscf's SA-CASSCF gradient.
 

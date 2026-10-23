@@ -854,15 +854,17 @@ def df_x2c_casscf_gradient(mol, result=None, state=None, auxmol=None,
 
     At the converged orbitals the orbital and CI responses vanish, so the
     gradient is the direct derivative at fixed orbitals and CI vector.
-    ``state`` selects the CI root (default: ``result.target``).
+    ``state`` selects the CI root (default: ``result.target``).  The
+    converged ``result`` returned by :func:`df_x2c_casscf` is required.
 
     Returns ``(grad, parts)`` with ``grad`` of shape ``(natm,3)`` in
     Eh / Bohr and ``parts`` holding the one-electron, two-electron,
     Pulay and nuclear contributions.
     """
     if result is None:
-        result = df_x2c_casscf(mol, auxmol=auxmol, auxbasis=auxbasis,
-                               rcond=rcond)
+        raise ValueError(
+            "df_x2c_casscf_gradient requires the converged result from "
+            "df_x2c_casscf; pass result=... (run df_x2c_casscf first).")
     # the orbitals and factor derivatives belong to the result geometry
     mol = result.mol
     ncore, nact, nele = result.ncore, result.nact, result.nele
