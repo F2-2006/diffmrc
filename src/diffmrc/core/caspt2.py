@@ -521,7 +521,7 @@ def caspt2_contracted_e2(h1e_mo, eri_mo, ci, dets, *, ncore, nact, nele, eps):
     # the exact projection of the occupation-diagonal H0 - E0 onto the
     # block, with W_p = <0|H|K_p> and E2 = sum_p W_p x_p.  Independent
     # per-function contributions (the strictly diagonal reading) overcount
-    # the H2O class by 1.59x and CO by 1.79x against ORCA (t414 round 1);
+    # the H2O class by 1.59x and CO by 1.79x against ORCA (first round);
     # the block solve lands both systems within 2.3% (round 3) and
     # reproduces the block orthogonality of the Molcas case structure.
     acc_ia = 0.0
@@ -580,7 +580,7 @@ def caspt2_contracted_e2_jax(h1e_mo, eri_mo, ci, dets, *, ncore, nact, nele,
 
     Same diagonal-complete contracted scheme, same class definitions and
     the same diagonal denominator ``A - E0 * S``; verified elementwise
-    against the numpy reference (tests/core/test_caspt2.py, t414).
+    against the numpy reference (tests/core/test_caspt2.py).
 
     Every contracted function is linear in the CI vector by
     construction, so its coupling W, overlap S and Fock expectation A

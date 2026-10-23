@@ -37,6 +37,25 @@ examples/       small runnable examples for the public interfaces
 manual/         Tutorial and Manual (LaTeX sources and built PDFs)
 ```
 
+## What is new in 0.3.0
+
+- `driver.nevpt2_zvector`: relaxed NEVPT2 nuclear gradients. The near-zero
+  `Si` channels are evaluated in exact algebraic form, displaced orbital
+  references are aligned blockwise, and the response term is supplied by the
+  CASSCF Z-vector. Validated against finite differences on
+  H2O/6-31G and LiH/6-31G.
+- `core.caspt2`: a coupled full-Fock contraction that retains the inter-class
+  coupling of the zeroth-order Hamiltonian, next to the differentiable
+  diagonal-Fock path. The relative weight of the `VM` component is corrected
+  to the convention used by the reference implementation.
+- `core.somf_ecp`: a valence-level spin-orbit mean-field operator for
+  effective-core-potential calculations, with gradient prototypes.
+- `driver.ri_scf` and `driver.ri_scf_driver`: a RIJONX SCF loop
+  (RI-J Coulomb plus exact exchange) on top of pyscfad RHF/ROHF, including the
+  SCF-level overlap-derivative term.
+- `core.x2c_casscf_df`: scalar (spin-free) DF-X2C CASSCF energies, analytic
+  nuclear gradients, and state-averaged response.
+
 ## Acceleration layer
 
 `diffmrc.core.ri` adds a differentiable resolution-of-identity (RI/DF)
@@ -312,6 +331,28 @@ memory and does not exploit sparsity; the unrolled route scales with the number
 of iterations. Neither is competitive with analytic second derivatives for
 single-reference methods.
 
+*Scope of the relaxed NEVPT2 gradient.* The relaxed-path nuclear gradient is
+validated on two closed-shell, frozen-core systems (H2O/6-31G and LiH/6-31G).
+Open-shell, ECP, f-block and large-basis systems are not yet covered. The exact
+near-zero treatment applies to the `Si` class only; the other four contraction
+classes retain the release value mask.
+
+*CASPT2 layers.* The coupled full-Fock path is a NumPy value-layer
+implementation. The differentiable path is the diagonal-Fock approximation
+(CASPT2-D level); its residual against the reference is documented in the
+manual and in the tests.
+
+*SOMF for ECP.* The valence-level ECP SOMF operator is a prototype. There is no
+unique ECP SOMF definition, and the valence-only construction can double count
+core spin-orbit contributions. It is not a production absolute-SOC method.
+
+*DF-X2C.* The differentiable X2C-CASSCF chain is scalar (spin-free). Complex
+two-component CI, Kramers-restricted response, and ECP support are not
+implemented.
+
+*RI SCF.* The RIJONX driver keeps exact exchange dense, and analytic SCF
+gradients for open-shell references are not implemented.
+
 ## Reproducing the paper
 
 Scripts in `experiments/` correspond to the results section by section:
@@ -329,6 +370,10 @@ Scripts in `experiments/` correspond to the results section by section:
 | `frequencies_basis_active_space.py` | frequency dependence on basis set and active space |
 | `collect_frequency_results.py` | frequency summary |
 | `lanthanide_multistart.py`, `europium_scf_convergence.py`, `europium_dissociation_rerun.py` | lanthanide dissociation energies |
+| `somf_ecp/validate_ecp_somf.py` | valence-level SOMF operator for ECP calculations (GeF, YbF) |
+| `somf_ecp/validate_somf_grad.py` | SOMF gradient prototypes |
+| `df_x2c_casscf_validation.py` | scalar DF-X2C CASSCF energy and gradient validation |
+| `measure_ri_scf_driver.py` | RIJONX SCF driver comparison |
 
 Each script sets the thread environment variables internally and writes
 JSON to a `results/` directory. The scripts import `diffmrc` directly; make
@@ -362,7 +407,7 @@ If you use this code, please cite the repository:
   author = {{The diffmrc developers}},
   year   = {2026},
   url    = {https://github.com/jqChen1566/diffmrc},
-  note   = {Version 0.1.0, early development}
+  note   = {Version 0.3.0, early development}
 }
 ```
 
