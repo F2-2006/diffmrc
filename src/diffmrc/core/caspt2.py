@@ -34,6 +34,9 @@ jax.config.update("jax_enable_x64", True)
 from jax import numpy as jnp  # noqa: E402
 
 import numpy as np  # noqa: E402
+import scipy.sparse as sp  # noqa: E402
+
+from .eigh import eigh_safe  # noqa: E402
 
 _log = logging.getLogger(__name__)
 
@@ -340,7 +343,98 @@ def caspt2_double_external_e2(h1e_mo, eri_mo, c_ci, dets, *,
     return float(e2), np.asarray(norm), np.asarray(diff)
 
 
-def caspt2_contracted_e2(h1e_mo, eri_mo, ci, dets, *, ncore, nact, nele, eps):
+# Relative gap below which two class-overlap eigenvalues are treated as
+# degenerate.  Exact degeneracies of the spin-symmetric function basis sit
+# at roundoff (~1e-16 of the largest eigenvalue); the smallest genuine gap
+# measured on N2 is ~3e-7 of it.
+_OVERLAP_DEGENERACY_TOL = 1e-9
+
+
+def _orthonormal_class_diagonal(vecs, w, de_of, e0, nthresh=1e-6):
+    """CASPT2-D energy of one class in its orthonormalized function basis.
+
+    ``vecs`` are the class function vectors (determinant -> coefficient)
+    and ``w`` their couplings ``<0|H|K>``.  The class overlap
+
+        S[i, j] = <K_i|K_j>,
+
+    is diagonalized and the functions are re-expressed in the orthonormal
+    basis ``T = U / sqrt(eig)``, keeping the eigenvectors above
+    ``nthresh * max(eig)`` (the role of the reference implementation's
+    ``NThresh``).  The energy is the diagonal approximation in that
+    basis,
+
+        e2 = -sum_k (T^T W)_k^2 / (T^T A T)_kk,
+
+    with ``A[i, j] = sum_D F_i[D] F_j[D] (de_D - E0)`` the
+    occupation-diagonal Fock matrix.
+
+    A per-function diagonal sum (``-sum_i W_i^2 / (A_ii - E0 S_ii)``) is
+    invalid for the three-active-index classes: their function products
+    span a strongly linearly dependent set (the TUVA basis of N2 has
+    rank ~0.73 of its function count), so the same direction enters many
+    times and the sum overcounts by roughly a factor of three.
+    """
+    nfn = len(vecs)
+    if nfn == 0:
+        return 0.0
+    w = np.asarray(w, dtype=float)
+    ds = sorted(set().union(*(v.keys() for v in vecs)))
+    pos = {d: i for i, d in enumerate(ds)}
+    nnz = sum(len(v) for v in vecs)
+    rows = np.empty(nnz, dtype=np.int64)
+    cols = np.empty(nnz, dtype=np.int64)
+    vals = np.empty(nnz)
+    k = 0
+    for i, vec in enumerate(vecs):
+        for d, c in vec.items():
+            rows[k] = i
+            cols[k] = pos[d]
+            vals[k] = c
+            k += 1
+    F = sp.coo_matrix((vals, (rows, cols)),
+                      shape=(nfn, len(ds))).tocsr()
+    S = (F @ F.T).toarray()
+    de = np.asarray([de_of(d) for d in ds])
+    A = (F.multiply((de - e0)[None, :]) @ F.T).toarray()
+    S = 0.5 * (S + S.T)
+    A = 0.5 * (A + A.T)
+    ev, U = np.linalg.eigh(S)
+    ev_max = float(ev.max())
+    if not np.isfinite(ev_max) or ev_max <= 0.0:
+        return 0.0
+    keep = ev > nthresh * ev_max
+    if not np.any(keep):
+        return 0.0
+    U = U[:, keep]
+    evk = ev[keep]
+    # The orthonormal basis inside a degenerate overlap block is
+    # arbitrary, and so is the diagonal approximation built on it: on N2
+    # the TUVA overlap has 8- and 16-fold exact degeneracies and LAPACK's
+    # choice moves the class energy by up to 1.7% between row orderings.
+    # Fix the gauge by diagonalizing A inside each block; the blocks are
+    # then represented by a basis in which the neglected coupling is
+    # minimal, and the result is independent of the function ordering.
+    start = 0
+    for i in range(1, len(evk) + 1):
+        if i == len(evk) or evk[i] - evk[i - 1] > (
+                _OVERLAP_DEGENERACY_TOL * ev_max):
+            if i - start > 1:
+                block = U[:, start:i]
+                Ab = block.T @ A @ block
+                _, V = np.linalg.eigh(0.5 * (Ab + Ab.T))
+                U[:, start:i] = block @ V
+            start = i
+    T = U / np.sqrt(evk)
+    M = T.T @ A @ T
+    Wt = T.T @ w
+    diag = np.diag(M)
+    ok = np.abs(diag) > 1e-10
+    return -float(np.sum(Wt[ok] * Wt[ok] / diag[ok]))
+
+
+def caspt2_contracted_e2(h1e_mo, eri_mo, ci, dets, *, ncore, nact, nele, eps,
+                         nthresh=1e-6):
     """Contracted (internally contracted) CASPT2, diagonal-complete scheme.
 
     Follows the OpenMolcas conventions established by line-by-line source
@@ -367,14 +461,13 @@ def caspt2_contracted_e2(h1e_mo, eri_mo, ci, dets, *, ncore, nact, nele, eps):
       ~ -K(act1,act1)/42, so their W^2/D coincide); only the pool's
       leading orbital contributes those rows.  Core and virtual pools
       have no such replicas and are summed in full.
-    - The single-excitation class V0_ia (Molcas case D, AIVX; ORCA
-      class table) is not the plain single excitation E(a,j)|0> -- that
-      one is Brillouin-forbidden at a CASSCF reference (W = 0 measured,
-      and it is why Vm1_a and V1_i come out as clean zeros, matching
-      ORCA).  Case D instead dresses the excitation with an active-pair
-      reorganization: per unordered active pair (u, v) -- the double
-      classes' pair convention -- two component functions (Molcas stores
-      two slots per pair, src/caspt2 ADDRHSD1/D2),
+    - The class V0_ia (Molcas case D, AIVX; ORCA class table) is not the
+      plain single excitation E(a,j)|0> -- that one is Brillouin-
+      forbidden at a CASSCF reference (W = 0 measured).  Case D instead
+      dresses the excitation with an active-pair reorganization: per
+      unordered active pair (u, v) -- the double classes' pair
+      convention -- two component functions (Molcas stores two slots per
+      pair, src/caspt2 ADDRHSD1/D2),
 
           cross  K = E(v,u) E(a,j)|0>   -- coupling dominated by (aj|vu)
           direct K = E(v,j) E(a,u)|0>   -- coupling dominated by (au|vj)
@@ -382,6 +475,21 @@ def caspt2_contracted_e2(h1e_mo, eri_mo, ci, dets, *, ncore, nact, nele, eps):
       which coincide into a single component for the diagonal pairs
       (v == u), and are solved per block as the projected amplitude
       equation (see the class block below).
+    - The ORCA classes Vm1_a (TUVA) and V1_i (ITUV) are three-active-
+      index classes, not single excitations:
+
+          Vm1_a: E(a,t) E(u,v)|0>,  a virtual, t,u,v active
+          V1_i:  E(t,i) E(u,v)|0>,  i core,    t,u,v active
+
+      (Kollmar/Sivalingam/Neese 2020 class table; Kollmar/Guo/Neese
+      2021 explicit functions).  Their product bases are strongly
+      linearly dependent (N2 rank 1264/1728 and 632/864 at NThresh
+      1e-6), so a per-function diagonal sum overcounts by ~3x; they are
+      evaluated by :func:`_orthonormal_class_diagonal` instead.  Both
+      classes vanish on the CAS(2,2) references (below 1e-9 Eh),
+      leaving those anchors unchanged; on N2 they add -0.003648 /
+      -0.001625 Eh and bring the default-path total to 0.989 of ORCA
+      CASPT2-D (from 0.916).
 
     Anchors (ratios to the ORCA CASPT2 class table, full-FIC column):
     H2O/6-31G CAS(2,2) 1.017 / 1.011 / 0.999 / 1.009 / 0.955 (V0_ijab,
@@ -390,6 +498,10 @@ def caspt2_contracted_e2(h1e_mo, eri_mo, ci, dets, *, ncore, nact, nele, eps):
     1.0026;  V0_ia target -0.011135 (ORCA H2O).  This path keeps the
     diagonal-Fock zeroth order (the CASPT2-D-level approximation); the
     full-Fock coupled path is ``caspt2_contracted_e2_coupled``.
+
+    ``nthresh`` is the relative eigenvalue cutoff of the class overlap
+    diagonalization (the ``NThresh`` role); it affects only the TUVA /
+    ITUV classes.
 
     Returns (e2_total, breakdown) with breakdown keyed by class name.
     """
@@ -413,34 +525,24 @@ def caspt2_contracted_e2(h1e_mo, eri_mo, ci, dets, *, ncore, nact, nele, eps):
                          if (J ^ dd).bit_count() <= 4)
         return _g[dd]
 
-    def wsa(qs, ps, vm, pair='both'):
+    def wsa(qs, ps, vm):
         """(W, S, A) for the contracted function of the given pair labels.
 
-        ``pair`` selects the operator combination of the two-pair branch:
-        'both' builds E(p1 q1)E(p2 q2) + fac E(p1 q2)E(p2 q1) as before;
-        'direct' and 'cross' keep a single term, which is how the two
-        independent amplitudes of the V0_ia class are built.
+        Builds E(p1 q1)E(p2 q2) + fac E(p1 q2)E(p2 q1); ``vm`` selects
+        the relative weight -1 of the second ordering (the mkrhsh sqrt(3)
+        is an overall scale that cancels in ``W^2/(A - E0 S)``).  The two
+        orderings keep independent amplitudes in the V0_ia block below,
+        which builds its components directly.
         """
-        if len(qs) == 1:
-            q, p = qs[0], ps[0]
-            kacc = defaultdict(float)
-            for I, cI in ref_pairs:
-                for d1, cc in _e1(I, p, q):
-                    kacc[d1] += cI * cc
-        else:
-            q1, q2 = qs
-            p1, p2 = ps
-            # mkrhsh writes VM = sqrt(3) (cross - direct); the sqrt(3)
-            # scales the whole function and cancels in W^2/(A - E0 S).
-            fac = -1.0 if vm else 1.0
-            kacc = defaultdict(float)
-            for I, cI in ref_pairs:
-                if pair in ('both', 'direct'):
-                    for d2, cc in _apply2(I, p1, q1, p2, q2).items():
-                        kacc[d2] += cI * cc
-                if pair in ('both', 'cross'):
-                    for d2, cc in _apply2(I, p1, q2, p2, q1).items():
-                        kacc[d2] += fac * cI * cc
+        q1, q2 = qs
+        p1, p2 = ps
+        fac = -1.0 if vm else 1.0
+        kacc = defaultdict(float)
+        for I, cI in ref_pairs:
+            for d2, cc in _apply2(I, p1, q1, p2, q2).items():
+                kacc[d2] += cI * cc
+            for d2, cc in _apply2(I, p1, q2, p2, q1).items():
+                kacc[d2] += fac * cI * cc
         w = sum(cc * g_of(dd) for dd, cc in kacc.items())
         s = sum(cc * cc for cc in kacc.values())
         occ = np.zeros(nmo)
@@ -461,12 +563,21 @@ def caspt2_contracted_e2(h1e_mo, eri_mo, ci, dets, *, ncore, nact, nele, eps):
     vir = list(range(nocc, nmo))
 
     def pairs(pool_a, pool_b):
-        if pool_b is None:
-            return [(x,) for x in pool_a]
         if pool_a is pool_b:
             return [(pool_a[i], pool_a[j]) for i in range(len(pool_a))
                     for j in range(i, len(pool_a))]
         return [(x, y) for x in pool_a for y in pool_b]
+
+    _de_cache = {}
+
+    def de_of(dd):
+        """Per-determinant Fock energy, sum_p n_p(D) eps_p."""
+        if dd not in _de_cache:
+            tot = 0.0
+            for p in range(nmo):
+                tot += ((dd >> (2 * p)) & 3).bit_count() * eps[p]
+            _de_cache[dd] = tot
+        return _de_cache[dd]
 
     classes = [
         ('V0_ijab', core, core, vir, vir),
@@ -474,30 +585,43 @@ def caspt2_contracted_e2(h1e_mo, eri_mo, ci, dets, *, ncore, nact, nele, eps):
         ('Vm2_ab', act, act, vir, vir),
         ('V1_ija', core, core, act, vir),
         ('V2_ij', core, core, act, act),
-        ('Vm1_a', act, None, vir, None),
-        ('V1_i', core, None, act, None),
     ]
     breakdown = {}
     total = 0.0
     for name, o1, o2, i1c, i2c in classes:
         acc = 0.0
         for qs in pairs(o1, o2):
-            if len(qs) == 2 and qs[0] == qs[1] and qs[0] in act \
-                    and qs[0] != act[0]:
+            if qs[0] == qs[1] and qs[0] in act and qs[0] != act[0]:
                 continue
             for ps in pairs(i1c, i2c):
-                if len(ps) == 2 and ps[0] == ps[1] and ps[0] in act \
-                        and ps[0] != act[0]:
+                if ps[0] == ps[1] and ps[0] in act and ps[0] != act[0]:
                     continue
                 w, s, a = wsa(qs, ps, vm=False)
                 dnm = a - e0_zero * s
                 if abs(dnm) > 1e-10:
                     acc -= w * w / dnm
-                if len(qs) == 2 and qs[0] != qs[1] and ps[0] != ps[1]:
+                if qs[0] != qs[1] and ps[0] != ps[1]:
                     wm, sm, am = wsa(qs, ps, vm=True)
                     dnm2 = am - e0_zero * sm
                     if abs(dnm2) > 1e-10:
                         acc -= wm * wm / dnm2
+        breakdown[name] = acc
+        total += acc
+
+    # TUVA (Vm1_a) and ITUV (V1_i): three active indices, plain products
+    # E(a,t)E(u,v)|0> and E(t,i)E(u,v)|0> summed over ordered active
+    # indices.  The function basis is strongly linearly dependent, so the
+    # class is projected onto its orthonormalized basis (H1) instead of
+    # taking a per-function diagonal.
+    for name, ops_list in (
+            ('Vm1_a', [[(p, t), (u, v)] for p in vir for t in act
+                       for u in act for v in act]),
+            ('V1_i', [[(t, i), (u, v)] for i in core for t in act
+                      for u in act for v in act])):
+        vecs = [_apply_chain(ref_pairs, ops) for ops in ops_list]
+        w = np.asarray([sum(cc * g_of(dd) for dd, cc in vec.items())
+                        for vec in vecs])
+        acc = _orthonormal_class_diagonal(vecs, w, de_of, e0_zero, nthresh)
         breakdown[name] = acc
         total += acc
 
@@ -525,15 +649,6 @@ def caspt2_contracted_e2(h1e_mo, eri_mo, ci, dets, *, ncore, nact, nele, eps):
     # the block solve lands both systems within 2.3% (round 3) and
     # reproduces the block orthogonality of the Molcas case structure.
     acc_ia = 0.0
-    _de_cache = {}
-
-    def de_of(dd):
-        if dd not in _de_cache:
-            tot = 0.0
-            for p in range(nmo):
-                tot += ((dd >> (2 * p)) & 3).bit_count() * eps[p]
-            _de_cache[dd] = tot
-        return _de_cache[dd]
 
     def kacc_of(mode, u, j, a, v):
         kacc = defaultdict(float)
@@ -575,7 +690,7 @@ def caspt2_contracted_e2(h1e_mo, eri_mo, ci, dets, *, ncore, nact, nele, eps):
 
 
 def caspt2_contracted_e2_jax(h1e_mo, eri_mo, ci, dets, *, ncore, nact, nele,
-                             eps):
+                             eps, nthresh=1e-6):
     """Differentiable twin of :func:`caspt2_contracted_e2`.
 
     Same diagonal-complete contracted scheme, same class definitions and
@@ -590,6 +705,13 @@ def caspt2_contracted_e2_jax(h1e_mo, eri_mo, ci, dets, *, ncore, nact, nele,
     flows through the whole construction.  The static build costs
     ``ndet``-squared Slater-Condon elements per function: intended for
     pilot active spaces, not for production-size CI lists.
+
+    The TUVA (Vm1_a) and ITUV (V1_i) classes are evaluated with the same
+    orthonormalized-basis diagonal as the numpy engine
+    (:func:`_orthonormal_class_diagonal`).  Their class overlap and Fock
+    matrices are assembled as static tensors and contracted with the jax
+    CI vector, so the overlap eigenvectors (and their derivative) stay
+    inside the differentiable chain.
 
     Returns ``(e2_total, breakdown)`` with jax scalars.
     """
@@ -611,8 +733,10 @@ def caspt2_contracted_e2_jax(h1e_mo, eri_mo, ci, dets, *, ncore, nact, nele,
             de_cache[dd] = tot
         return de_cache[dd]
 
-    def v_single(p, q):
-        return [dict(_e1(Ibit, p, q)) for Ibit in dets]
+    def v_chain(ops):
+        """Operator product applied to every basis determinant."""
+        return [dict(_apply_chain([(int(Ibit), 1.0)], ops))
+                for Ibit in dets]
 
     def v_two(p1, q1, p2, q2, pair='both', fac=1.0):
         out = []
@@ -682,13 +806,73 @@ def caspt2_contracted_e2_jax(h1e_mo, eri_mo, ci, dets, *, ncore, nact, nele,
         ok = jnp.abs(dnm) > 1e-10
         return -jnp.where(ok, w * w / jnp.where(ok, dnm, 1.0), 0.0)
 
+    def class_h1(ops_list):
+        """H1 energy of one three-active-index class.
+
+        The class overlap ``S(c)`` and the occupation-diagonal Fock
+        matrix ``A(c)`` are quadratic forms in the CI vector.  Their
+        static tensors are contracted with ``ci`` inside jax, so the
+        overlap eigenvectors used for the orthonormal basis remain
+        differentiable.  Only the retained directions enter the sum;
+        the same threshold and denominator guard as
+        :func:`_orthonormal_class_diagonal` are applied.
+        """
+        vlist = [v_chain(ops) for ops in ops_list]
+        nfn = len(vlist)
+        if nfn == 0:
+            return jnp.zeros(())
+        qs = np.zeros((nfn, nfn, ndet, ndet))
+        qa = np.zeros((nfn, nfn, ndet, ndet))
+        mw = np.zeros((nfn, ndet, ndet))
+        for i in range(nfn):
+            mw[i] = w_form(vlist[i])
+            for j in range(i, nfn):
+                q, a = gram_forms(vlist[i], vlist[j])
+                qs[i, j] = q
+                qa[i, j] = a
+                if j != i:
+                    qs[j, i] = q.T
+                    qa[j, i] = a.T
+        qs = jnp.asarray(qs)
+        qa = jnp.asarray(qa)
+        mw = jnp.asarray(mw)
+        S = jnp.einsum('ijab,a,b->ij', qs, ci, ci)
+        A = (jnp.einsum('ijab,a,b->ij', qa, ci, ci) - e0 * S)
+        w = jnp.einsum('iab,a,b->i', mw, ci, ci)
+        # Degeneracy-safe rule: the spin-symmetric function basis makes
+        # the class overlap exactly degenerate, where the raw eigh
+        # reverse rule is 1/0.  eigh_safe freezes the arbitrary rotation
+        # inside a degenerate subspace and reproduces the raw derivative
+        # elsewhere; the primal decomposition is unchanged.
+        ev, U = eigh_safe(S)
+        ev_max = jnp.max(ev)
+        keep = ev > nthresh * ev_max
+        T0 = U / jnp.sqrt(jnp.where(keep, ev, 1.0))[None, :]
+        # Same gauge as the numpy engine: diagonalize the Fock matrix
+        # inside each degenerate overlap block.  V is block structured
+        # (one block per column); the block's keep status is recovered
+        # from the kept weight of the column, and the sum over columns is
+        # independent of their ordering.
+        A_T = T0.T @ A @ T0
+        same = jnp.abs(ev[:, None] - ev[None, :]) <= (
+            _OVERLAP_DEGENERACY_TOL * ev_max)
+        A_block = jnp.where(same, A_T, 0.0)
+        _, V = eigh_safe(0.5 * (A_block + A_block.T))
+        T = T0 @ V
+        M = T.T @ A @ T
+        Wt = T.T @ w
+        diag = jnp.diag(M)
+        keep_v = (V * V).T @ keep.astype(V.dtype) > 0.5
+        ok = jnp.abs(diag) > 1e-10
+        mask = keep_v & ok
+        return -jnp.sum(jnp.where(mask, Wt * Wt / jnp.where(ok, diag, 1.0),
+                                  0.0))
+
     core = list(range(ncore))
     act = list(range(ncore, nocc))
     vir = list(range(nocc, nmo))
 
     def pairs_list(o1, o2):
-        if o2 is None:
-            return [(x,) for x in o1]
         if o1 is o2:
             return [(o1[i], o1[j]) for i in range(len(o1))
                     for j in range(i, len(o1))]
@@ -700,30 +884,32 @@ def caspt2_contracted_e2_jax(h1e_mo, eri_mo, ci, dets, *, ncore, nact, nele,
         ('Vm2_ab', act, act, vir, vir),
         ('V1_ija', core, core, act, vir),
         ('V2_ij', core, core, act, act),
-        ('Vm1_a', act, None, vir, None),
-        ('V1_i', core, None, act, None),
     ]
     breakdown = {}
     total = 0.0
     for name, o1, o2, i1c, i2c in classes:
         acc = 0.0
         for qs in pairs_list(o1, o2):
-            if len(qs) == 2 and qs[0] == qs[1] and qs[0] in act \
-                    and qs[0] != act[0]:
+            if qs[0] == qs[1] and qs[0] in act and qs[0] != act[0]:
                 continue
             for ps in pairs_list(i1c, i2c):
-                if len(ps) == 2 and ps[0] == ps[1] and ps[0] in act \
-                        and ps[0] != act[0]:
+                if ps[0] == ps[1] and ps[0] in act and ps[0] != act[0]:
                     continue
-                if len(qs) == 1:
-                    acc += contrib(forms(v_single(ps[0], qs[0])))
-                else:
-                    acc += contrib(forms(v_two(ps[0], qs[0], ps[1], qs[1])))
-                    if qs[0] != qs[1] and ps[0] != ps[1]:
-                        # VM relative weight -1, as in the numpy engine
-                        # (the mkrhsh sqrt(3) is an overall scale).
-                        acc += contrib(forms(v_two(ps[0], qs[0], ps[1], qs[1],
-                                                   fac=-1.0)))
+                acc += contrib(forms(v_two(ps[0], qs[0], ps[1], qs[1])))
+                if qs[0] != qs[1] and ps[0] != ps[1]:
+                    # VM relative weight -1, as in the numpy engine
+                    # (the mkrhsh sqrt(3) is an overall scale).
+                    acc += contrib(forms(v_two(ps[0], qs[0], ps[1], qs[1],
+                                               fac=-1.0)))
+        breakdown[name] = acc
+        total += acc
+
+    for name, ops_list in (
+            ('Vm1_a', [[(p, t), (u, v)] for p in vir for t in act
+                       for u in act for v in act]),
+            ('V1_i', [[(t, i), (u, v)] for i in core for t in act
+                      for u in act for v in act])):
+        acc = class_h1(ops_list)
         breakdown[name] = acc
         total += acc
 
@@ -824,8 +1010,6 @@ def _generalized_fock(h1e_mo, eri_mo, D):
 def _pairs_with_repetition(a, b):
     """Index pairs of one class: ordered cross products for different
     pools, unordered pairs with repetition inside one pool."""
-    if b is None:
-        return [(x,) for x in a]
     if a is b:
         return [(a[i], a[j]) for i in range(len(a)) for j in range(i, len(a))]
     return [(x, y) for x in a for y in b]
@@ -840,6 +1024,13 @@ def _class_function_vectors(ref_pairs, ncore, nact, nmo):
     relative combination is the Molcas ``mkrhsh`` one, ``VP = A + B`` and
     ``VM = A - B`` (the sqrt(3) in the source is an overall scale that
     cancels in ``W**2 / (A - E0 S)`` and in the linear solve).
+
+    The two three-active-index classes are plain products summed over
+    the ordered active indices, matching the FIC ansatz
+    ``E^p_q E^r_s |0>``:
+
+        Vm1_a (TUVA): E(a,t) E(u,v)|0>,  a virtual, t,u,v active
+        V1_i  (ITUV): E(t,i) E(u,v)|0>,  i core,    t,u,v active
     """
     nocc = ncore + nact
     core = list(range(ncore))
@@ -853,17 +1044,10 @@ def _class_function_vectors(ref_pairs, ncore, nact, nmo):
         ('Vm2_ab', act, act, vir, vir),
         ('V1_ija', core, core, act, vir),
         ('V2_ij', core, core, act, act),
-        ('Vm1_a', act, None, vir, None),
-        ('V1_i', core, None, act, None),
     ]
     for name, o1, o2, i1, i2 in classes:
         for qs in _pairs_with_repetition(o1, o2):
             for ps in _pairs_with_repetition(i1, i2):
-                if len(qs) == 1:
-                    functions.append(
-                        (name, _apply_chain(ref_pairs,
-                                            [(ps[0], qs[0])])))
-                    continue
                 p1, p2 = ps
                 q1, q2 = qs
                 ka = _apply_chain(ref_pairs, [(p1, q1), (p2, q2)])
@@ -897,6 +1081,21 @@ def _class_function_vectors(ref_pairs, ncore, nact, nmo):
                                else [(a, u), (v, j)])
                         functions.append(
                             ('V0_ia', _apply_chain(ref_pairs, ops)))
+
+    # TUVA (Vm1_a) and ITUV (V1_i): plain products over the ordered
+    # active indices (the FIC ansatz), no VP/VM combination.
+    for a in vir:
+        for t in act:
+            for u in act:
+                for v in act:
+                    functions.append(('Vm1_a', _apply_chain(
+                        ref_pairs, [(a, t), (u, v)])))
+    for i in core:
+        for t in act:
+            for u in act:
+                for v in act:
+                    functions.append(('V1_i', _apply_chain(
+                        ref_pairs, [(t, i), (u, v)])))
     return functions
 
 

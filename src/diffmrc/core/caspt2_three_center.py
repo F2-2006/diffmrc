@@ -35,7 +35,7 @@ from collections import defaultdict
 
 import numpy as np
 
-from .caspt2 import _apply2, _e1
+from .caspt2 import _apply2, _apply_chain, _orthonormal_class_diagonal
 
 __all__ = ['caspt2_contracted_e2_three_center']
 
@@ -152,7 +152,7 @@ def _w_three_center(kacc, h1e, u, cache, ref_pairs):
 
 
 def caspt2_contracted_e2_three_center(h1e_mo, u_mo, ci, dets, *, ncore,
-                                      nact, nele, eps):
+                                      nact, nele, eps, nthresh=1e-6):
     """Contracted CASPT2 with ``W`` assembled from three-center factors.
 
     Parameters match :func:`diffmrc.core.caspt2.caspt2_contracted_e2`
@@ -184,29 +184,20 @@ def caspt2_contracted_e2_three_center(h1e_mo, u_mo, ci, dets, *, ncore,
     def w_of(kacc):
         return _w_three_center(kacc, h1e, u, g_cache, ref_pairs)
 
-    def wsa(qs, ps, vm=False, pair='both'):
-        if len(qs) == 1:
-            q, p = qs[0], ps[0]
-            kacc = defaultdict(float)
-            for I, cI in ref_pairs:
-                for d1, cc in _e1(I, p, q):
-                    kacc[d1] += cI * cc
-        else:
-            q1, q2 = qs
-            p1, p2 = ps
-            # Same operator content as the materialized path: the VM
-            # component keeps cross - direct (relative weight -1); the
-            # OpenMolcas sqrt(3) is an overall scale and cancels in
-            # W^2 / (A - E0 S).
-            fac = -1.0 if vm else 1.0
-            kacc = defaultdict(float)
-            for I, cI in ref_pairs:
-                if pair in ('both', 'direct'):
-                    for d2, cc in _apply2(I, p1, q1, p2, q2).items():
-                        kacc[d2] += cI * cc
-                if pair in ('both', 'cross'):
-                    for d2, cc in _apply2(I, p1, q2, p2, q1).items():
-                        kacc[d2] += fac * cI * cc
+    def wsa(qs, ps, vm=False):
+        q1, q2 = qs
+        p1, p2 = ps
+        # Same operator content as the materialized path: the VM
+        # component keeps cross - direct (relative weight -1); the
+        # OpenMolcas sqrt(3) is an overall scale and cancels in
+        # W^2 / (A - E0 S).
+        fac = -1.0 if vm else 1.0
+        kacc = defaultdict(float)
+        for I, cI in ref_pairs:
+            for d2, cc in _apply2(I, p1, q1, p2, q2).items():
+                kacc[d2] += cI * cc
+            for d2, cc in _apply2(I, p1, q2, p2, q1).items():
+                kacc[d2] += fac * cI * cc
         w = w_of(kacc)
         s = sum(cc * cc for cc in kacc.values())
         occ = np.zeros(nmo)
@@ -227,47 +218,11 @@ def caspt2_contracted_e2_three_center(h1e_mo, u_mo, ci, dets, *, ncore,
     vir = list(range(nocc, nmo))
 
     def pairs(pool_a, pool_b):
-        if pool_b is None:
-            return [(x,) for x in pool_a]
         if pool_a is pool_b:
             return [(pool_a[i], pool_a[j]) for i in range(len(pool_a))
                     for j in range(i, len(pool_a))]
         return [(x, y) for x in pool_a for y in pool_b]
 
-    classes = [
-        ('V0_ijab', core, core, vir, vir),
-        ('Vm1_iab', act, core, vir, vir),
-        ('Vm2_ab', act, act, vir, vir),
-        ('V1_ija', core, core, act, vir),
-        ('V2_ij', core, core, act, act),
-        ('Vm1_a', act, None, vir, None),
-        ('V1_i', core, None, act, None),
-    ]
-    breakdown = {}
-    total = 0.0
-    for name, o1, o2, i1c, i2c in classes:
-        acc = 0.0
-        for qs in pairs(o1, o2):
-            if len(qs) == 2 and qs[0] == qs[1] and qs[0] in act \
-                    and qs[0] != act[0]:
-                continue
-            for ps in pairs(i1c, i2c):
-                if len(ps) == 2 and ps[0] == ps[1] and ps[0] in act \
-                        and ps[0] != act[0]:
-                    continue
-                w, s, a = wsa(qs, ps, vm=False)
-                dnm = a - e0_zero * s
-                if abs(dnm) > 1e-10:
-                    acc -= w * w / dnm
-                if len(qs) == 2 and qs[0] != qs[1] and ps[0] != ps[1]:
-                    wm, sm, am = wsa(qs, ps, vm=True)
-                    dnm2 = am - e0_zero * sm
-                    if abs(dnm2) > 1e-10:
-                        acc -= wm * wm / dnm2
-        breakdown[name] = acc
-        total += acc
-
-    acc_ia = 0.0
     de_cache = {}
 
     def de_of(dd):
@@ -277,6 +232,50 @@ def caspt2_contracted_e2_three_center(h1e_mo, u_mo, ci, dets, *, ncore,
                 tot += ((dd >> (2 * p)) & 3).bit_count() * eps[p]
             de_cache[dd] = tot
         return de_cache[dd]
+
+    classes = [
+        ('V0_ijab', core, core, vir, vir),
+        ('Vm1_iab', act, core, vir, vir),
+        ('Vm2_ab', act, act, vir, vir),
+        ('V1_ija', core, core, act, vir),
+        ('V2_ij', core, core, act, act),
+    ]
+    breakdown = {}
+    total = 0.0
+    for name, o1, o2, i1c, i2c in classes:
+        acc = 0.0
+        for qs in pairs(o1, o2):
+            if qs[0] == qs[1] and qs[0] in act and qs[0] != act[0]:
+                continue
+            for ps in pairs(i1c, i2c):
+                if ps[0] == ps[1] and ps[0] in act and ps[0] != act[0]:
+                    continue
+                w, s, a = wsa(qs, ps, vm=False)
+                dnm = a - e0_zero * s
+                if abs(dnm) > 1e-10:
+                    acc -= w * w / dnm
+                if qs[0] != qs[1] and ps[0] != ps[1]:
+                    wm, sm, am = wsa(qs, ps, vm=True)
+                    dnm2 = am - e0_zero * sm
+                    if abs(dnm2) > 1e-10:
+                        acc -= wm * wm / dnm2
+        breakdown[name] = acc
+        total += acc
+
+    # TUVA / ITUV: plain three-active-index products, projected onto the
+    # orthonormalized class basis (same rule as the materialized path).
+    for name, ops_list in (
+            ('Vm1_a', [[(p, t), (u, v)] for p in vir for t in act
+                       for u in act for v in act]),
+            ('V1_i', [[(t, i), (u, v)] for i in core for t in act
+                      for u in act for v in act])):
+        vecs = [_apply_chain(ref_pairs, ops) for ops in ops_list]
+        w = np.asarray([w_of(vec) for vec in vecs])
+        acc = _orthonormal_class_diagonal(vecs, w, de_of, e0_zero, nthresh)
+        breakdown[name] = acc
+        total += acc
+
+    acc_ia = 0.0
 
     def kacc_of(mode, uu, j, a, vv):
         kacc = defaultdict(float)

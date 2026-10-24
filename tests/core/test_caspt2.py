@@ -1,4 +1,5 @@
 """Contracted CASPT2 engine: ORCA-anchored classes and the jax twin."""
+import os
 from collections import defaultdict
 from itertools import combinations
 
@@ -83,12 +84,27 @@ def test_h2o_contracted_classes_regression():
     assert bd['Vm2_ab'] == pytest.approx(-0.008006, abs=3e-4)
     assert bd['V1_ija'] == pytest.approx(-0.024115, abs=3e-4)
     assert bd['V2_ij'] == pytest.approx(-0.005060, abs=3e-4)
-    # Brillouin-forbidden singles: ORCA reports -0.000000000 / -0.000000002.
+    # TUVA / ITUV vanish on this reference (ORCA prints
+    # -0.000000000 / -0.000000002); the same-reference A/B below is the
+    # anchor that the class replacement leaves the total untouched.
     assert abs(bd['Vm1_a']) < 1e-8
     assert abs(bd['V1_i']) < 1e-8
     # Molcas case D anchor: ORCA -0.011135077577 (5% acceptance band).
     assert bd['V0_ia'] == pytest.approx(-0.011135077577, rel=0.05)
     assert total == pytest.approx(-0.12709574191632, rel=0.10)
+
+    # A/B on the same reference: dropping every TUVA/ITUV direction
+    # (nthresh above the spectrum) reproduces the pre-replacement node,
+    # so the total shift caused by the new classes is bounded by 1e-8.
+    total_off, bd_off = caspt2_contracted_e2(
+        h1_mo2, eri_mo2, ci2, dets, ncore=4, nact=2, nele=2, eps=eps,
+        nthresh=1e12)
+    assert abs(total - total_off) <= 1e-8
+    assert bd_off['Vm1_a'] == 0.0
+    assert bd_off['V1_i'] == 0.0
+    for name in ('V0_ijab', 'Vm1_iab', 'Vm2_ab', 'V1_ija', 'V2_ij',
+                 'V0_ia'):
+        assert bd[name] == bd_off[name]
 
 
 def _synthetic_case(seed=7, ncore=2, nact=2, nele=2, nmo=6):
@@ -360,6 +376,162 @@ def test_coupled_default_fock_from_integrals():
     assert np.allclose(system['fock'], f_ref, atol=1e-12)
     assert np.isfinite(total)
     assert sum(bd.values()) == pytest.approx(total, abs=1e-12)
+
+
+def test_class_orthonormalization_leaves_other_classes_untouched():
+    """The TUVA/ITUV gauge and threshold must not perturb the other six
+    classes: dropping every new-class direction leaves their values
+    bitwise unchanged, and the new classes are nonzero without them."""
+    from diffmrc.core.caspt2 import caspt2_contracted_e2
+
+    h1, e4, eps, dets, ci = _synthetic_case()
+    _, bd_on = caspt2_contracted_e2(h1, e4, ci, dets, ncore=2, nact=2,
+                                    nele=2, eps=eps, nthresh=1e-6)
+    _, bd_off = caspt2_contracted_e2(h1, e4, ci, dets, ncore=2, nact=2,
+                                     nele=2, eps=eps, nthresh=1e12)
+    for name in ('V0_ijab', 'Vm1_iab', 'Vm2_ab', 'V1_ija', 'V2_ij',
+                 'V0_ia'):
+        assert bd_on[name] == bd_off[name]
+    assert bd_off['Vm1_a'] == 0.0
+    assert bd_off['V1_i'] == 0.0
+    assert abs(bd_on['Vm1_a']) > 1e-6
+    assert abs(bd_on['V1_i']) > 1e-6
+
+
+def test_class_diagonal_is_independent_of_function_order():
+    """The orthonormalized-basis diagonal uses a canonical gauge inside
+    degenerate overlap blocks (A diagonalized per block), so permuting
+    the function list must not move the class energy.  Without the gauge
+    the N2 TUVA value moves by 1.7% between orderings."""
+    from diffmrc.core.caspt2 import (_apply_chain,
+                                     _orthonormal_class_diagonal,
+                                     _sc_kernel)
+
+    h1, e4, eps, dets, ci = _synthetic_case()
+    core, act, vir = [0, 1], [2, 3], [4, 5]
+    ref = [(int(d), float(c)) for d, c in zip(dets, ci) if abs(c) > 1e-14]
+    h_elem, so_bits = _sc_kernel(h1, e4)
+
+    def g_of(dd):
+        return sum(cJ * h_elem(J, dd) for J, cJ in ref
+                   if (J ^ dd).bit_count() <= 4)
+
+    n0 = np.zeros(len(eps))
+    for dd, c in ref:
+        for so in so_bits(dd):
+            n0[so // 2] += c * c
+    e0 = float(eps @ n0)
+    de_cache = {}
+
+    def de_of(d):
+        if d not in de_cache:
+            de_cache[d] = sum(((d >> (2 * p)) & 3).bit_count() * eps[p]
+                              for p in range(len(eps)))
+        return de_cache[d]
+
+    ops_a = [[(a, t), (u, v)] for a in vir for t in act
+             for u in act for v in act]
+    ops_b = [[(a, t), (u, v)] for t in act for u in act
+             for v in act for a in vir]
+    vals = []
+    for ops in (ops_a, ops_b):
+        vecs = [_apply_chain(ref, o) for o in ops]
+        w = np.array([sum(cc * g_of(dd) for dd, cc in v.items())
+                      for v in vecs])
+        vals.append(_orthonormal_class_diagonal(vecs, w, de_of, e0))
+    assert vals[0] == pytest.approx(vals[1], abs=1e-10)
+    assert abs(vals[0]) > 1e-6
+
+
+def test_n2_tuva_ituv_classes_match_orca_d():
+    """N2/6-31G CAS(6,6): the TUVA (Vm1_a) and ITUV (V1_i) classes are
+    nonzero and reproduce the ORCA CASPT2-D class table.
+
+    Reference chain: ``n2_ref.npz`` (Wave 11 semicanonical reference; the
+    in-house CASSCF and ORCA agree to 7e-10 Eh).  ORCA CASPT2-D values
+    from ``orca_n2_classes.json``: Vm1_a -0.003608944, V1_i -0.001610598.
+    The declared band is the H1 acceptance range; the per-function sum
+    overcounts these classes by 3.5x / 3.1x and is not a valid reading.
+    The six pre-existing classes are pinned to the a2cad84 baseline (they
+    are computed by unchanged code).
+    """
+    ref_path = os.environ.get('DIFFMRC_N2_REF')
+    if not ref_path or not os.path.exists(ref_path):
+        pytest.skip('DIFFMRC_N2_REF does not point at n2_ref.npz')
+    from diffmrc.core.caspt2 import caspt2_contracted_e2
+
+    z = np.load(ref_path)
+    h1 = np.asarray(z['h1_mo'])
+    eri = np.asarray(z['eri_mo'])
+    ci = np.asarray(z['ci']).ravel()
+    dets = [int(x) for x in z['dets']]
+    eps = np.asarray(z['eps'], dtype=float)
+    e2, bd = caspt2_contracted_e2(
+        h1, eri, ci, dets, ncore=int(z['ncore']), nact=int(z['nact']),
+        nele=int(z['nele']), eps=eps)
+
+    orca_d = {'Vm1_a': -0.003608944, 'V1_i': -0.001610598}
+    for name, target in orca_d.items():
+        assert bd[name] < -1e-4, (name, bd[name])
+        ratio = bd[name] / target
+        assert 0.98 <= ratio <= 1.05, (name, ratio)
+
+    pins = {'V0_ijab': -0.008358683761, 'Vm1_iab': -0.016639934394,
+            'Vm2_ab': -0.014307658827, 'V1_ija': -0.001900793243,
+            'V2_ij': -0.001798730140, 'V0_ia': -0.022476675009}
+    for name, value in pins.items():
+        assert bd[name] == pytest.approx(value, abs=1e-8), name
+
+    # Default-path total: 0.989 of ORCA CASPT2-D (0.916 before the
+    # change).  The residual sits in V1_ija (1.55x) and V2_ij (0.24x),
+    # which are outside this change (see the development report).
+    ratio = e2 / -0.071520733
+    assert 0.985 <= ratio <= 0.995, ratio
+
+
+def test_co_cas22_three_active_classes_vanish():
+    """CO/6-31G CAS(2,2): the same-reference A/B of the H2O regression,
+    for the second frozen CAS(2,2) anchor.  The TUVA/ITUV contribution is
+    below 1e-8 Eh, so the pre-change total is preserved."""
+    pyscf = pytest.importorskip("pyscf")
+    pytest.importorskip("pyscfad")
+    from pyscf import gto, scf, mcscf
+
+    from diffmrc.core.casci import cs_casci
+    from diffmrc.core.caspt2 import caspt2_contracted_e2
+    from diffmrc.core.nevpt2.impl import canonicalize_jax, cas_dets_for2
+
+    ncore, nact, nele = 6, 2, 2
+    mol = gto.M(atom='C 0 0 0; O 0 0 1.1283', basis='6-31g', verbose=0)
+    mf = scf.RHF(mol).run(verbose=0)
+    mc = mcscf.CASSCF(mf, nact, nele)
+    mc.kernel()
+    C = jnp.asarray(mc.mo_coeff)
+    h1e = jnp.asarray(mol.intor('int1e_kin') + mol.intor('int1e_nuc'))
+    eri = jnp.asarray(mol.intor('int2e', aosym='s1'))
+    h1_mo, eri_mo = _ints(C, h1e, eri)
+    _, ci = cs_casci(h1_mo[:ncore + nact, :ncore + nact],
+                     eri_mo[:ncore + nact, :ncore + nact,
+                            :ncore + nact, :ncore + nact],
+                     ncore=ncore, nact=nact, nele_act=nele, nroots=1,
+                     return_ci=True)
+    C2, ci2, eps = canonicalize_jax(C, h1e, eri, ci, ncore=ncore,
+                                    nact=nact, nele_act=nele)
+    h1_mo2, eri_mo2 = _ints(C2, h1e, eri)
+    dets = cas_dets_for2(ncore, nact, nele)
+
+    total, bd = caspt2_contracted_e2(
+        h1_mo2, eri_mo2, ci2, dets, ncore=ncore, nact=nact, nele=nele,
+        eps=eps)
+    total_off, bd_off = caspt2_contracted_e2(
+        h1_mo2, eri_mo2, ci2, dets, ncore=ncore, nact=nact, nele=nele,
+        eps=eps, nthresh=1e12)
+    assert abs(total - total_off) <= 1e-8
+    assert bd_off['Vm1_a'] == 0.0
+    assert bd_off['V1_i'] == 0.0
+    for name in ('V0_ijab', 'Vm1_iab', 'Vm2_ab', 'V1_ija', 'V2_ij',
+                 'V0_ia'):
+        assert bd[name] == bd_off[name]
 
 
 def test_coupled_h2o_co_ratios_and_coupling_direction():
