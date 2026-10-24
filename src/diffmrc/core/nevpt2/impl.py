@@ -397,7 +397,8 @@ def canonicalize_jax(C, h1e, eri, c_ci, ncore=0, nact=2, nele_act=2, occ2_idx=()
     eig = eigh_cluster_ift if eig_solver == 'lanczos' else eigh_safe
     h1e_mo, eri_mo = stepwise_mo_ints(C, h1e, eri)
     # 1) Active natural orbitals from the one-particle density
-    dm1, _, _ = make_dm123_sf(c_ci, cas_dets_for2(ncore, nact, nele_act), nact, ncore)
+    dm1, _, _ = make_dm123_sf(c_ci, cas_dets_for2(ncore, nact, nele_act),
+                              nact, ncore, max_rank=1)
     w_nat, U_nat = eig(dm1)
     # The reference orders active natural orbitals by descending occupation
     # number, whereas eigh returns ascending eigenvalues, so the columns are
@@ -410,7 +411,8 @@ def canonicalize_jax(C, h1e, eri, c_ci, ncore=0, nact=2, nele_act=2, occ2_idx=()
                         eig_solver=eig_solver, ci_solver=ci_solver)
     # 2) Generalized Fock matrix, F = h + J - K/2, in the ORIGINAL orbital
     #    basis and with the original active density
-    dm1_orig, _, _ = make_dm123_sf(c_ci, cas_dets_for2(ncore, nact, nele_act), nact, ncore)
+    dm1_orig, _, _ = make_dm123_sf(c_ci, cas_dets_for2(ncore, nact, nele_act),
+                                   nact, ncore, max_rank=1)
     D = jnp.zeros((nmo, nmo))
     for i in range(ncore):
         D = D.at[i, i].set(2.0)

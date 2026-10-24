@@ -55,11 +55,17 @@ def rdm2_spin(c_ci, dets, ncas=2):
     return rdm
 
 
-def make_dm123_sf(c_ci, dets, ncas=2, ncore=0):
+def make_dm123_sf(c_ci, dets, ncas=2, ncore=0, max_rank=3):
     """Return dm1, dm2, dm3 in density order, following the FCI3pdm_kern_sf convention.
 
     With ncore > 0 the first 2*ncore spin orbitals are a fully occupied core and
     the active space spans MOs ncore through ncore + ncas - 1.
+
+    ``max_rank`` bounds the highest density matrix that is built.  ``1``
+    returns ``(dm1, None, None)`` and skips the dm2/dm3 contractions, whose
+    cost grows as ``ncas**6 * ndet**4`` in the dm3 loop; canonicalization
+    and the property drivers consume only dm1.  The default 3 keeps the
+    previous behaviour.
 
     Vectorization: a double loop over determinant pairs and spin-orbital pairs
     would perform about 1.2e8 indexed updates for CAS(6,6) with 924
@@ -124,6 +130,8 @@ def make_dm123_sf(c_ci, dets, ncas=2, ncore=0):
             dm1 = dm1.at[p, q].set(
                 jnp.einsum("i,ij,j->", c_ci, slice_M(2 * p, 2 * q), c_ci)
                 + jnp.einsum("i,ij,j->", c_ci, slice_M(2 * p + 1, 2 * q + 1), c_ci))
+    if max_rank < 2:
+        return dm1, None, None
     # ---- dm2 and dm3 in density order; the contraction formulas are as usual ----
     dm2 = jnp.zeros((ncas, ncas, ncas, ncas))
     for p in range(ncas):
@@ -137,6 +145,8 @@ def make_dm123_sf(c_ci, dets, ncas=2, ncore=0):
                             Mr = slice_M(2 * r + tau, 2 * s + tau)
                             val = val + jnp.einsum("i,ik,kj,j->", c_ci, Mp, Mr, c_ci)
                     dm2 = dm2.at[p, q, r, s].set(val)
+    if max_rank < 3:
+        return dm1, dm2, None
     dm3 = jnp.zeros((ncas,) * 6)
     for p in range(ncas):
         for q in range(ncas):
