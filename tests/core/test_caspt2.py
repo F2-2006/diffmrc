@@ -447,8 +447,9 @@ def test_n2_tuva_ituv_classes_match_orca_d():
     """N2/6-31G CAS(6,6): the TUVA (Vm1_a) and ITUV (V1_i) classes are
     nonzero and reproduce the ORCA CASPT2-D class table.
 
-    Reference chain: ``n2_ref.npz`` (Wave 11 semicanonical reference; the
-    in-house CASSCF and ORCA agree to 7e-10 Eh).  ORCA CASPT2-D values
+    Reference chain: ``n2_ref.npz`` (a previously generated semicanonical
+    reference; the in-house CASSCF and ORCA agree to 7e-10 Eh).  ORCA
+    CASPT2-D values
     from ``orca_n2_classes.json``: Vm1_a -0.003608944, V1_i -0.001610598.
     The declared band is the H1 acceptance range; the per-function sum
     overcounts these classes by 3.5x / 3.1x and is not a valid reading.
