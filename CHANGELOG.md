@@ -1,5 +1,24 @@
 # Changelog
 
+## 0.3.2 (2026-10-25)
+
+### Changed
+
+- CASPT2: `Vm1_a` (TUVA) and `V1_i` (ITUV) are now three-active-index
+  classes, `E(a,t)E(u,v)` and `E(t,i)E(u,v)`, instead of single
+  excitations. The contracted energy uses an orthonormal class basis
+  (H1) with a canonical basis inside degenerate blocks; the JAX path uses
+  `eigh_safe`. N2/6-31G CAS(6,6) default-path ratio to ORCA CASPT2-D moves
+  from 0.916 to 0.989; H2O/CO CAS(2,2) anchors are unchanged.
+- The three-center CASPT2 path uses the same class set and H1 treatment.
+
+### Known limitations
+
+- N2 default-path residual: `V1_ija` 1.55 and `V2_ij` 0.24 relative to
+  ORCA CASPT2-D, from the class-space definition and the `(u,u)` active-row
+  approximation. The fully coupled path totals 1.023 on N2; its O(nfn^2)
+  Python assembly is not used by the public entry point.
+
 ## 0.3.1 (2026-10-25)
 
 ### Added

@@ -39,6 +39,10 @@ manual/         Tutorial and Manual (LaTeX sources and built PDFs)
 
 ## What is new in 0.3.x
 
+- CASPT2 TUVA/ITUV classes (0.3.2): `Vm1_a` and `V1_i` are three-active-index
+  functions with an orthonormal class basis; N2/6-31G CAS(6,6) default ratio
+  reaches 0.989 against ORCA CASPT2-D. Remaining class-space residuals are
+  documented in the Known limitations section.
 - `core.caspt2_three_center` (0.3.1): three-center contracted CASPT2 using the
   same `cross - direct` VM convention as the materialized path; the two paths
   agree to machine precision on H2O/CO.
@@ -345,7 +349,10 @@ classes retain the release value mask.
 *CASPT2 layers.* The coupled full-Fock path is a NumPy value-layer
 implementation. The differentiable path is the diagonal-Fock approximation
 (CASPT2-D level); its residual against the reference is documented in the
-manual and in the tests.
+manual and in the tests. The `V1_ija` class and the default-path `(u,u)`
+active-row approximation still differ from the reference for active spaces
+larger than CAS(2,2); the N2/6-31G CAS(6,6) default-path total is 0.989
+against ORCA CASPT2-D, and the coupled path totals 1.023.
 
 *SOMF for ECP.* The valence-level ECP SOMF operator is a prototype. There is no
 unique ECP SOMF definition, and the valence-only construction can double count

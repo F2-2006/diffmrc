@@ -8,7 +8,7 @@ pyscf), so ``diffmrc --check`` works without the numerical kernel
 installed; the heavy modules load on first attribute access.
 """
 
-__version__ = "0.3.1"
+__version__ = "0.3.2"
 
 __all__ = ['run_from_geometry', 'vertical_excitations_from_geometry',
            'RunResult', 'main']
