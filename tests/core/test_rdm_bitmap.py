@@ -31,6 +31,26 @@ def test_dm1_trace_equals_active_electrons():
     assert abs(float(jnp.trace(dm1)) - 4.0) < 1e-10
 
 
+def test_max_rank_skips_higher_rdms_and_preserves_dm1():
+    """canonicalize_jax consumes only dm1.
+
+    The dm3 contraction of make_dm123_sf scales as ncas**6 * ndet**4 and
+    dominates the canonicalization at CAS(6,6).  max_rank=1 must skip it
+    while leaving dm1 bit-identical; max_rank=2 keeps dm2 and skips dm3.
+    """
+    dets = cas_dets_for2(0, 2, 2)
+    ci = _norm_ci(len(dets))
+    dm1_full, dm2_full, dm3_full = make_dm123_sf(ci, dets, 2, 0)
+    dm1_one, dm2_one, dm3_one = make_dm123_sf(ci, dets, 2, 0, max_rank=1)
+    dm1_two, dm2_two, dm3_two = make_dm123_sf(ci, dets, 2, 0, max_rank=2)
+    assert np.array_equal(np.asarray(dm1_full), np.asarray(dm1_one))
+    assert np.array_equal(np.asarray(dm1_full), np.asarray(dm1_two))
+    assert dm2_one is None and dm3_one is None
+    assert dm2_two is not None and dm3_two is None
+    assert np.allclose(np.asarray(dm2_full), np.asarray(dm2_two), atol=0,
+                       rtol=0)
+
+
 def test_large_nso_no_overflow():
     # ncore=100 builds bitmaps of 208 bits; the raw integers exceed int64
     # (asserted below), and before the fix make_dm123_sf raised
