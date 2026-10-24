@@ -1,5 +1,25 @@
 # Changelog
 
+## 0.3.1 (2026-10-25)
+
+### Added
+
+- `core.caspt2_three_center`: three-center contracted CASPT2 with the same
+  `cross - direct` VM convention as the materialized path; agrees with the
+  materialized RI path to machine precision on H2O/CO.
+- `scripts/caspt2_n2_validation.py` and `scripts/caspt2_sparse_assembly.py`:
+  N2/6-31G CAS(6,6) validation driver and sparse assembly.
+- `experiments/basis_set_gradient_validation.py` and stage runners: basis-set
+  independence check for the relaxed NEVPT2 gradient (H2O/cc-pVDZ).
+- `tests/driver/test_ecp_gradient.py`: pins the ECP core-Hamiltonian nuclear
+  gradient.
+
+### Changed
+
+- `make_dm123_sf` accepts `max_rank`; `canonicalize_jax` requests only the
+  one-particle density, avoiding the `ncas**6` dm3 contraction at large
+  active spaces. Default behaviour is unchanged.
+
 ## 0.3.0 (2026-10-23)
 
 ### Added

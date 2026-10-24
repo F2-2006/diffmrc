@@ -37,8 +37,13 @@ examples/       small runnable examples for the public interfaces
 manual/         Tutorial and Manual (LaTeX sources and built PDFs)
 ```
 
-## What is new in 0.3.0
+## What is new in 0.3.x
 
+- `core.caspt2_three_center` (0.3.1): three-center contracted CASPT2 using the
+  same `cross - direct` VM convention as the materialized path; the two paths
+  agree to machine precision on H2O/CO.
+- Validation drivers (0.3.1): N2/6-31G CAS(6,6) CASPT2, ECP core-Hamiltonian
+  gradient test, and an H2O/cc-pVDZ NEVPT2 gradient basis-set check.
 - `driver.nevpt2_zvector`: relaxed NEVPT2 nuclear gradients. The near-zero
   `Si` channels are evaluated in exact algebraic form, displaced orbital
   references are aligned blockwise, and the response term is supplied by the
