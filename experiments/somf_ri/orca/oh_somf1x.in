@@ -1,0 +1,20 @@
+! RHF 6-31G
+%pal nprocs 4 end
+%casscf
+  nel 7
+  norb 6
+  mult 2
+  nroots 2
+  rel
+    dosoc true
+  end
+end
+%rel
+  SOCType 3
+  SOCFlags 1,2,3,0
+  SOCMaxCenter 4
+end
+* xyz 0 2
+O 0.0 0.0 0.0
+H 0.0 0.0 0.969678
+*
