@@ -161,6 +161,30 @@ def test_exact_k_gradient_matches_fd(water):
     assert np.abs(g.sum(axis=0)).max() < 1e-8
 
 
+def test_exact_k_gradient_spin_matches_fd(water):
+    """Spin-summed exchange: ``-1/2`` per spin density, checked by FD.
+
+    ``exact_k_energy`` carries the closed-shell ``-1/4 Tr(D K)``
+    convention, so the open-shell energy built from the same two spin
+    densities is ``2 * (E_a + E_b)``.  A mismatched prefactor here is
+    exactly the factor-of-two error the open-shell SCF gradient would
+    inherit, so the convention is tested on its own.
+    """
+    mol, _, c = water
+    nocc = c.shape[1]
+    occ_a = np.ones(nocc)
+    occ_b = np.ones(nocc)
+    occ_b[-1] = 0.0
+
+    def e_spin(m):
+        return 2.0 * (rs.exact_k_energy(m, c, occ=occ_a)
+                      + rs.exact_k_energy(m, c, occ=occ_b))
+
+    g = rs.exact_k_gradient_spin(mol, c, occ_alpha=occ_a, occ_beta=occ_b)
+    g_fd = _fd_gradient(mol, e_spin)
+    assert _rel(g, g_fd) < 1e-6
+
+
 def test_rijonx_energy_and_gradient(water, co):
     for mol, mf, c in (water, co):
         e = rs.rijonx_energy(mol, c, aux=AUX)

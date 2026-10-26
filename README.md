@@ -60,8 +60,9 @@ manual/         Tutorial and Manual (LaTeX sources and built PDFs)
 - `core.somf_ecp`: a valence-level spin-orbit mean-field operator for
   effective-core-potential calculations, with gradient prototypes.
 - `driver.ri_scf` and `driver.ri_scf_driver`: a RIJONX SCF loop
-  (RI-J Coulomb plus exact exchange) on top of pyscfad RHF/ROHF, including the
-  SCF-level overlap-derivative term.
+  (RI-J Coulomb plus exact exchange) on top of pyscfad RHF/ROHF/UHF, with
+  explicit analytic nuclear gradients for closed-shell, ROHF and UHF
+  references, including the SCF-level overlap-derivative term.
 - `core.x2c_casscf_df`: scalar (spin-free) DF-X2C CASSCF energies, analytic
   nuclear gradients, and state-averaged response.
 
@@ -276,6 +277,33 @@ solve.**
 The implicit route is the faster of the two and scales better in the number of
 rotation parameters; the unrolled route serves as its independent check.
 
+*Blocked and matrix-free assembly.* The vectorized implicit route pushes every
+tangent through the graph at once; that broadcast, not the $n_\mathrm{par}
+\times n_\mathrm{par}$ matrix, sets the memory cost (402 GB at
+$n_\mathrm{par}\approx500$, recorded in the optimizer). Two routes remove it.
+`implicit_hessian_columnwise` takes one tangent per `jax.jvp` and assembles the
+same $H_{\theta\theta}$, $M$ and $H_{RR}$; `implicit_hessian_hvp` never forms
+them and solves the response equation with matrix-free LSMR products. A
+fixed-geometry theta-only energy (`make_theta_energy_fn`) removes the SCF from
+the $H_{\theta\theta}$ graph, and the LSMR products are jitted. Measured on
+H2O/6-31G CAS(2,2) ($n_\mathrm{par}=50$) and CO/6-31G CAS(2,2)
+($n_\mathrm{par}=92$):
+
+| system | route | wall / s | peak RSS / GiB | max difference from vectorized |
+|---|---|---|---|---|
+| H2O | vectorized | 103 | 3.68 | reference |
+| H2O | columnwise | 153 | 2.51 | $5\times10^{-15}$ |
+| H2O | matrix-free | 170 | 2.42 | $6\times10^{-12}$ |
+| CO | vectorized | 121 | 4.98 | reference |
+| CO | columnwise | 199 | 3.25 | $3\times10^{-15}$ |
+| CO | matrix-free | 190 | 2.97 | $8\times10^{-12}$ |
+
+The unrolled route with three Newton steps reproduces the vectorized Hessian on
+LiH/STO-3G ($n_\mathrm{par}=11$) to $6\times10^{-14}$ in 127 s at 3.05 GiB; on
+H2O/6-31G ($n_\mathrm{par}=50$) the same route was terminated by the 20 GiB
+cgroup limit before producing a Hessian, while the implicit routes stayed
+below 5 GiB.
+
 ## Verification
 
 Two checks used throughout require no external reference and are exact rather
@@ -340,11 +368,21 @@ is to use the stability of the correction between independent runs together
 with an orbital-gradient threshold; a convergence criterion tied to the
 correction itself remains open.
 
-*Second-derivative cost.* The implicit route requires the orbital Hessian in
-memory and does not exploit sparsity; the unrolled route scales with the number
-of iterations. Neither is competitive with analytic second derivatives for
-single-reference methods. Sparse or analytic second derivatives are the
-direction of work.
+*Second-derivative cost.* The vectorized implicit route's memory is set by the
+tangent broadcast, and the unrolled route scales with the number of iterations.
+Blocked and matrix-free implicit routes are now available: the blocked route
+reproduces the vectorized Hessian to $5\times10^{-15}$ on H2O and
+$3\times10^{-15}$ on CO while using 32% and 35% less peak memory; the
+matrix-free route reproduces it to $6\times10^{-12}$ and $8\times10^{-12}$
+while using 34% and 40% less. The matrix-free route is 1.6 times slower
+than the vectorized one, and its LSMR solve has to be run past the previous
+iteration cap to converge (the cap is now $8n_\mathrm{par}$). The unrolled
+route with three Newton steps matches the implicit route to
+$6\times10^{-14}$ on LiH/STO-3G ($n_\mathrm{par}=11$, 3.05 GiB) but exceeds
+20 GiB on H2O/6-31G CAS(2,2) ($n_\mathrm{par}=50$) and did not produce a
+Hessian. Analytic second derivatives for the single-reference RIJONX surface,
+and a matrix-free solver that deflates the near-null orbital direction without
+an iteration cap, remain open.
 
 *Relaxed NEVPT2 gradient scope.* The relaxed-path nuclear gradient is validated
 on two closed-shell, frozen-core systems (H2O/6-31G and LiH/6-31G). Open-shell,
@@ -371,8 +409,12 @@ correction remain open; it is not a production absolute-SOC method.
 Complex two-component CI, Kramers-restricted response, and ECP support remain
 open.
 
-*RI SCF.* The RIJONX driver keeps exact exchange dense, and analytic SCF
-gradients for open-shell references remain open.
+*RI SCF.* The RIJONX driver keeps exact exchange dense: the RI-J factors
+remove the Coulomb four-center work, not the exchange four-center work.
+Explicit analytic gradients now cover RHF, ROHF and UHF references and are
+checked against implicit differentiation and central differences; RI-JK and
+RIJCOSX remain out of scope, and the exact-exchange gradient is validation
+scale because it still forms the dense derivative tensors.
 
 ## Reproducing the paper
 
@@ -387,6 +429,9 @@ Scripts in `experiments/` correspond to the results section by section:
 | `orbital_response_unrolled.py` | response term by unrolled iteration |
 | `orbital_response_generalize.py` | unrolled route on CO and N₂ |
 | `orbital_response_implicit.py` | response term by implicit differentiation |
+| `hessian_cost_benchmark.py` | Hessian cost: vectorized, blocked and matrix-free routes (time, peak RSS, accuracy) |
+| `probe_rijonx_open_shell_explicit.py` | ROHF/UHF RIJONX gradients against implicit differentiation and finite differences |
+| `probe_rijonx_open_shell_ecp.py` | open-shell RIJONX gradient with an effective core potential |
 | `hessian_to_frequencies.py` | harmonic frequencies from the mass-weighted Hessian |
 | `frequencies_basis_active_space.py` | frequency dependence on basis set and active space |
 | `collect_frequency_results.py` | frequency summary |

@@ -6,7 +6,9 @@ jax = pytest.importorskip("jax")
 jax.config.update("jax_enable_x64", True)
 import jax.numpy as jnp  # noqa: E402
 
-from diffmrc.core.hessian import ImplicitHessianResult, implicit_hessian  # noqa: E402
+from diffmrc.core.hessian import (  # noqa: E402
+    ImplicitHessianResult, implicit_hessian, implicit_hessian_columnwise,
+    implicit_hessian_hvp)
 
 
 def test_result_exposes_the_response_term():
@@ -27,11 +29,25 @@ def test_rcond_is_recorded_in_the_result():
     assert 'rcond' in ImplicitHessianResult.__dataclass_fields__
 
 
+@jax.tree_util.register_pytree_node_class
 class _ScalarMole:
-    """Stand-in whose 'coordinates' are a single differentiable number."""
+    """Stand-in whose 'coordinates' are a single differentiable number.
+
+    Registered as a pytree so the blocked and matrix-free routes can
+    push a tangent through it exactly as they do through a pyscfad Mole.
+    """
 
     def __init__(self, value):
         self.coords = jnp.asarray([float(value)])
+
+    def tree_flatten(self):
+        return (self.coords,), None
+
+    @classmethod
+    def tree_unflatten(cls, aux, children):
+        new = cls(0.0)
+        new.coords = children[0]
+        return new
 
     def replace(self, coords):
         new = _ScalarMole(0.0)
@@ -173,3 +189,109 @@ def test_implicit_hessian_requires_a_mole_and_a_joint_energy():
     params = list(inspect.signature(implicit_hessian).parameters)
     assert params[:3] == ['mol', 'theta', 'E_joint']
     assert 'rcond' in params
+
+
+# ---------------------------------------------------------------------------
+# Blocked and matrix-free routes
+# ---------------------------------------------------------------------------
+def _E_scalar_mole(m, t):
+    """The analytic surrogate with the joint-energy argument order."""
+    x = m.coords[0]
+    return (t[0] - x) ** 2 + x ** 2
+
+
+def test_columnwise_assembly_reproduces_the_analytic_hessian():
+    """Column-by-column traversal is the same assembly, not an approximation.
+
+    The closed-form surrogate has H_tt = 2, M = -2, H_RR = 4 and
+    H_total = 2.  A blocked route that changed any of those would be
+    detectable here without a molecular calculation.
+    """
+    th = jnp.asarray([3.0])
+    x0 = _ScalarMole(3.0)
+    res = implicit_hessian_columnwise(
+        x0, th, _E_scalar_mole,
+        tangent_fn=lambda m, v: _ScalarMole(float(v[0])))
+
+    assert res.H_tt[0, 0] == pytest.approx(2.0, abs=1e-12)
+    assert res.mixed[0, 0] == pytest.approx(-2.0, abs=1e-12)
+    assert res.H_RR[0, 0] == pytest.approx(4.0, abs=1e-12)
+    assert res.H_total[0, 0] == pytest.approx(2.0, abs=1e-12)
+
+
+def test_hvp_route_reproduces_the_analytic_hessian():
+    """The matrix-free response solve is exact on a nonsingular surrogate."""
+    th = jnp.asarray([3.0])
+    x0 = _ScalarMole(3.0)
+    res = implicit_hessian_hvp(
+        x0, th, _E_scalar_mole,
+        tangent_fn=lambda m, v: _ScalarMole(float(v[0])),
+        atol=1e-13, btol=1e-13)
+
+    assert res.H_total[0, 0] == pytest.approx(2.0, abs=1e-9)
+    assert res.H_tt_diagonal[0] == pytest.approx(2.0, abs=1e-12)
+    assert res.lsmr_istop[0] in (0, 1, 2)
+
+
+def _lih_sto3g():
+    """A small pyscfad system that is cheap enough for a unit test.
+
+    H2O/STO-3G already costs about 8 minutes for the three routes on
+    the reference server; LiH has 11 orbital parameters and 6 geometric
+    directions and exercises the same code paths.
+    """
+    pytest.importorskip('pyscfad')
+    from pyscfad import gto, scf
+
+    from diffmrc.core.hessian import (make_joint_energy_fn,
+                                      make_theta_energy_fn)
+    from diffmrc.core.orblib import orbital_pairs
+
+    mol = gto.Mole()
+    mol.atom = 'Li 0 0 0; H 0 0 1.6'
+    mol.basis = 'sto-3g'
+    mol.verbose = 0
+    mol.build()
+    nmo = mol.nao_nr()
+    ncore, nact, nele = 1, 2, 2
+    pairs = orbital_pairs(ncore, nact, nmo, include_cv=True)
+    E_joint = make_joint_energy_fn(ncore, nact, nele, nmo, pairs, scf,
+                                   scf=scf.RHF)
+    E_tt = make_theta_energy_fn(mol, ncore, nact, nele, nmo, pairs, scf,
+                                scf=scf.RHF)
+    return mol, jnp.zeros(len(pairs)), E_joint, E_tt
+
+
+def test_columnwise_matches_vectorized_on_a_molecular_energy():
+    """LiH/STO-3G: the two traversal orders produce the same matrices."""
+    mol, theta, E_joint, E_tt = _lih_sto3g()
+    dense = implicit_hessian(mol, theta, E_joint)
+    col = implicit_hessian_columnwise(mol, theta, E_joint, E_tt=E_tt)
+    assert np.abs(col.H_tt - dense.H_tt).max() < 1e-10
+    assert np.abs(col.mixed - dense.mixed).max() < 1e-10
+    assert np.abs(col.H_RR - dense.H_RR).max() < 1e-10
+    assert np.abs(col.H_total - dense.H_total).max() < 1e-10
+
+
+def test_hvp_matches_the_dense_assembly_and_is_symmetric():
+    """LiH/STO-3G: matrix-free columns and HVP symmetry.
+
+    The system is small enough to compare every column against the
+    dense assembly; the symmetry check uses two random directions so it
+    also exercises the transpose action of M.
+    """
+    mol, theta, E_joint, E_tt = _lih_sto3g()
+    dense = implicit_hessian(mol, theta, E_joint)
+    hvp = implicit_hessian_hvp(mol, theta, E_joint, E_tt=E_tt,
+                              atol=1e-9, btol=1e-9)
+    assert np.abs(hvp.H_total - dense.H_total).max() < 1e-6
+    assert np.abs(hvp.H_tt_diagonal - np.diag(dense.H_tt)).max() < 1e-8
+
+    rng = np.random.default_rng(20261026)
+    n = hvp.n_geom
+    u = rng.normal(size=n)
+    v = rng.normal(size=n)
+    hu = hvp.hvp(u)
+    hv = hvp.hvp(v)
+    assert abs(float(u @ hv) - float(v @ hu)) < 1e-5 * max(
+        1.0, float(np.abs(u @ hv)))
