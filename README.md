@@ -16,9 +16,9 @@ All arithmetic is double precision.
 > a finished library. Interfaces may change without notice, the test coverage is
 > partial, and the numerical behaviour of the orbital-optimization and
 > perturbation layers depends on convergence settings that are described in the
-> Known limitations section rather than enforced by the code. Several of the
-> limitations listed there are properties of the method family and are not
-> expected to be removed by further development of this package. Use it for
+> Open problems section rather than enforced by the code. Several of the open
+> problems listed there are properties of the method family and are not
+> expected to be resolved by further development of this package. Use it for
 > research, check the convergence diagnostics it reports, and do not rely on it
 > as a black box.
 
@@ -42,7 +42,7 @@ manual/         Tutorial and Manual (LaTeX sources and built PDFs)
 - CASPT2 TUVA/ITUV classes (0.3.2): `Vm1_a` and `V1_i` are three-active-index
   functions with an orthonormal class basis; N2/6-31G CAS(6,6) default ratio
   reaches 0.989 against ORCA CASPT2-D. Remaining class-space residuals are
-  documented in the Known limitations section.
+  documented in the Open problems section.
 - `core.caspt2_three_center` (0.3.1): three-center contracted CASPT2 using the
   same `cross - direct` VM convention as the materialized path; the two paths
   agree to machine precision on H2O/CO.
@@ -308,10 +308,13 @@ construction also carries its own branch certificate (the displaced energies'
 central difference reproduces the analytic base gradient to 1.0e-5 relative,
 while warm-started solutions off the continuous branch fail that test).
 
-## Known limitations
+## Open problems
 
-*Full diagonalization* in the CI step limits the active-space size. Larger
-spaces require a differentiable iterative eigensolver.
+The entries below are open problems, not permanent exclusions. Each states the
+current status and, where known, the direction of work.
+
+*Active-space size.* Full diagonalization in the CI step limits the active-space
+size. A differentiable iterative eigensolver is the route to larger spaces.
 
 *Degenerate pairs at a stationary point.* The cluster tolerance of the
 eigensolver must sit inside the measured gap between the floating-point noise
@@ -321,49 +324,55 @@ that splits symmetry-degenerate pairs at a rotated stationary point (1e-8 to
 and the second derivative to a bare inverse gap; one above the physical gaps
 clusters distinct states. The window measured here spans 1e-5 to 1e-2, and the
 rule has no admissible value when a physical gap falls inside the noise band —
-the fallback for that case is the decomposition-free Lanczos kernel.
+the current fallback is the decomposition-free Lanczos kernel. A tolerance rule
+that removes this ambiguity remains open.
 
-*Multiple stationary points.* The CASSCF energy is non-convex in the orbital
+*Stationary-point selection.* The CASSCF energy is non-convex in the orbital
 parameters; different starting points can reach different stationary points,
-and the selection is not stable even at fixed settings. Report a stationarity
-certificate and the stationary-point spread alongside any multireference
-number.
+and the selection is not stable even at fixed settings. Current practice is to
+report a stationarity certificate and the stationary-point spread alongside any
+multireference number; a deterministic selection rule remains open.
 
-*Convergence of the perturbation layer.* NEVPT2 depends on the orbitals more
+*Perturbation-layer convergence.* NEVPT2 depends on the orbitals more
 sensitively than the CASSCF energy does, so energy-based convergence criteria
-are insufficient when the target quantity is the correction. Use the stability
-of the correction between independent runs together with an orbital-gradient
-threshold.
+are insufficient when the target quantity is the correction. Current practice
+is to use the stability of the correction between independent runs together
+with an orbital-gradient threshold; a convergence criterion tied to the
+correction itself remains open.
 
-*Cost of second derivatives.* The implicit route requires the orbital Hessian in
+*Second-derivative cost.* The implicit route requires the orbital Hessian in
 memory and does not exploit sparsity; the unrolled route scales with the number
 of iterations. Neither is competitive with analytic second derivatives for
-single-reference methods.
+single-reference methods. Sparse or analytic second derivatives are the
+direction of work.
 
-*Scope of the relaxed NEVPT2 gradient.* The relaxed-path nuclear gradient is
-validated on two closed-shell, frozen-core systems (H2O/6-31G and LiH/6-31G).
-Open-shell, ECP, f-block and large-basis systems are not yet covered. The exact
-near-zero treatment applies to the `Si` class only; the other four contraction
-classes retain the release value mask.
+*Relaxed NEVPT2 gradient scope.* The relaxed-path nuclear gradient is validated
+on two closed-shell, frozen-core systems (H2O/6-31G and LiH/6-31G). Open-shell,
+ECP, f-block and large-basis systems are not yet covered. The exact near-zero
+treatment applies to the `Si` class only; the other four contraction classes
+retain the release value mask.
 
-*CASPT2 layers.* The coupled full-Fock path is a NumPy value-layer
+*CASPT2 residual.* The coupled full-Fock path is a NumPy value-layer
 implementation. The differentiable path is the diagonal-Fock approximation
 (CASPT2-D level); its residual against the reference is documented in the
 manual and in the tests. The `V1_ija` class and the default-path `(u,u)`
 active-row approximation still differ from the reference for active spaces
 larger than CAS(2,2); the N2/6-31G CAS(6,6) default-path total is 0.989
-against ORCA CASPT2-D, and the coupled path totals 1.023.
+against ORCA CASPT2-D, and the coupled path totals 1.023. Closing the
+class-space residual and extending the coupled path to the differentiable
+layer remain open.
 
-*SOMF for ECP.* The valence-level ECP SOMF operator is a prototype. There is no
+*ECP SOMF.* The valence-level ECP SOMF operator is a prototype. There is no
 unique ECP SOMF definition, and the valence-only construction can double count
-core spin-orbit contributions. It is not a production absolute-SOC method.
+core spin-orbit contributions. A unique definition and a double-counting
+correction remain open; it is not a production absolute-SOC method.
 
-*DF-X2C.* The differentiable X2C-CASSCF chain is scalar (spin-free). Complex
-two-component CI, Kramers-restricted response, and ECP support are not
-implemented.
+*Two-component X2C.* The differentiable X2C-CASSCF chain is scalar (spin-free).
+Complex two-component CI, Kramers-restricted response, and ECP support remain
+open.
 
 *RI SCF.* The RIJONX driver keeps exact exchange dense, and analytic SCF
-gradients for open-shell references are not implemented.
+gradients for open-shell references remain open.
 
 ## Reproducing the paper
 
