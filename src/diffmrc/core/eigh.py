@@ -52,6 +52,16 @@ functionals too, and for eigh, eigvalsh and the two rules alike -- because
 the outer differentiation mode re-enters the primal decomposition and the
 raw 1/diff returns.
 
+CONTAINER: ``jnp.linalg.eigh`` returns the named tuple ``EighResult`` in
+every jax version tested here (0.6.2, 0.10.2, 0.11.2); older versions may
+return a plain tuple. A ``custom_jvp`` rule must return its tangent in the
+same pytree container as the primal, so a hard-coded ``(dw, du)`` tuple
+raises ``TypeError`` under ``grad(jit(f))`` (the outer trace mixes with the
+traced primal) while ``eager`` and ``jit(grad(f))`` keep working
+(reproduced on both 0.6.2 and 0.11.2 on 2026-10-26). Both rules below
+rebuild the tangent from the actual primal output's tree structure, so the
+same code works for either container.
+
 The explicit second-order rule is ``eigh_cluster_ift`` below: it removes
 the decomposition from the differentiated path entirely (stopped primal +
 implicit per-column correction), so the second derivative is self-
@@ -90,6 +100,7 @@ USED BY
 """
 import json as _json
 import os as _os
+from collections import namedtuple
 
 import jax
 jax.config.update("jax_enable_x64", True)
@@ -106,7 +117,8 @@ from jax import numpy as jnp
 import numpy as _np
 
 __all__ = ['eigh_safe', 'make_eigh_mask', 'eigh_mask', 'eigh_cluster_ift',
-           'eigh_soft2', 'set_trace_sink']
+           'eigh_soft2', 'set_trace_sink', 'cluster_tolerance',
+           'ClusterDecision', 'lowest_pair_auto']
 
 # Diagnostic hook (added 2026-10-10 after the t397 lesson: the
 # cluster-member scan had to monkey-patch this frozen module from
@@ -147,6 +159,178 @@ def _trace_call(name, a):
         pass
 
 
+def _primal_tangent(out, dw, du):
+    """Tangent with the same pytree structure as an eigh primal output.
+
+    The container returned by ``jnp.linalg.eigh`` is not fixed across jax
+    versions: the tested versions (0.6.2, 0.10.2, 0.11.2) return the named
+    tuple ``EighResult``, while older versions may return a plain tuple of
+    ``(eigenvalues, eigenvectors)``. A ``custom_jvp`` rule must return its
+    tangent in the *same* container as the primal, so the structure is
+    taken from the actual primal output instead of being hard-coded.
+    Measured on jax 0.6.2 and 0.11.2: a plain ``(dw, du)`` tangent raises
+    ``TypeError: Custom JVP rule ... must produce ... the same
+    container/pytree structure`` as soon as the function is traced inside
+    ``jit`` and differentiated from the outside (``grad(jit(f))``);
+    ``eager`` and ``jit(grad(f))`` hid the mismatch because neither path
+    mixes the outer trace with a traced primal.
+    """
+    return jax.tree_util.tree_unflatten(
+        jax.tree_util.tree_structure(out), [dw, du])
+
+
+# ---------------------------------------------------------------------------
+# Cluster-tolerance decision rule.
+#
+# The measured band (CO/6-31G and N2/cc-pVDZ at their stationary points,
+# t280/t286/t287; recorded in SESSION_LOG_APPEND_20260923b.md section 21):
+# symmetry pairs that are bit-exact at theta = 0 split by floating-point
+# noise at theta* to 1.9e-8 .. 1.155e-5, while the smallest physical gap of
+# the same spectra is 1.9e-2. The admissible tolerance is therefore a band,
+# not a number, and it has to be derived from the spectrum in hand.
+#
+# The rule below makes the two-scale assumption explicit: gaps at or below
+# ``noise_scale`` are numerical, gaps above it are physical. The tolerance
+# is the geometric mean of the two scales, so it sits at the centre of the
+# log band and stays clear of both edges; the ratio test rejects spectra in
+# which the two scales are not separated, which is exactly the case the
+# README describes as having no admissible tolerance (fallback: the
+# decomposition-free Lanczos kernel). With the default relative noise
+# scale (3e-5 of max|w|), the recorded CO spectra give tol = 1.26e-3
+# (1-RDM block) and 7.55e-4 (Fock virtual block on a unit scale); supplying
+# the measured noise 1.155e-5 gives 4.69e-4 for the Fock block. All are
+# inside the measured window 1e-5 .. 1e-2 and inside the range where t286
+# measured the chain-level AD-vs-FD residual to be 2.29e-4 at three
+# different tolerances.
+#
+# The rule is a decision helper, not a differentiable function: it converts
+# the spectrum to NumPy and returns a Python-level mode string.
+# ---------------------------------------------------------------------------
+
+# Relative numerical-noise scale. The measured upper edge of the split band
+# is 1.155e-5 on spectra whose largest magnitude is order 1-10. The default
+# has to keep the floor above that edge even for a unit-scale spectrum, so
+# it is set at 3e-5: on the recorded CO spectra this gives floor 5.9e-5
+# (1-RDM block, scale 1.98) and >= 3e-5 (Fock block), both above the
+# measured 1.155e-5 and both three orders below the physical gaps.
+_CLUSTER_REL_NOISE = 3e-5
+# Required separation between the noise scale and the smallest physical
+# gap. The recorded spectra have a ratio of 1.6e3 (dm1: 4.6e-8 vs 2.7e-2)
+# to 5.7e3 (Fock virtual: 3.4e-6 vs 1.9e-2).
+_CLUSTER_MIN_RATIO = 100.0
+
+ClusterDecision = namedtuple(
+    'ClusterDecision', ['mode', 'tol', 'noise_floor', 'physical_min',
+                        'ratio', 'n_noise_gaps', 'n_physical_gaps'])
+
+
+def cluster_tolerance(w, noise_scale=None, rel_noise=_CLUSTER_REL_NOISE,
+                      min_ratio=_CLUSTER_MIN_RATIO):
+    """Choose the degenerate-cluster tolerance from a spectrum.
+
+    Parameters
+    ----------
+    w : array_like
+        Eigenvalues (any order).
+    noise_scale : float or None
+        Absolute numerical-noise scale. When omitted it is estimated as
+        ``rel_noise * max(1, max|w|)``. Supply a measured value when one is
+        available (e.g. the split of a symmetry pair under a known
+        perturbation).
+    rel_noise, min_ratio : float
+        Defaults documented above.
+
+    Returns
+    -------
+    ClusterDecision
+        ``mode`` is one of
+
+        ``'none'``
+            No gap lies at or below the noise floor: the spectrum has no
+            numerical cluster, ``tol = 0`` (the freeze is disabled).
+        ``'cluster'``
+            A noise cluster exists and is separated from the physical
+            spectrum by at least ``min_ratio``: ``tol`` is the geometric
+            mean of the noise floor and the smallest physical gap.
+        ``'cluster_all'``
+            Every gap lies at or below the noise floor: the whole spectrum
+            is one numerical cluster and ``tol`` is the noise floor.
+        ``'lanczos'``
+            The smallest physical gap is less than ``min_ratio`` times the
+            noise floor: no tolerance separates the two scales. The caller
+            must use a decomposition-free kernel on the pair it needs
+            (:func:`lowest_pair_auto` does this).
+
+    The two-scale assumption cannot be tested from one spectrum: a
+    *physical* gap that falls below the noise floor is indistinguishable
+    from numerical splitting. That is the residual open case of the
+    README, and it is why the fallback exists rather than a lower
+    tolerance.
+    """
+    w = _np.sort(_np.asarray(w, dtype=float).reshape(-1))
+    n = w.size
+    if n < 2:
+        return ClusterDecision('none', 0.0, 0.0, float('inf'), float('inf'),
+                               0, 0)
+    gaps = _np.diff(w)
+    scale = max(1.0, float(_np.max(_np.abs(w))))
+    floor = (float(noise_scale) if noise_scale is not None
+             else float(rel_noise) * scale)
+    below = gaps <= floor
+    above = ~below
+    n_noise = int(below.sum())
+    n_phys = int(above.sum())
+    if n_phys == 0:
+        return ClusterDecision('cluster_all', floor, floor, float('inf'),
+                               float('inf'), n_noise, 0)
+    physical_min = float(_np.min(gaps[above]))
+    ratio = physical_min / floor if floor > 0.0 else float('inf')
+    if n_noise == 0:
+        # The smallest gap is already physical: nothing to freeze.
+        return ClusterDecision('none', 0.0, floor, physical_min, ratio,
+                               0, n_phys)
+    if ratio < float(min_ratio):
+        return ClusterDecision('lanczos', None, floor, physical_min, ratio,
+                               n_noise, n_phys)
+    tol = float(_np.sqrt(floor * physical_min))
+    return ClusterDecision('cluster', tol, floor, physical_min, ratio,
+                           n_noise, n_phys)
+
+
+def lowest_pair_auto(a, **kwargs):
+    """Lowest eigenpair with the tolerance decision applied.
+
+    ``'cluster'`` and ``'cluster_all'`` route through
+    :func:`eigh_cluster_ift` at the chosen tolerance, ``'none'`` through
+    :func:`eigh_safe`, and ``'lanczos'`` through the decomposition-free
+    kernel of ``core.lanczos``. This is an eager helper: the mode is a
+    Python-level branch on the values, so it cannot be traced inside
+    ``jit``. Differentiable callers that need a fixed rule should choose
+    the kernel and tolerance themselves.
+
+    The decision needs the spectrum, which this helper obtains with a dense
+    ``jnp.linalg.eigvalsh``. It therefore targets the small dense blocks
+    the rule was derived on (1-RDM and Fock blocks, dense CI blocks), not a
+    matrix-free operator large enough that a decomposition is what one is
+    trying to avoid; in that case pass a measured ``noise_scale`` and use
+    the kernel directly.
+
+    Returns ``(lam, u, decision)``; the eigenvalue is a 0-d array for the
+    decomposition routes and a scalar array for the Lanczos route.
+    """
+    w_all = _np.asarray(jnp.linalg.eigvalsh(a))
+    dec = cluster_tolerance(w_all, **kwargs)
+    if dec.mode == 'lanczos':
+        from .lanczos import lowest_eigpair_lanczos
+        lam, u = lowest_eigpair_lanczos(a)
+        return lam, u, dec
+    if dec.mode == 'none':
+        w, U = eigh_safe(a)
+        return w[0], U[:, 0], dec
+    w, U = eigh_cluster_ift(a, tol=dec.tol)
+    return w[0], U[:, 0], dec
+
+
 @jax.custom_jvp
 def eigh_safe(a):
     """``jnp.linalg.eigh`` with a first-order-safe degeneracy rule.
@@ -162,7 +346,8 @@ def eigh_safe(a):
 @eigh_safe.defjvp
 def _eigh_safe_jvp(primals, tangents):
     (a,), (da,) = primals, tangents
-    w, u = jnp.linalg.eigh(a)
+    out = jnp.linalg.eigh(a)
+    w, u = out
     L = u.T @ (0.5 * (da + da.T)) @ u
     diff = w[None, :] - w[:, None]
     tau = 1e-4
@@ -171,7 +356,7 @@ def _eigh_safe_jvp(primals, tangents):
     C = L * F * (1.0 - jnp.eye(n))       # diagonal stays zero (normalization)
     dw = jnp.diag(L)
     du = u @ C
-    return (w, u), (dw, du)
+    return out, _primal_tangent(out, dw, du)
 
 
 def make_eigh_mask(tol=1e-6):
@@ -204,14 +389,15 @@ def make_eigh_mask(tol=1e-6):
     @eigh_mask.defjvp
     def _eigh_mask_jvp(primals, tangents):
         (a,), (da,) = primals, tangents
-        w, u = jnp.linalg.eigh(a)
+        out = jnp.linalg.eigh(a)
+        w, u = out
         L = u.T @ (0.5 * (da + da.T)) @ u
         diff = w[None, :] - w[:, None]
         keep = jnp.abs(diff) > tol
         F = jnp.where(keep, 1.0 / jnp.where(keep, diff, 1.0), 0.0)
         n = w.shape[0]
         C = L * F * (1.0 - jnp.eye(n))
-        return (w, u), (jnp.diag(L), u @ C)
+        return out, _primal_tangent(out, jnp.diag(L), u @ C)
 
     return eigh_mask
 

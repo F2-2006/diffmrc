@@ -366,7 +366,14 @@ def ci_block_operator(h1e_mo, eri_mo, ncore, nact, n_alpha, n_beta, tab=None):
     excitation connections.
     """
     if tab is None:
-        tab = string_tables(nact, n_alpha, n_beta)
+        # The tables are structure constants of the determinant space. Build
+        # them outside the trace: inside ``jit`` the ``jnp.asarray`` calls of
+        # ``string_tables`` would otherwise produce DynamicJaxprTracer
+        # constants captured by the operator's closures, and lowering a
+        # custom_vjp that closes over such a tracer fails with
+        # "No constant handler for type: DynamicJaxprTracer".
+        with jax.ensure_compile_time_eval():
+            tab = string_tables(nact, n_alpha, n_beta)
     phase = tab['phase']
 
     def mv1(x):
@@ -491,7 +498,8 @@ def lowest_k_eigpairs_mf(h1e_mo, eri_mo, ncore=0, nact=2, n_alpha=1,
     scale, the diagonal being the only O(n_det) spectral information the
     matrix-free route holds without extra matvecs.
     """
-    tab = string_tables(nact, n_alpha, n_beta)
+    with jax.ensure_compile_time_eval():
+        tab = string_tables(nact, n_alpha, n_beta)
     phase = tab['phase']
 
     def apply_global(hh, ee, y):

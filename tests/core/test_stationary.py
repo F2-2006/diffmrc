@@ -7,9 +7,11 @@ jax.config.update("jax_enable_x64", True)
 import jax.numpy as jnp  # noqa: E402
 
 from diffmrc.core.stationary import (  # noqa: E402
+    StationaryCandidate,
     StopReason,
     curvature_report,
     refine_stationary_point,
+    select_stationary_point,
 )
 
 
@@ -297,3 +299,103 @@ def test_cg_solve_returns_zero_on_a_zero_right_hand_side():
     from diffmrc.core.stationary import _cg_solve
 
     assert np.allclose(_cg_solve(lambda v: 2.0 * v, np.zeros(4)), 0.0)
+
+
+# ---------------------------------------------------------------------------
+# Deterministic selection among refined stationary points.
+# ---------------------------------------------------------------------------
+
+
+def _curv(*eigs):
+    return curvature_report(np.diag(np.asarray(eigs, dtype=float)))
+
+
+def _candidate(energy, label, grad_norm=1e-12, curvature='min'):
+    if curvature == 'none':
+        cur = None
+    elif curvature == 'min':
+        cur = _curv(0.2, 0.5)
+    else:
+        cur = _curv(*curvature)
+    return StationaryCandidate(theta=np.asarray([energy, 0.0]),
+                               energy=energy, grad_norm=grad_norm,
+                               curvature=cur, label=label)
+
+
+def test_selection_prefers_a_minimum_over_a_lower_saddle():
+    saddle = _candidate(-2.0, 'saddle', curvature=(1.0, -0.5))
+    minimum = _candidate(-1.0, 'minimum', curvature=(0.2, 0.5))
+    result = select_stationary_point([minimum, saddle])
+    assert result.chosen is minimum
+    assert result.status == 'minimum'
+    assert result.is_minimum
+    assert result.n_minima == 1
+    assert result.second_energy == pytest.approx(-2.0)
+
+
+def test_selection_is_independent_of_completion_order():
+    a = _candidate(-1.0, 'a', grad_norm=3e-12)
+    b = _candidate(-1.0, 'b', grad_norm=1e-12)
+    c = _candidate(-0.5, 'c')
+    forward = select_stationary_point([a, b, c])
+    backward = select_stationary_point([c, b, a])
+    assert forward.chosen.label == 'b'
+    assert backward.chosen.label == 'b'
+    assert forward.status == backward.status == 'minimum_degenerate'
+
+
+def test_degenerate_minima_are_reported_as_such():
+    a = _candidate(-1.0, 'a')
+    b = _candidate(-1.0 + 1e-9, 'b')
+    c = _candidate(-0.9, 'c')
+    result = select_stationary_point([a, b, c], energy_tol=1e-6)
+    assert result.status == 'minimum_degenerate'
+    assert result.n_minima == 3
+    assert result.second_energy == pytest.approx(-0.9)
+    assert result.energy_spread == pytest.approx(0.1, rel=1e-4)
+
+
+def test_no_stationary_candidate_returns_none():
+    result = select_stationary_point(
+        [_candidate(-1.0, 'a', grad_norm=1e-3),
+         _candidate(-2.0, 'b', grad_norm=1e-2)])
+    assert result.status == 'no_stationary'
+    assert result.chosen is None
+    assert result.n_stationary == 0
+    assert not result.is_minimum
+
+
+def test_unverified_curvature_is_not_called_a_minimum():
+    result = select_stationary_point(
+        [_candidate(-1.0, 'a', curvature='none'),
+         _candidate(-2.0, 'b', curvature='none')])
+    assert result.status == 'curvature_unverified'
+    assert result.chosen.label == 'b'
+    assert not result.is_minimum
+
+
+def test_saddle_only_is_reported_for_diagnostics():
+    a = _candidate(-1.0, 'a', curvature=(0.1, -0.1))
+    b = _candidate(-0.5, 'b', curvature=(-0.2, -0.3))
+    result = select_stationary_point([a, b])
+    assert result.status == 'saddle_only'
+    assert result.chosen is a
+    assert not result.is_minimum
+    assert result.reason
+
+
+def test_selection_integrates_with_the_refiner():
+    """Two quadratic wells, refined from different starts, one selected."""
+    wells = [_quadratic([1.0, 0.0], 2.0), _quadratic([-1.0, 0.0], 2.0)]
+    wells[1] = (lambda E: (lambda th: E(th) - 0.5))(wells[1])
+    cands = []
+    for k, E in enumerate(wells):
+        p = refine_stationary_point(E, np.asarray([3.0 * (-1) ** k, 1.0]))
+        cands.append(StationaryCandidate(
+            theta=p.theta, energy=p.energy, grad_norm=p.grad_norm,
+            curvature=_curv(2.0, 2.0), label='start%d' % k))
+    result = select_stationary_point(cands)
+    assert result.chosen.label == 'start1'
+    assert result.chosen.energy == pytest.approx(-0.5, abs=1e-8)
+    assert result.status == 'minimum'
+    assert result.energy_spread == pytest.approx(0.5, rel=1e-7)

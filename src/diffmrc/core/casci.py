@@ -25,7 +25,10 @@ from jax import numpy as jnp
 
 from pyscfad import scf as pscf
 
+from functools import lru_cache
 from itertools import combinations
+
+import numpy as np
 
 from .eigh import eigh_safe
 
@@ -193,6 +196,66 @@ def _block_lowest_pair(h_blk, eig_solver='eigh_safe'):
     return w[0], U[:, 0]
 
 
+@lru_cache(maxsize=None)
+def _mf_global_order(ncore, nact, nele_act, n_alpha, n_beta):
+    """Map the matrix-free determinant grid onto the ``cs_casci`` layout.
+
+    ``core.ci_matvec`` orders a block by (alpha string, beta string), while
+    the determinant list of ``cs_casci`` is the lexicographic interleaved
+    list. The two orders are related by a static permutation (the sign
+    convention is already converted inside ``ci_block_operator``), so the
+    permutation is built once per block shape and cached. The entries are
+    global indices into ``DETS``.
+    """
+    from .ci_matvec import string_tables
+    core = tuple(range(2 * ncore))
+    dets = [core + c for c in combinations(
+        range(2 * ncore, 2 * (ncore + nact)), nele_act)]
+    index = {d: i for i, d in enumerate(dets)}
+    with jax.ensure_compile_time_eval():
+        tab = string_tables(nact, n_alpha, n_beta)
+    masks_a = np.asarray(tab['masks_a'])
+    masks_b = np.asarray(tab['masks_b'])
+    order = np.empty(masks_a.size * masks_b.size, dtype=np.int64)
+    k = 0
+    for ma in masks_a:
+        alpha = tuple(2 * ncore + 2 * i for i in range(nact)
+                      if (int(ma) >> i) & 1)
+        for mb in masks_b:
+            beta = tuple(2 * ncore + 2 * j + 1 for j in range(nact)
+                         if (int(mb) >> j) & 1)
+            order[k] = index[tuple(sorted(core + alpha + beta))]
+            k += 1
+    return order
+
+
+def _block_lowest_pair_mf(h1e_mo, eri_mo, ncore, nact, nele_act, sz, idx,
+                          **kwargs):
+    """Lowest eigenpair of one S_z block, matrix-free (Davidson).
+
+    Returns the pair in the same layout and sign convention as
+    ``_block_H``/``_block_lowest_pair``: the vector is reordered into the
+    block's position list ``idx`` so the caller's block-selection code is
+    unchanged. ``idx`` holds the global ``cs_casci`` determinant indices of
+    this block, in increasing order.
+    """
+    from .ci_matvec import lowest_k_eigpairs_mf
+    # ``sz`` in cs_casci_blocked counts the core alpha electrons as well
+    # (the determinant list is global), so the active-space alpha count is
+    # the spin-projected count minus ``ncore``.
+    n_alpha = (nele_act + sz) // 2 - ncore
+    n_beta = nele_act - n_alpha
+    ws, vs = lowest_k_eigpairs_mf(h1e_mo, eri_mo, ncore=ncore, nact=nact,
+                                  n_alpha=n_alpha, n_beta=n_beta, k=1,
+                                  **kwargs)
+    order = _mf_global_order(ncore, nact, nele_act, n_alpha, n_beta)
+    # ``idx`` is increasing (the filter preserves the DETS order), so the
+    # position of every grid determinant inside the block is one search.
+    perm = np.searchsorted(np.asarray(idx, dtype=np.int64), order)
+    out = jnp.zeros(len(idx))
+    return ws[0], out.at[jnp.asarray(perm)].set(vs[:, 0])
+
+
 def cs_casci_blocked(h1e_mo, eri_mo, ncore=0, nact=2, nele_act=2,
                      eig_solver='eigh_safe'):
     """Ground-state energy and CI vector by blockwise diagonalization in S_z.
@@ -237,6 +300,20 @@ def cs_casci_blocked(h1e_mo, eri_mo, ncore=0, nact=2, nele_act=2,
         used for the first derivative and below: it is more thoroughly
         validated and its inverse-iteration path is more accurate.
 
+    EIGEN SOLVERS
+        ``eig_solver='eigh_safe'`` (default) forms the dense block and
+        decomposes it. ``eig_solver='lanczos'`` keeps the dense block but
+        solves the lowest pair decomposition-free (second-order-safe on
+        bit-exact pairs). ``eig_solver='davidson'`` never forms the block:
+        the matrix-free operator of ``core.ci_matvec`` is applied through
+        the Davidson kernel, and the reverse pass is the implicit rule of
+        ``core.iterative_ci`` applied to the same matvec. The determinant
+        space is then limited by working memory (a few vectors) instead of
+        by the O(dim^2) block matrix, which is the route to active spaces
+        above CAS(8,8). The first-order derivative of this route is
+        validated against finite differences through a rotated-MO chain
+        (see the Wave14 report); it is not a second-order route.
+
     Returns (E, ci_flat), where ci_flat uses the full determinant layout of
     cs_casci.
     """
@@ -264,8 +341,13 @@ def cs_casci_blocked(h1e_mo, eri_mo, ncore=0, nact=2, nele_act=2,
     # Process S_z from low to high so the final update carries the lowest block.
     for s in sorted(set(sz)):
         idx = [i for i, x in enumerate(sz) if x == s]
-        H_blk = _block_H(h1e_mo, eri_mo, DETS, idx, ncore, nact, nele_act)
-        w0, u0 = _block_lowest_pair(H_blk, eig_solver)
+        if eig_solver == 'davidson':
+            w0, u0 = _block_lowest_pair_mf(h1e_mo, eri_mo, ncore, nact,
+                                           nele_act, s, idx)
+        else:
+            H_blk = _block_H(h1e_mo, eri_mo, DETS, idx, ncore, nact,
+                             nele_act)
+            w0, u0 = _block_lowest_pair(H_blk, eig_solver)
         if E_min is None:
             E_min = w0
             out = out.at[jnp.asarray(idx)].set(u0)
