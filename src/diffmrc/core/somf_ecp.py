@@ -62,6 +62,31 @@ removed without the ECP generation data.  The module exposes the pieces
 independently so that the error can be bounded by comparing variants; it
 does not choose a "physical" amount of valence mean field on its own.
 
+THE VARIANT FAMILY
+
+:func:`somf_variants` returns the operator for every decomposition that
+the ECP data alone cannot distinguish, all in the same ``+i``
+convention:
+
+* ``ecp``: ``ECPso`` only, the operator fixed by the ECP fit;
+* ``nuclear_non_ecp``, ``breit_pauli``: the Breit-Pauli terms without
+  ``ECPso``;
+* ``valence``: the module default, ``ECPso`` plus the full valence mean
+  field;
+* ``one_center``: the mean-field kernel and density truncated to the
+  spin-orbit ECP centers (AMFI-like);
+* ``atomic_subtracted``: the full mean field minus its on-site block,
+  i.e. the variant that assumes the ECP already contains the free-atom
+  valence mean field;
+* ``point_charge``: the scalar-ECP point-charge model, effective-charge
+  nuclear SOC with no ``ECPso``;
+* ``double``: ``ECPso`` plus the nuclear SOC on every center and the
+  full mean field, a diagnostic upper view of the double counting.
+
+The spread of these variants on a molecule is the quantitative statement
+of the decomposition ambiguity; none of them is promoted to an absolute
+spin-orbit operator.
+
 DENSITY RESPONSE
 
 The two-electron kernel ``K[p,q,r,s]`` is not symmetric under the pair
@@ -80,7 +105,8 @@ from __future__ import annotations
 
 import numpy as np
 
-from .somf import (SOMF_ALPHA2_HALF, one_electron_soc, somf_two_electron)
+from .somf import (DEFAULT_MEMORY_LIMIT, SOMF_ALPHA2_HALF, one_electron_soc,
+                   somf_two_electron)
 
 __all__ = [
     "SOMF_ALPHA2_HALF",
@@ -89,6 +115,7 @@ __all__ = [
     "nuclear_centers",
     "nuclear_soc",
     "valence_somf_matrix",
+    "somf_variants",
     "somf_density_response",
     "somf_definition",
 ]
@@ -133,6 +160,16 @@ def nuclear_centers(mol):
     """
     so = set(so_ecp_centers(mol))
     return [ia for ia in range(mol.natm) if ia not in so]
+
+
+def _center_ao_mask(mol, atoms):
+    """Boolean mask of the AO functions centered on ``atoms``."""
+    mask = np.zeros(mol.nao_nr(), dtype=bool)
+    slices = mol.aoslice_by_atom()
+    for ia in atoms:
+        p0, p1 = int(slices[ia, 2]), int(slices[ia, 3])
+        mask[p0:p1] = True
+    return mask
 
 
 def ecp_soc(mol):
@@ -183,9 +220,46 @@ def nuclear_soc(mol, atoms=None):
     return out
 
 
+def _two_electron_truncated(mol, P, mask, contract="auto",
+                            memory_limit=None):
+    """``J - 3/2 K`` with all four integral indices on the masked centers.
+
+    The density is restricted to the selected AO block and the resulting
+    operator is masked on its own AO pair, so the Coulomb and exchange
+    contractions only use pairs that lie on a selected center.  With one
+    selected center this is the one-center (AMFI-like) truncation of the
+    spin-orbit mean field.
+    """
+    nao = mol.nao_nr()
+    if not np.any(mask):
+        return np.zeros((3, nao, nao), dtype=float)
+    pm = P * np.outer(mask, mask)
+    if contract == "auto":
+        limit = DEFAULT_MEMORY_LIMIT if memory_limit is None else memory_limit
+        need = 8.0 * 3 * nao ** 4
+        contract = "explicit" if need <= limit else "direct"
+    if contract not in ("explicit", "direct"):
+        raise ValueError(f"unknown contract route: {contract!r}")
+    if contract == "explicit":
+        g = np.asarray(mol.intor("int2e_p1vxp1", aosym="s1"), dtype=float)
+        g = g.reshape(3, nao, nao, nao, nao)
+        j = np.einsum("rs,kpqrs->kpq", pm, g, optimize=True)
+        k1 = np.einsum("rs,kprsq->kpq", pm, g, optimize=True)
+        k2 = np.einsum("rs,ksqpr->kpq", pm, g, optimize=True)
+        h = j - 1.5 * (k1 + k2)
+    else:
+        from pyscf.prop.gtensor.uhf import get_jk
+
+        vj, vk = get_jk(mol, (0.5 * pm, 0.5 * pm))
+        h = (vj[0] + vj[1]) - 1.5 * (vk[0] + vk[1])
+    return h * np.outer(mask, mask)[None, :, :]
+
+
 def valence_somf_matrix(mol, P, nuclear="auto", ecp_term=True,
+                        two_electron="full", onsite="keep",
                         contract="auto", memory_limit=None,
-                        convention="i", check=False):
+                        convention="i", check=False,
+                        one_electron="ecpso"):
     """Valence-level SOMF SOC operator, shape ``(3, nao, nao)``.
 
     Parameters
@@ -201,6 +275,17 @@ def valence_somf_matrix(mol, P, nuclear="auto", ecp_term=True,
         double counts).  ``'none'`` omits it.
     ecp_term : bool
         Include the ``ECPso`` operator.  ``False`` is diagnostic.
+    two_electron : {'full', 'one_center', 'none'}
+        ``'full'`` is the four-center ``J - 3/2 K`` mean field.
+        ``'one_center'`` truncates the kernel and the density to the AO
+        blocks of the spin-orbit ECP centers (an AMFI-like
+        approximation).  ``'none'`` omits the term.
+    onsite : {'keep', 'subtract'}
+        ``'subtract'`` removes the spin-orbit ECP centers' on-site block
+        from the density that generates the mean field.  That block is
+        the free-atom valence density, which the ECP fit may already
+        contain; the mode therefore removes the on-site part of the
+        double counting and keeps only the inter-site (bonding) change.
     contract : {'auto', 'explicit', 'direct'}
         Forwarded to the two-electron contraction.
     memory_limit : float, optional
@@ -214,6 +299,13 @@ def valence_somf_matrix(mol, P, nuclear="auto", ecp_term=True,
         different prefactors itself.
     check : bool
         Validate ``trace(P S)`` and antisymmetry.
+    one_electron : {'ecpso', 'point_charge'}
+        ``'ecpso'`` uses the ECP spin-orbit operator on the SO-ECP
+        centers.  ``'point_charge'`` instead uses the effective-charge
+        point-nucleus operator on every center and omits ``ECPso``; this
+        is the scalar-ECP point-charge model and is a diagnostic view,
+        not a physical decomposition.  It overrides ``nuclear`` and
+        ``ecp_term``.
 
     Returns
     -------
@@ -225,6 +317,12 @@ def valence_somf_matrix(mol, P, nuclear="auto", ecp_term=True,
         raise ValueError(f"unknown convention: {convention!r}")
     if nuclear not in ("auto", "all", "none"):
         raise ValueError(f"unknown nuclear mode: {nuclear!r}")
+    if two_electron not in ("full", "one_center", "none"):
+        raise ValueError(f"unknown two-electron mode: {two_electron!r}")
+    if onsite not in ("keep", "subtract"):
+        raise ValueError(f"unknown onsite mode: {onsite!r}")
+    if one_electron not in ("ecpso", "point_charge"):
+        raise ValueError(f"unknown one-electron mode: {one_electron!r}")
 
     nao = mol.nao_nr()
     P = np.asarray(P, dtype=float)
@@ -238,26 +336,49 @@ def valence_somf_matrix(mol, P, nuclear="auto", ecp_term=True,
                 f"trace(P S) = {nelec:.9f} differs from mol.nelectron "
                 f"= {mol.nelectron}")
 
-    if nuclear == "all":
+    if one_electron == "point_charge":
         nuc_atoms = list(range(mol.natm))
-    elif nuclear == "none":
-        nuc_atoms = []
+        use_ecp = False
     else:
-        nuc_atoms = nuclear_centers(mol)
+        use_ecp = bool(ecp_term)
+        if nuclear == "all":
+            nuc_atoms = list(range(mol.natm))
+        elif nuclear == "none":
+            nuc_atoms = []
+        else:
+            nuc_atoms = nuclear_centers(mol)
 
     h_bp = np.zeros((3, nao, nao), dtype=float)
     if nuc_atoms:
         h_bp += nuclear_soc(mol, nuc_atoms)
-    h_bp += somf_two_electron(mol, P, contract=contract,
-                              memory_limit=memory_limit)
+
+    if two_electron != "none":
+        p_eff = P
+        if onsite == "subtract":
+            so_mask = _center_ao_mask(mol, so_ecp_centers(mol))
+            if not np.any(so_mask):
+                raise ValueError("onsite='subtract' requires an SO-ECP "
+                                 "center")
+            p_eff = P - P * np.outer(so_mask, so_mask)
+        if two_electron == "one_center":
+            mask = _center_ao_mask(mol, so_ecp_centers(mol))
+            if not np.any(mask):
+                raise ValueError("two_electron='one_center' requires an "
+                                 "SO-ECP center")
+            h_bp += _two_electron_truncated(
+                mol, p_eff, mask, contract=contract,
+                memory_limit=memory_limit)
+        else:
+            h_bp += somf_two_electron(mol, p_eff, contract=contract,
+                                      memory_limit=memory_limit)
 
     if convention == "i":
         h = SOMF_ALPHA2_HALF * h_bp
-        if ecp_term:
+        if use_ecp:
             h = h - ecp_soc(mol)
     else:
         h = h_bp
-        if ecp_term:
+        if use_ecp:
             h = h + ecp_soc(mol)
 
     if check:
@@ -266,6 +387,70 @@ def valence_somf_matrix(mol, P, nuclear="auto", ecp_term=True,
             raise ValueError(
                 f"operator is not antisymmetric: max|h + h^T| = {asym:.3e}")
     return h
+
+
+def somf_variants(mol, P, contract="auto", memory_limit=None):
+    """Named ECP SOMF operator variants in one common convention.
+
+    Every returned matrix is in the ``+i`` convention
+    ``H_SO = i sum_k h_k s_k``, so a caller can assemble the state
+    interaction matrix with the same prefactor for every variant.
+
+    The variants span the decomposition freedom of an ECP:
+
+    ``ecp``
+        ``ECPso`` only.  This is the one-electron operator fixed by the
+        ECP fit; no explicit Breit-Pauli term is added.
+    ``nuclear_non_ecp``
+        Breit-Pauli nuclear SOC on centers without a spin-orbit ECP.
+    ``breit_pauli``
+        ``nuclear_non_ecp`` plus the full valence ``J - 3/2 K`` mean
+        field, without ``ECPso``.
+    ``valence``
+        The full valence SOMF definition of
+        :func:`valence_somf_matrix` (the module default).
+    ``one_center``
+        ``valence`` with the two-electron kernel and the density
+        truncated to the spin-orbit ECP centers.
+    ``atomic_subtracted``
+        ``valence`` with the on-site spin-orbit ECP density removed from
+        the mean field.  This is the variant that assumes the ECP
+        already contains the free-atom valence mean field, so only the
+        molecular (inter-site) change is added.
+    ``point_charge``
+        Scalar-ECP point-charge model: effective-charge nuclear SOC on
+        every center and no ``ECPso``.
+    ``double``
+        ``ECPso`` plus the nuclear SOC on every center and the full
+        valence mean field.  Diagnostic view of the double counting.
+
+    Returns
+    -------
+    dict of str -> ndarray, shape (3, nao, nao)
+    """
+    kw = dict(contract=contract, memory_limit=memory_limit, convention="i")
+    out = {}
+    out["ecp"] = valence_somf_matrix(
+        mol, P, nuclear="none", ecp_term=True, two_electron="none",
+        one_electron="ecpso", **kw)
+    out["nuclear_non_ecp"] = valence_somf_matrix(
+        mol, P, nuclear="auto", ecp_term=False, two_electron="none", **kw)
+    out["breit_pauli"] = valence_somf_matrix(
+        mol, P, nuclear="auto", ecp_term=False, two_electron="full", **kw)
+    out["valence"] = valence_somf_matrix(
+        mol, P, nuclear="auto", ecp_term=True, two_electron="full", **kw)
+    out["one_center"] = valence_somf_matrix(
+        mol, P, nuclear="auto", ecp_term=True, two_electron="one_center",
+        **kw)
+    out["atomic_subtracted"] = valence_somf_matrix(
+        mol, P, nuclear="auto", ecp_term=True, two_electron="full",
+        onsite="subtract", **kw)
+    out["point_charge"] = valence_somf_matrix(
+        mol, P, nuclear="all", ecp_term=False, two_electron="full",
+        one_electron="point_charge", **kw)
+    out["double"] = valence_somf_matrix(
+        mol, P, nuclear="all", ecp_term=True, two_electron="full", **kw)
+    return out
 
 
 def somf_density_response(mol, D, contract="explicit"):
@@ -335,11 +520,19 @@ def somf_definition(mol):
                          "on the other centers"),
         "two_electron": "valence J - 3/2 K",
         "convention": "+i (H_SO = i sum_k h_k s_k)",
+        "variants": [
+            "ecp", "nuclear_non_ecp", "breit_pauli", "valence",
+            "one_center", "atomic_subtracted", "point_charge", "double",
+        ],
         "approximations": [
             "the ECP spin-orbit part is assumed to contain the core "
             "contribution to the one-electron SOC of its center",
             "the explicit valence mean field may double count the "
-            "valence-valence SOC already fitted into the ECP",
+            "valence-valence SOC already fitted into the ECP; the "
+            "variants returned by somf_variants() span this freedom",
+            "atomic_subtracted removes the on-site block of the valence "
+            "density from the mean field, which assumes the ECP already "
+            "contains the free-atom valence mean field",
         ],
     }
 
