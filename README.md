@@ -41,8 +41,9 @@ manual/         Tutorial and Manual (LaTeX sources and built PDFs)
 
 - CASPT2 TUVA/ITUV classes (0.3.2): `Vm1_a` and `V1_i` are three-active-index
   functions with an orthonormal class basis; N2/6-31G CAS(6,6) default ratio
-  reaches 0.989 against ORCA CASPT2-D. Remaining class-space residuals are
-  documented in the Open problems section.
+  reaches 0.983 against ORCA CASPT2-D for the release reference
+  (OMP_NUM_THREADS=1; the Wave 12 frozen reference gives 0.989). Remaining
+  class-space residuals are documented in the Open problems section.
 - `core.caspt2_three_center` (0.3.1): three-center contracted CASPT2 using the
   same `cross - direct` VM convention as the materialized path; the two paths
   agree to machine precision on H2O/CO.
@@ -357,10 +358,13 @@ implementation. The differentiable path is the diagonal-Fock approximation
 (CASPT2-D level); its residual against the reference is documented in the
 manual and in the tests. The `V1_ija` class and the default-path `(u,u)`
 active-row approximation still differ from the reference for active spaces
-larger than CAS(2,2); the N2/6-31G CAS(6,6) default-path total is 0.989
-against ORCA CASPT2-D, and the coupled path totals 1.023. Closing the
-class-space residual and extending the coupled path to the differentiable
-layer remain open.
+larger than CAS(2,2); the N2/6-31G CAS(6,6) default-path total is 0.983
+against ORCA CASPT2-D for the release reference (OMP_NUM_THREADS=1); the
+Wave 12 frozen reference gives 0.989. The spread across reference sets
+(0.980–0.989) comes from the active degenerate-pair gauge; the five classes
+without active-pair rows are stable to 1e-7 across reference sets. The
+coupled path totals 1.023. Closing the class-space residual and extending
+the coupled path to the differentiable layer remain open.
 
 *ECP SOMF.* The valence-level ECP SOMF operator is a prototype. There is no
 unique ECP SOMF definition, and the valence-only construction can double count
