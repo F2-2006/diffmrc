@@ -350,8 +350,9 @@ def caspt2_double_external_e2(h1e_mo, eri_mo, c_ci, dets, *,
 _OVERLAP_DEGENERACY_TOL = 1e-9
 
 
-def _orthonormal_class_diagonal(vecs, w, de_of, e0, nthresh=1e-6):
-    """CASPT2-D energy of one class in its orthonormalized function basis.
+def _orthonormal_class_diagonal(vecs, w, de_of, e0, nthresh=1e-6,
+                                solve=False):
+    """Class energy in its orthonormalized function basis.
 
     ``vecs`` are the class function vectors (determinant -> coefficient)
     and ``w`` their couplings ``<0|H|K>``.  The class overlap
@@ -361,19 +362,33 @@ def _orthonormal_class_diagonal(vecs, w, de_of, e0, nthresh=1e-6):
     is diagonalized and the functions are re-expressed in the orthonormal
     basis ``T = U / sqrt(eig)``, keeping the eigenvectors above
     ``nthresh * max(eig)`` (the role of the reference implementation's
-    ``NThresh``).  The energy is the diagonal approximation in that
-    basis,
+    ``NThresh``).  With ``solve=False`` (the default) the energy is the
+    diagonal approximation in that basis,
 
         e2 = -sum_k (T^T W)_k^2 / (T^T A T)_kk,
 
     with ``A[i, j] = sum_D F_i[D] F_j[D] (de_D - E0)`` the
-    occupation-diagonal Fock matrix.
+    occupation-diagonal Fock matrix.  With ``solve=True`` the projected
+    linear system ``(A - E0 S) x = -W`` is solved inside the retained
+    subspace and ``e2 = W^T x``; this is the exact class-block solution
+    of the diagonal-Fock zeroth order (the ``H2`` variant of the
+    development report), not a diagonal approximation, and it is
+    independent of the gauge chosen inside degenerate overlap blocks.
 
     A per-function diagonal sum (``-sum_i W_i^2 / (A_ii - E0 S_ii)``) is
     invalid for the three-active-index classes: their function products
     span a strongly linearly dependent set (the TUVA basis of N2 has
     rank ~0.73 of its function count), so the same direction enters many
     times and the sum overcounts by roughly a factor of three.
+
+    Scope of the diagonal variant (``solve=False``): the orthonormal
+    basis is unique only up to rotations inside a degenerate eigenvalue
+    block of ``S``.  The gauge below fixes one representative (A is
+    diagonalized inside each block), which makes the result reproducible
+    but not invariant; measured on N2 the random-gauge spread of the
+    five classes ranges from 1e-5 to 4.4e-4 Eh, i.e. up to 25% of the
+    V2_ij class energy.  ``solve=True`` is invariant and is the
+    recommended reading of a class.
     """
     nfn = len(vecs)
     if nfn == 0:
@@ -428,13 +443,53 @@ def _orthonormal_class_diagonal(vecs, w, de_of, e0, nthresh=1e-6):
     T = U / np.sqrt(evk)
     M = T.T @ A @ T
     Wt = T.T @ w
+    if solve:
+        M = 0.5 * (M + M.T)
+        try:
+            x = np.linalg.solve(M, -Wt)
+        except np.linalg.LinAlgError:
+            x = np.linalg.lstsq(M, -Wt, rcond=1e-12)[0]
+        return float(Wt @ x)
     diag = np.diag(M)
     ok = np.abs(diag) > 1e-10
     return -float(np.sum(Wt[ok] * Wt[ok] / diag[ok]))
 
 
+_PLAIN_CLASSES = ('V0_ijab', 'Vm1_iab', 'Vm2_ab', 'V1_ija', 'V2_ij')
+
+
+def _plain_class_ops(name, core, act, vir):
+    """Plain-product operator lists of one CASPT2 class.
+
+    Each entry ``[(p1, q1), (p2, q2)]`` is the product
+    ``E(p1 q1) E(p2 q2)`` written in ``_apply_chain`` order (rightmost
+    operator first).  The set spans the same space as the Molcas VP/VM
+    pairing of the same class: for every ordered index tuple that occurs
+    in a VP/VM component, the plain products enumerate both orderings as
+    separate functions.  The difference between the two bases is the
+    diagonal approximation, not the space.
+    """
+    if name == 'V0_ijab':
+        return [[(a, i), (b, j)] for a in vir for b in vir
+                for i in core for j in core]
+    if name == 'Vm1_iab':
+        return [[(a, i), (b, t)] for a in vir for b in vir
+                for i in core for t in act]
+    if name == 'Vm2_ab':
+        return [[(a, t), (b, u)] for a in vir for b in vir
+                for t in act for u in act]
+    if name == 'V1_ija':
+        return [[(a, i), (t, j)] for a in vir for i in core
+                for j in core for t in act]
+    if name == 'V2_ij':
+        return [[(t, i), (u, j)] for t in act for u in act
+                for i in core for j in core]
+    raise ValueError('unknown plain-product class: {!r}'.format(name))
+
+
 def caspt2_contracted_e2(h1e_mo, eri_mo, ci, dets, *, ncore, nact, nele, eps,
-                         nthresh=1e-6):
+                         nthresh=1e-6, active_row='replica',
+                         class_diagonal='function', v0_ia='block'):
     """Contracted (internally contracted) CASPT2, diagonal-complete scheme.
 
     Follows the OpenMolcas conventions established by line-by-line source
@@ -500,8 +555,56 @@ def caspt2_contracted_e2(h1e_mo, eri_mo, ci, dets, *, ncore, nact, nele, eps,
     full-Fock coupled path is ``caspt2_contracted_e2_coupled``.
 
     ``nthresh`` is the relative eigenvalue cutoff of the class overlap
-    diagonalization (the ``NThresh`` role); it affects only the TUVA /
-    ITUV classes.
+    diagonalization (the ``NThresh`` role); it affects the TUVA / ITUV
+    classes and, with ``class_diagonal='ortho'``, the five classes
+    evaluated in their orthonormalized basis.
+
+    ``active_row`` selects how the same-orbital rows of the active pool
+    are treated by the per-function path.  ``'replica'`` (default) is the
+    historical rule: every ``(u, u)`` active row beyond the first active
+    orbital is dropped, on the assumption that those rows are
+    proportional replicas of the first active orbital's row.  Measured on
+    H2O/6-31G CAS(2,2) the two rows differ by a factor -42 in the
+    coupling, and their diagonal contributions coincide, so the rule is
+    exact there only in the sense that the second row's contribution
+    repeats the first.  For more than two active orbitals the rows are
+    not replicas; ``'keep'`` retains all of them.  The option applies to
+    ``Vm2_ab`` and ``V2_ij`` (the classes whose internal pair is an
+    active pair); it is ignored by ``class_diagonal='ortho'`` and
+    ``'block'``, whose plain-product basis enumerates every index tuple.
+
+    ``class_diagonal`` selects the scheme of the five double/single
+    classes.
+    ``'function'`` (default) is the historical per-function diagonal
+    ``-W^2/(A - E0 S)`` in the Molcas VP/VM pairing.  ``'ortho'``
+    instead builds the plain-product basis ``E(p1 q1) E(p2 q2)|0>`` of
+    each class and takes the diagonal in its orthonormalized basis
+    (:func:`_orthonormal_class_diagonal`, the ``H1`` variant).  The
+    plain basis is complete for the class and its orthonormalization
+    removes the replica double count automatically: on the CAS(2,2)
+    references the result equals the historical per-function value to
+    machine precision (verified on H2O and CO), while on a six-orbital
+    active space it no longer needs the replica assumption.
+    ``'block'`` uses the same plain basis but solves the projected class
+    system exactly (the ``H2`` variant); it includes the intra-class
+    coupling that ``'ortho'`` neglects and is invariant under any change
+    of basis inside the class.  ``'ortho'`` is a diagnostic: when the
+    class overlap has degenerate eigenvalues -- measured on all five
+    classes of N2/6-31G CAS(6,6) -- the diagonal approximation depends on
+    the arbitrary basis chosen inside each degenerate block.  The block
+    gauge used below (diagonalize the Fock matrix inside each block)
+    makes the number deterministic but not gauge invariant; random
+    rotations inside the blocks move the class energy by up to 25%
+    (V2_ij, measured).  Use ``'block'`` whenever the class energy itself
+    enters a decision.
+
+    ``v0_ia`` selects the V0_ia treatment.  ``'block'`` (default) is the
+    historical per-(u, v, j, a) two-component block solve.  ``'class'``
+    solves the whole class as one projected system in the same
+    cross/direct basis (``solve=True`` in
+    :func:`_orthonormal_class_diagonal`); the class then carries the
+    inter-block coupling the per-block solve drops.  The three-active-
+    index classes keep the orthonormalized diagonal in every setting.
 
     Returns (e2_total, breakdown) with breakdown keyed by class name.
     """
@@ -588,25 +691,45 @@ def caspt2_contracted_e2(h1e_mo, eri_mo, ci, dets, *, ncore, nact, nele, eps,
     ]
     breakdown = {}
     total = 0.0
-    for name, o1, o2, i1c, i2c in classes:
-        acc = 0.0
-        for qs in pairs(o1, o2):
-            if qs[0] == qs[1] and qs[0] in act and qs[0] != act[0]:
-                continue
-            for ps in pairs(i1c, i2c):
-                if ps[0] == ps[1] and ps[0] in act and ps[0] != act[0]:
+    if class_diagonal == 'function':
+        if active_row not in ('replica', 'keep'):
+            raise ValueError('unknown active_row: {!r}'.format(active_row))
+        drop_replicas = (active_row == 'replica')
+        for name, o1, o2, i1c, i2c in classes:
+            acc = 0.0
+            for qs in pairs(o1, o2):
+                if drop_replicas and qs[0] == qs[1] and qs[0] in act \
+                        and qs[0] != act[0]:
                     continue
-                w, s, a = wsa(qs, ps, vm=False)
-                dnm = a - e0_zero * s
-                if abs(dnm) > 1e-10:
-                    acc -= w * w / dnm
-                if qs[0] != qs[1] and ps[0] != ps[1]:
-                    wm, sm, am = wsa(qs, ps, vm=True)
-                    dnm2 = am - e0_zero * sm
-                    if abs(dnm2) > 1e-10:
-                        acc -= wm * wm / dnm2
-        breakdown[name] = acc
-        total += acc
+                for ps in pairs(i1c, i2c):
+                    if drop_replicas and ps[0] == ps[1] and ps[0] in act \
+                            and ps[0] != act[0]:
+                        continue
+                    w, s, a = wsa(qs, ps, vm=False)
+                    dnm = a - e0_zero * s
+                    if abs(dnm) > 1e-10:
+                        acc -= w * w / dnm
+                    if qs[0] != qs[1] and ps[0] != ps[1]:
+                        wm, sm, am = wsa(qs, ps, vm=True)
+                        dnm2 = am - e0_zero * sm
+                        if abs(dnm2) > 1e-10:
+                            acc -= wm * wm / dnm2
+            breakdown[name] = acc
+            total += acc
+    elif class_diagonal in ('ortho', 'block'):
+        for name in _PLAIN_CLASSES:
+            ops_list = _plain_class_ops(name, core, act, vir)
+            vecs = [_apply_chain(ref_pairs, ops) for ops in ops_list]
+            w = np.asarray([sum(cc * g_of(dd) for dd, cc in vec.items())
+                            for vec in vecs])
+            acc = _orthonormal_class_diagonal(
+                vecs, w, de_of, e0_zero, nthresh,
+                solve=(class_diagonal == 'block'))
+            breakdown[name] = acc
+            total += acc
+    else:
+        raise ValueError('unknown class_diagonal: {!r}'.format(
+            class_diagonal))
 
     # TUVA (Vm1_a) and ITUV (V1_i): three active indices, plain products
     # E(a,t)E(u,v)|0> and E(t,i)E(u,v)|0> summed over ordered active
@@ -659,43 +782,73 @@ def caspt2_contracted_e2(h1e_mo, eri_mo, ci, dets, *, ncore, nact, nele, eps,
                 kacc[d2] += cI * cc
         return kacc
 
-    for iu, u in enumerate(act):
-        for v in act[iu:]:
-            modes = ('cross',) if v == u else ('cross', 'direct')
-            for j in core:
-                for a in vir:
-                    ks = [kacc_of(m, u, j, a, v) for m in modes]
-                    ws = [sum(cc * g_of(dd) for dd, cc in k.items())
-                          for k in ks]
-                    n = len(ks)
-                    mmat = np.zeros((n, n))
-                    for p in range(n):
-                        for q in range(n):
-                            shared = ks[p].keys() & ks[q].keys()
-                            mmat[p, q] = sum(ks[p][d] * ks[q][d]
-                                             * (de_of(d) - e0_zero)
-                                             for d in shared)
-                    if n == 1:
-                        if abs(mmat[0, 0]) > 1e-10:
-                            acc_ia -= ws[0] * ws[0] / mmat[0, 0]
-                    else:
-                        det = (mmat[0, 0] * mmat[1, 1]
-                               - mmat[0, 1] * mmat[1, 0])
-                        if abs(det) > 1e-12:
-                            x = np.linalg.solve(mmat, -np.asarray(ws))
-                            acc_ia += float(np.dot(ws, x))
+    if v0_ia not in ('block', 'class'):
+        raise ValueError('unknown v0_ia: {!r}'.format(v0_ia))
+    if v0_ia == 'class':
+        # Whole-class projection: every (u, v, j, a, mode) component is
+        # one row, and the projected system is solved once for the class
+        # instead of once per (u, v, j, a) block.  The cross/direct
+        # components of different blocks overlap through determinants
+        # they share, which the per-block solve drops.
+        vecs = []
+        for iu, u in enumerate(act):
+            for v in act[iu:]:
+                modes = ('cross',) if v == u else ('cross', 'direct')
+                for j in core:
+                    for a in vir:
+                        for m in modes:
+                            vecs.append(dict(kacc_of(m, u, j, a, v)))
+        w_ia = np.asarray([sum(cc * g_of(dd) for dd, cc in k.items())
+                           for k in vecs])
+        acc_ia = _orthonormal_class_diagonal(vecs, w_ia, de_of, e0_zero,
+                                             nthresh, solve=True)
+    else:
+        acc_ia = 0.0
+        for iu, u in enumerate(act):
+            for v in act[iu:]:
+                modes = ('cross',) if v == u else ('cross', 'direct')
+                for j in core:
+                    for a in vir:
+                        ks = [kacc_of(m, u, j, a, v) for m in modes]
+                        ws = [sum(cc * g_of(dd) for dd, cc in k.items())
+                              for k in ks]
+                        n = len(ks)
+                        mmat = np.zeros((n, n))
+                        for p in range(n):
+                            for q in range(n):
+                                shared = ks[p].keys() & ks[q].keys()
+                                mmat[p, q] = sum(ks[p][d] * ks[q][d]
+                                                 * (de_of(d) - e0_zero)
+                                                 for d in shared)
+                        if n == 1:
+                            if abs(mmat[0, 0]) > 1e-10:
+                                acc_ia -= ws[0] * ws[0] / mmat[0, 0]
+                        else:
+                            det = (mmat[0, 0] * mmat[1, 1]
+                                   - mmat[0, 1] * mmat[1, 0])
+                            if abs(det) > 1e-12:
+                                x = np.linalg.solve(mmat, -np.asarray(ws))
+                                acc_ia += float(np.dot(ws, x))
     breakdown['V0_ia'] = acc_ia
     total += acc_ia
     return total, breakdown
 
 
 def caspt2_contracted_e2_jax(h1e_mo, eri_mo, ci, dets, *, ncore, nact, nele,
-                             eps, nthresh=1e-6):
+                             eps, nthresh=1e-6, active_row='replica'):
     """Differentiable twin of :func:`caspt2_contracted_e2`.
 
     Same diagonal-complete contracted scheme, same class definitions and
     the same diagonal denominator ``A - E0 * S``; verified elementwise
     against the numpy reference (tests/core/test_caspt2.py).
+
+    ``active_row`` has the same meaning as in the numpy engine
+    (``'replica'`` keeps the historical truncation, ``'keep'`` removes
+    it).  The ``class_diagonal='ortho'`` option of the numpy engine has
+    no twin here: its static tensors scale as ``nfn**2 * ndet**2``,
+    which is affordable only for the two three-active-index classes
+    (where the jax engine already uses it) and not for the five
+    double/single classes on any production-size determinant list.
 
     Every contracted function is linear in the CI vector by
     construction, so its coupling W, overlap S and Fock expectation A
@@ -885,15 +1038,20 @@ def caspt2_contracted_e2_jax(h1e_mo, eri_mo, ci, dets, *, ncore, nact, nele,
         ('V1_ija', core, core, act, vir),
         ('V2_ij', core, core, act, act),
     ]
+    if active_row not in ('replica', 'keep'):
+        raise ValueError('unknown active_row: {!r}'.format(active_row))
+    drop_replicas = (active_row == 'replica')
     breakdown = {}
     total = 0.0
     for name, o1, o2, i1c, i2c in classes:
         acc = 0.0
         for qs in pairs_list(o1, o2):
-            if qs[0] == qs[1] and qs[0] in act and qs[0] != act[0]:
+            if drop_replicas and qs[0] == qs[1] and qs[0] in act \
+                    and qs[0] != act[0]:
                 continue
             for ps in pairs_list(i1c, i2c):
-                if ps[0] == ps[1] and ps[0] in act and ps[0] != act[0]:
+                if drop_replicas and ps[0] == ps[1] and ps[0] in act \
+                        and ps[0] != act[0]:
                     continue
                 acc += contrib(forms(v_two(ps[0], qs[0], ps[1], qs[1])))
                 if qs[0] != qs[1] and ps[0] != ps[1]:

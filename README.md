@@ -335,10 +335,21 @@ multireference number; a deterministic selection rule remains open.
 
 *Perturbation-layer convergence.* NEVPT2 depends on the orbitals more
 sensitively than the CASSCF energy does, so energy-based convergence criteria
-are insufficient when the target quantity is the correction. Current practice
-is to use the stability of the correction between independent runs together
-with an orbital-gradient threshold; a convergence criterion tied to the
-correction itself remains open.
+are insufficient when the target quantity is the correction. Measured on
+H2O/6-31G CAS(2,2): between optimizations converged to 1e-4 and 1e-6 the
+CASSCF energy moves by 1.3e-9 Eh while the correction moves by 1.1e-5 Eh
+(ratio about 8300); the correction stabilizes to 1.9e-10 once the orbital
+gradient reaches 5e-7, the practical floor of the L-BFGS-B optimizer. Same
+system, independent starting points: the zero start lands on a theta-space
+saddle (Hessian minimum eigenvalue -1.6e-2) and a 21.2 mEh higher stationary
+point, whose correction differs by 18.7 mEh. A convergence criterion must
+therefore carry a branch certificate; the current practice is (i) three or
+more independent starts agreeing in energy to 1e-8 with a positive-definite
+theta Hessian, and (ii) on the selected branch, an orbital-gradient threshold
+together with a bound on the change of the correction between two
+independently converged orbital sets. The first-order bound
+`|H^-1 s| |g|` is recorded as a diagnostic only: on the saddle it has the
+wrong sign. A criterion that removes the branch dependence remains open.
 
 *Second-derivative cost.* The implicit route requires the orbital Hessian in
 memory and does not exploit sparsity; the unrolled route scales with the number
@@ -347,20 +358,41 @@ single-reference methods. Sparse or analytic second derivatives are the
 direction of work.
 
 *Relaxed NEVPT2 gradient scope.* The relaxed-path nuclear gradient is validated
-on two closed-shell, frozen-core systems (H2O/6-31G and LiH/6-31G). Open-shell,
-ECP, f-block and large-basis systems are not yet covered. The exact near-zero
-treatment applies to the `Si` class only; the other four contraction classes
-retain the release value mask.
+on two closed-shell, frozen-core systems (H2O/6-31G and LiH/6-31G) and, in the
+development branch, on two scalar-relativistic ECP systems (HI/def2-SVP with
+ncore=12 and HI/LANL2DZ with ncore=3; the ECP core-Hamiltonian derivative test
+now runs in the suite). For the open-shell doublet OH/6-31G CAS(3,2) the
+CASSCF stationary point coincides with the ROHF orbitals at every geometry, so
+the response term vanishes identically and only the frozen gradient is
+testable; a non-trivial open-shell response (OH CAS(5,4)) remains blocked by a
+19.4% discrepancy in the frozen e2 nuclear derivative. f-block and large-basis
+relaxed gradients are blocked upstream by the dense `nctr * nao^4` integral
+derivative allocation. The exact near-zero treatment applies to the `Si`
+class only; the other four contraction classes retain the release value mask,
+and no validation system with a masked channel outside `Si` has been found.
 
 *CASPT2 residual.* The coupled full-Fock path is a NumPy value-layer
 implementation. The differentiable path is the diagonal-Fock approximation
-(CASPT2-D level); its residual against the reference is documented in the
-manual and in the tests. The `V1_ija` class and the default-path `(u,u)`
-active-row approximation still differ from the reference for active spaces
-larger than CAS(2,2); the N2/6-31G CAS(6,6) default-path total is 0.989
-against ORCA CASPT2-D, and the coupled path totals 1.023. Closing the
-class-space residual and extending the coupled path to the differentiable
-layer remain open.
+(CASPT2-D level). The default path's `(u,u)` active-row truncation is exact
+only for a two-orbital active space: the plain-product class projection
+reproduces it to 4e-16 on the CAS(2,2) anchors, while on N2 removing it
+without projection doubles the `Vm2_ab` and `V2_ij` classes. The
+`class_diagonal='block', v0_ia='class'` option replaces the truncation and the
+per-block `V0_ia` solve with the exact class projections; on N2/6-31G
+CAS(6,6) it moves `Vm2_ab` to 1.0000 of ORCA CASPT2-D and `V0_ia` to 0.9970,
+and the total to 1.0232 (default 0.9893, coupled 1.0232 against the
+full-FIC column). The default total's apparent agreement is a cancellation
+between `V1_ija` (+55%), `V2_ij` (-77%), `V0_ia` (+10%) and `Vm2_ab` (+12%).
+The diagonal-to-full coupling ratio of the two paths, 0.9795831, matches the
+ORCA CASPT2-D/full-FIC ratio 0.9795829 to 2e-7 relative: the coupling is
+right and the remaining offset is a class-space factor. `V1_ija` is 1.553 in
+every basis because the diagonal approximation of that class is gauge
+dependent (random gauges inside the degenerate overlap blocks span 0.88 to
+1.29 of the reference) while its exact class-block value is gauge invariant
+at 1.553; ORCA prints 192 functions for the class against the 768 of the
+plain-product basis, so the residual is a class-space definition difference.
+Closing it requires the reference contraction rule; extending the coupled
+path to the differentiable layer remains open.
 
 *ECP SOMF.* The valence-level ECP SOMF operator is a prototype. There is no
 unique ECP SOMF definition, and the valence-only construction can double count

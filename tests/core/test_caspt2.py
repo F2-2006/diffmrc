@@ -106,6 +106,35 @@ def test_h2o_contracted_classes_regression():
                  'V0_ia'):
         assert bd[name] == bd_off[name]
 
+    # The class-projection options are strict generalizations of the
+    # historical per-function diagonal: with two active orbitals the
+    # plain-product basis is linearly dependent in exactly the way the
+    # replica rule assumes, and every variant reproduces the same class
+    # table.  The measured spread is at the roundoff level (3.6e-16 on
+    # the total; the per-class differences are below 2e-16).
+    for extra in (dict(class_diagonal='ortho'),
+                  dict(class_diagonal='block'),
+                  dict(class_diagonal='ortho', v0_ia='class'),
+                  dict(class_diagonal='block', v0_ia='class')):
+        e_alt, bd_alt = caspt2_contracted_e2(
+            h1_mo2, eri_mo2, ci2, dets, ncore=4, nact=2, nele=2, eps=eps,
+            **extra)
+        assert e_alt == pytest.approx(total, abs=2e-12), extra
+        for name in bd:
+            assert bd_alt[name] == pytest.approx(bd[name], abs=2e-12), (
+                extra, name)
+
+    # The raw "keep every active row" switch is NOT a generalization: the
+    # second (u, u) row is a linear dependent replica on a two-orbital
+    # active space, so keeping it double counts those two classes.
+    _, bd_keep = caspt2_contracted_e2(
+        h1_mo2, eri_mo2, ci2, dets, ncore=4, nact=2, nele=2, eps=eps,
+        active_row='keep')
+    assert bd_keep['Vm2_ab'] / bd['Vm2_ab'] == pytest.approx(2.0, rel=0.01)
+    assert bd_keep['V2_ij'] / bd['V2_ij'] == pytest.approx(2.0, rel=0.03)
+    for name in ('V0_ijab', 'Vm1_iab', 'V1_ija', 'V0_ia'):
+        assert bd_keep[name] == bd[name]
+
 
 def _synthetic_case(seed=7, ncore=2, nact=2, nele=2, nmo=6):
     """A small deterministic pseudo-system: symmetric one- and two-electron
@@ -443,6 +472,71 @@ def test_class_diagonal_is_independent_of_function_order():
     assert abs(vals[0]) > 1e-6
 
 
+def test_active_row_switch_and_class_projection_on_a_four_orbital_space():
+    """The two knobs act exactly where the class structure says they do.
+
+    ``Vm2_ab`` and ``V2_ij`` are the only classes whose internal pair is
+    an active pair, so they are the only classes the replica-row switch
+    can touch; the other four entries must stay bitwise identical.  The
+    class projection changes the total, because the plain-product basis
+    is not linearly dependent in the same way the replica rule assumes
+    once the active space has four orbitals.
+    """
+    from diffmrc.core.caspt2 import caspt2_contracted_e2
+
+    h1, e4, eps, dets, ci = _synthetic_case(seed=11, ncore=2, nact=4,
+                                            nele=4, nmo=8)
+    kw = dict(ncore=2, nact=4, nele=4, eps=eps)
+    e0, bd0 = caspt2_contracted_e2(h1, e4, ci, dets, **kw)
+    e1, bd1 = caspt2_contracted_e2(h1, e4, ci, dets, active_row='keep', **kw)
+    for name in ('V0_ijab', 'Vm1_iab', 'V1_ija', 'V0_ia'):
+        assert bd1[name] == bd0[name]
+    assert abs(bd1['Vm2_ab'] - bd0['Vm2_ab']) > 1e-6
+    assert abs(bd1['V2_ij'] - bd0['V2_ij']) > 1e-6
+
+    e2, bd2 = caspt2_contracted_e2(h1, e4, ci, dets,
+                                   class_diagonal='block', v0_ia='class',
+                                   **kw)
+    e3, _ = caspt2_contracted_e2(h1, e4, ci, dets,
+                                 class_diagonal='ortho', **kw)
+    assert np.isfinite(e2) and np.isfinite(e3)
+    assert abs(e2 - e0) > 1e-8
+    assert sum(bd2.values()) == pytest.approx(e2, abs=1e-10)
+
+
+def test_n2_class_projection_reproduces_the_coupled_ratio():
+    """N2/6-31G CAS(6,6): the full class projection of the diagonal-Fock
+    zeroth order (``class_diagonal='block', v0_ia='class'``) moves the
+    two classes with the replica/block defects -- Vm2_ab to 1.0000 of
+    ORCA CASPT2-D and V0_ia to 0.9970 -- and reaches 1.0232 of the ORCA
+    diagonal reference, the same ratio the full-Fock coupled assembly
+    reaches against the ORCA full-FIC column (1.0232).  The other two
+    classes are carried over unchanged from the per-function path.
+
+    Requires DIFFMRC_N2_REF; the numbers are pinned from the Wave 14 run.
+    """
+    ref_path = os.environ.get('DIFFMRC_N2_REF')
+    if not ref_path or not os.path.exists(ref_path):
+        pytest.skip('DIFFMRC_N2_REF does not point at n2_ref.npz')
+    from diffmrc.core.caspt2 import caspt2_contracted_e2
+
+    z = np.load(ref_path)
+    e2, bd = caspt2_contracted_e2(
+        np.asarray(z['h1_mo']), np.asarray(z['eri_mo']),
+        np.asarray(z['ci']).ravel(), [int(x) for x in z['dets']],
+        ncore=int(z['ncore']), nact=int(z['nact']), nele=int(z['nele']),
+        eps=np.asarray(z['eps'], dtype=float),
+        class_diagonal='block', v0_ia='class')
+    pins = {'V0_ijab': -0.008358683761, 'Vm1_iab': -0.016639934394,
+            'Vm2_ab': -0.012732204562, 'V1_ija': -0.001900793243,
+            'V2_ij': -0.007917643804, 'V0_ia': -0.020356978099,
+            'Vm1_a': -0.003648003576, 'V1_i': -0.001624960603}
+    for name, value in pins.items():
+        assert bd[name] == pytest.approx(value, abs=1e-8), name
+    ratio = e2 / -0.071520733
+    assert 1.020 <= ratio <= 1.026, ratio
+
+
 def test_n2_tuva_ituv_classes_match_orca_d():
     """N2/6-31G CAS(6,6): the TUVA (Vm1_a) and ITUV (V1_i) classes are
     nonzero and reproduce the ORCA CASPT2-D class table.
@@ -533,6 +627,15 @@ def test_co_cas22_three_active_classes_vanish():
     for name in ('V0_ijab', 'Vm1_iab', 'Vm2_ab', 'V1_ija', 'V2_ij',
                  'V0_ia'):
         assert bd[name] == bd_off[name]
+
+    # The class projection is again the same table on the second CAS(2,2)
+    # anchor (the measured total difference is -5.8e-16).
+    e_alt, bd_alt = caspt2_contracted_e2(
+        h1_mo2, eri_mo2, ci2, dets, ncore=ncore, nact=nact, nele=nele,
+        eps=eps, class_diagonal='block', v0_ia='class')
+    assert e_alt == pytest.approx(total, abs=2e-12)
+    for name in bd:
+        assert bd_alt[name] == pytest.approx(bd[name], abs=2e-12), name
 
 
 def test_coupled_h2o_co_ratios_and_coupling_direction():

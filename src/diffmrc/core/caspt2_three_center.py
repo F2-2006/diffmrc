@@ -35,7 +35,8 @@ from collections import defaultdict
 
 import numpy as np
 
-from .caspt2 import _apply2, _apply_chain, _orthonormal_class_diagonal
+from .caspt2 import (_PLAIN_CLASSES, _apply2, _apply_chain,
+                     _orthonormal_class_diagonal, _plain_class_ops)
 
 __all__ = ['caspt2_contracted_e2_three_center']
 
@@ -152,13 +153,18 @@ def _w_three_center(kacc, h1e, u, cache, ref_pairs):
 
 
 def caspt2_contracted_e2_three_center(h1e_mo, u_mo, ci, dets, *, ncore,
-                                      nact, nele, eps, nthresh=1e-6):
+                                      nact, nele, eps, nthresh=1e-6,
+                                      active_row='replica',
+                                      class_diagonal='function',
+                                      v0_ia='block'):
     """Contracted CASPT2 with ``W`` assembled from three-center factors.
 
     Parameters match :func:`diffmrc.core.caspt2.caspt2_contracted_e2`
     except that the four-center MO ERI is replaced by ``u_mo``, the
     metric-folded three-center tensor in the MO basis (see the module
-    docstring).  Returns ``(e2_total, breakdown)`` keyed by class name.
+    docstring).  ``active_row``, ``class_diagonal`` and ``v0_ia`` select
+    the same class-basis options as the materialized path.  Returns
+    ``(e2_total, breakdown)`` keyed by class name.
 
     The eight classes, the relative weight of the two orderings (VP +1,
     VM -1) and the V0_ia block solve are the same as the materialized
@@ -242,25 +248,44 @@ def caspt2_contracted_e2_three_center(h1e_mo, u_mo, ci, dets, *, ncore,
     ]
     breakdown = {}
     total = 0.0
-    for name, o1, o2, i1c, i2c in classes:
-        acc = 0.0
-        for qs in pairs(o1, o2):
-            if qs[0] == qs[1] and qs[0] in act and qs[0] != act[0]:
-                continue
-            for ps in pairs(i1c, i2c):
-                if ps[0] == ps[1] and ps[0] in act and ps[0] != act[0]:
+    if class_diagonal == 'function':
+        if active_row not in ('replica', 'keep'):
+            raise ValueError('unknown active_row: {!r}'.format(active_row))
+        drop_replicas = (active_row == 'replica')
+        for name, o1, o2, i1c, i2c in classes:
+            acc = 0.0
+            for qs in pairs(o1, o2):
+                if drop_replicas and qs[0] == qs[1] and qs[0] in act \
+                        and qs[0] != act[0]:
                     continue
-                w, s, a = wsa(qs, ps, vm=False)
-                dnm = a - e0_zero * s
-                if abs(dnm) > 1e-10:
-                    acc -= w * w / dnm
-                if qs[0] != qs[1] and ps[0] != ps[1]:
-                    wm, sm, am = wsa(qs, ps, vm=True)
-                    dnm2 = am - e0_zero * sm
-                    if abs(dnm2) > 1e-10:
-                        acc -= wm * wm / dnm2
-        breakdown[name] = acc
-        total += acc
+                for ps in pairs(i1c, i2c):
+                    if drop_replicas and ps[0] == ps[1] and ps[0] in act \
+                            and ps[0] != act[0]:
+                        continue
+                    w, s, a = wsa(qs, ps, vm=False)
+                    dnm = a - e0_zero * s
+                    if abs(dnm) > 1e-10:
+                        acc -= w * w / dnm
+                    if qs[0] != qs[1] and ps[0] != ps[1]:
+                        wm, sm, am = wsa(qs, ps, vm=True)
+                        dnm2 = am - e0_zero * sm
+                        if abs(dnm2) > 1e-10:
+                            acc -= wm * wm / dnm2
+            breakdown[name] = acc
+            total += acc
+    elif class_diagonal in ('ortho', 'block'):
+        for name in _PLAIN_CLASSES:
+            ops_list = _plain_class_ops(name, core, act, vir)
+            vecs = [_apply_chain(ref_pairs, ops) for ops in ops_list]
+            w = np.asarray([w_of(vec) for vec in vecs])
+            acc = _orthonormal_class_diagonal(
+                vecs, w, de_of, e0_zero, nthresh,
+                solve=(class_diagonal == 'block'))
+            breakdown[name] = acc
+            total += acc
+    else:
+        raise ValueError('unknown class_diagonal: {!r}'.format(
+            class_diagonal))
 
     # TUVA / ITUV: plain three-active-index products, projected onto the
     # orthonormalized class basis (same rule as the materialized path).
@@ -286,30 +311,46 @@ def caspt2_contracted_e2_three_center(h1e_mo, u_mo, ci, dets, *, ncore,
                 kacc[d2] += cI * cc
         return kacc
 
-    for iu, uu in enumerate(act):
-        for vv in act[iu:]:
-            modes = ('cross',) if vv == uu else ('cross', 'direct')
-            for j in core:
-                for a in vir:
-                    ks = [kacc_of(m, uu, j, a, vv) for m in modes]
-                    ws = [w_of(k) for k in ks]
-                    n = len(ks)
-                    mmat = np.zeros((n, n))
-                    for p in range(n):
-                        for q in range(n):
-                            shared = ks[p].keys() & ks[q].keys()
-                            mmat[p, q] = sum(ks[p][d] * ks[q][d]
-                                             * (de_of(d) - e0_zero)
-                                             for d in shared)
-                    if n == 1:
-                        if abs(mmat[0, 0]) > 1e-10:
-                            acc_ia -= ws[0] * ws[0] / mmat[0, 0]
-                    else:
-                        det = (mmat[0, 0] * mmat[1, 1]
-                               - mmat[0, 1] * mmat[1, 0])
-                        if abs(det) > 1e-12:
-                            x = np.linalg.solve(mmat, -np.asarray(ws))
-                            acc_ia += float(np.dot(ws, x))
+    if v0_ia not in ('block', 'class'):
+        raise ValueError('unknown v0_ia: {!r}'.format(v0_ia))
+    if v0_ia == 'class':
+        vecs = []
+        for iu, uu in enumerate(act):
+            for vv in act[iu:]:
+                modes = ('cross',) if vv == uu else ('cross', 'direct')
+                for j in core:
+                    for a in vir:
+                        for m in modes:
+                            vecs.append(dict(kacc_of(m, uu, j, a, vv)))
+        w_ia = np.asarray([w_of(k) for k in vecs])
+        acc_ia = _orthonormal_class_diagonal(vecs, w_ia, de_of, e0_zero,
+                                             nthresh, solve=True)
+    else:
+        acc_ia = 0.0
+        for iu, uu in enumerate(act):
+            for vv in act[iu:]:
+                modes = ('cross',) if vv == uu else ('cross', 'direct')
+                for j in core:
+                    for a in vir:
+                        ks = [kacc_of(m, uu, j, a, vv) for m in modes]
+                        ws = [w_of(k) for k in ks]
+                        n = len(ks)
+                        mmat = np.zeros((n, n))
+                        for p in range(n):
+                            for q in range(n):
+                                shared = ks[p].keys() & ks[q].keys()
+                                mmat[p, q] = sum(ks[p][d] * ks[q][d]
+                                                 * (de_of(d) - e0_zero)
+                                                 for d in shared)
+                        if n == 1:
+                            if abs(mmat[0, 0]) > 1e-10:
+                                acc_ia -= ws[0] * ws[0] / mmat[0, 0]
+                        else:
+                            det = (mmat[0, 0] * mmat[1, 1]
+                                   - mmat[0, 1] * mmat[1, 0])
+                            if abs(det) > 1e-12:
+                                x = np.linalg.solve(mmat, -np.asarray(ws))
+                                acc_ia += float(np.dot(ws, x))
     breakdown['V0_ia'] = acc_ia
     total += acc_ia
     return total, breakdown
