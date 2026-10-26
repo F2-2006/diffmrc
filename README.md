@@ -362,14 +362,30 @@ against ORCA CASPT2-D, and the coupled path totals 1.023. Closing the
 class-space residual and extending the coupled path to the differentiable
 layer remain open.
 
-*ECP SOMF.* The valence-level ECP SOMF operator is a prototype. There is no
-unique ECP SOMF definition, and the valence-only construction can double count
-core spin-orbit contributions. A unique definition and a double-counting
-correction remain open; it is not a production absolute-SOC method.
+*ECP SOMF.* The valence-level ECP SOMF operator is a prototype, and no unique
+ECP SOMF definition exists: the split between the ECP spin-orbit operator and
+the explicit valence mean field is a fitting freedom that the ECP data alone do
+not fix. `core.somf_ecp` now exposes the decomposition family (ECPso-only,
+full valence, one-center, on-site-subtracted, point-charge and a
+double-counting upper view) in one convention, and
+`experiments/somf_ecp/compare_variants.py` implements a free-atom subtraction
+that removes the mean field the ECP already contains. On the YbF model window
+the free-atom-subtracted and full-valence values differ by 10%, and the Ge+
+2P calibration leaves an 11.6% absolute offset traced to the small basis and
+the ECP fit. The operator is not a production absolute-SOC method: report the
+variant bracket, and use the free-atom subtraction only with its
+atomic-reference caveat.
 
-*Two-component X2C.* The differentiable X2C-CASSCF chain is scalar (spin-free).
-Complex two-component CI, Kramers-restricted response, and ECP support remain
-open.
+*Two-component X2C.* The X2C-CASSCF chain is scalar (spin-free).
+`core.spinor_ci` adds a minimal complex determinant CI with frozen-core folding,
+a JAX value path and a Kramers-safe eigenvalue derivative; it reproduces pyscf
+FCI in the non-relativistic spin-orbital limit and the Kramers theorem on a
+synthetic time-reversal-invariant Hamiltonian. The physical X2C path remains
+open: the pyscf `int2e_spinor` array does not obey the chemist pair symmetry
+(measured violation 0.62 on H2O/6-31G), and the CI Hamiltonian built from it
+with the determinant-energy ordering does not commute with many-body time
+reversal on OH/6-31G. Kramers-restricted response, complex orbital rotations
+and ECP support remain unimplemented.
 
 *RI SCF.* The RIJONX driver keeps exact exchange dense, and analytic SCF
 gradients for open-shell references remain open.
