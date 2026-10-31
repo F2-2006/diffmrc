@@ -1,0 +1,701 @@
+\chapter{Relativistic one-electron layers: scalar and two-component X2C}
+\label{ch:relativistic-layers}
+
+\section{Purpose and scope}
+
+The release carries two density-fitted X2C layers that differ in what
+they transform and in what wavefunction they support.  The scalar
+layer, \texttt{core.x2c\_casscf\_df}, applies the spin-free
+Foldy--Wouthuysen one-electron Hamiltonian and runs a real
+spin-adapted CASSCF on top of it.  The two-component layer,
+\texttt{core.x2c\_df}, keeps the spinor structure of the X2C transform
+and runs a complex generalized Hartree--Fock calculation in the
+contracted spinor basis.
+
+The two are not interchangeable.  The scalar layer has orbital and CI
+response but no spin--orbit coupling; the two-component layer has
+spin--orbit coupling at the one-electron level and no multireference
+response.  Both use the non-relativistic Coulomb operator, density
+fitted, with no picture-change correction on the two-electron part.
+This is one-electron X2C (1eX2C); the separate \texttt{core.x2c\_sap}
+module implements the atomic-potential approximation to the missing
+two-electron picture-change term and is outside the validation record
+here.
+
+The scope is full-electron basis sets.  Both X2C helpers raise
+\texttt{NotImplementedError} for an effective core potential, and the
+layers inherit that limit.  The scalar layer is sized for small and
+medium active spaces; the two-component layer is a Hartree--Fock layer.
+
+\section{Theory and derivation}
+\label{sec:x2c-theory}
+
+\subsection{The four-component problem in block form}
+
+The Dirac--Coulomb Hamiltonian in a molecular basis, after removing the
+rest energy, has the block form
+\begin{equation}
+  H_{4c} =
+  \begin{pmatrix}
+    V & T\\
+    T & \dfrac{W}{4c^{2}}-T
+  \end{pmatrix},
+  \qquad
+  S_{4c} =
+  \begin{pmatrix}
+    S & 0\\
+    0 & \dfrac{T}{2c^{2}}
+  \end{pmatrix},
+  \label{eq:x2c-4c}
+\end{equation}
+where, in the decontracted spinor basis used by the transform,
+\begin{equation}
+  S = \langle \chi_i|\chi_j\rangle,
+  \quad
+  T = \langle \chi_i|T_{\mathrm{kin}}|\chi_j\rangle,
+  \quad
+  V = \langle \chi_i|V_{\mathrm{nuc}}|\chi_j\rangle,
+  \quad
+  W = \langle \chi_i|\boldsymbol{\sigma}\cdot\mathbf{p}\,
+      V_{\mathrm{nuc}}\,
+      \boldsymbol{\sigma}\cdot\mathbf{p}|\chi_j\rangle.
+  \label{eq:x2c-integrals}
+\end{equation}
+The generalized eigenproblem
+\begin{equation}
+  H_{4c}\,C = S_{4c}\,C\,E
+  \label{eq:x2c-eigen}
+\end{equation}
+has positive- and negative-energy solutions.  Partition the
+positive-energy eigenvectors into large and small components,
+\begin{equation}
+  C = \begin{pmatrix} C_L\\ C_S\end{pmatrix},
+  \qquad
+  X = C_S C_L^{-1}.
+  \label{eq:x2c-x}
+\end{equation}
+The matrix $X$ is the small-to-large ratio of the positive-energy
+branch.  The implementation obtains it from the eigenproblem rather
+than solving the quadratic equation for $X$: it builds
+Eq.~\eqref{eq:x2c-4c} with the spinor integrals, calls
+\texttt{scipy.linalg.eigh}, selects the positive-energy block, and
+forms $X$ by Eq.~\eqref{eq:x2c-x}.  This is the construction in
+\texttt{core.x2c\_df.X2CTransform}.
+
+\subsection{Block decoupling and the Foldy--Wouthuysen Hamiltonian}
+
+Eliminating the small component with $X$ and retaining terms through
+$\mathcal{O}(c^{-2})$ gives the effective two-component Hamiltonian
+\begin{equation}
+  S_{+} = S + \frac{1}{2c^{2}}X^{\dagger}TX,
+  \label{eq:x2c-splus}
+\end{equation}
+\begin{equation}
+  H_{+} = V + TX + (TX)^{\dagger} - X^{\dagger}TX
+        + \frac{1}{4c^{2}}X^{\dagger}WX.
+  \label{eq:x2c-hplus}
+\end{equation}
+The large-component metric is not the original overlap, so a
+renormalization matrix $R$ is chosen such that
+\begin{equation}
+  R^{\dagger}S_{+}R = S,
+  \qquad
+  H_{2c} = R^{\dagger}H_{+}R.
+  \label{eq:x2c-renorm}
+\end{equation}
+The implementation computes $R$ from the symmetric eigendecomposition
+of $S$ and the transformed metric (the \texttt{\_metric\_renormalization}
+helper).  The result is a complex Hermitian Hamiltonian in the
+contracted spinor basis.  For a closed-shell determinant its
+spin--orbit content is quenched at first order, but the operator still
+differs from the spin-free one through the spin-dependent
+renormalization and the spinor structure of $X$.
+
+The scalar (spin-free) layer performs the same construction with
+spin-averaged integrals: the transform is applied to the spatial
+$S,T,V,W$ blocks, the resulting Hamiltonian is real and acts on spatial
+orbitals, and the spin--orbit terms are omitted.  This is the
+\texttt{SpinFreeX2CHelper} limit used by
+\texttt{core.x2c\_casscf\_df}.
+
+\subsection{Why the scalar and two-component energies differ}
+
+The two shipped layers are not a controlled one-parameter comparison:
+the scalar layer is CASSCF and the two-component layer is HF.  The
+X2C-specific difference can be isolated only at the same wavefunction
+level.  At that level there are three sources:
+
+\begin{itemize}
+\item the spin-free transform drops the spin-dependent part of the
+  renormalization and of the picture-change matrix;
+\item the two-component transform retains the spin--orbit operator,
+  whose expectation value vanishes for a non-degenerate closed-shell
+  determinant but whose second-order and response contributions do not;
+\item the two-electron treatment differs when the scalar layer uses
+  spatial DF factors and the two-component layer uses spinor RI-JK
+  factors, even before correlation is added.
+\end{itemize}
+For a closed-shell singlet the first source usually dominates; for an
+open-shell or degenerate system the second can dominate.  A comparison
+that does not hold the wavefunction method and the two-electron
+operator fixed measures all three together.
+
+\subsection{The two-electron part and picture change}
+
+Both layers use the non-relativistic Coulomb interaction,
+\begin{equation}
+  (pq|rs)=\iint
+  \frac{\phi_p^{*}(\mathbf r)\phi_q(\mathbf r)\,
+        \phi_r^{*}(\mathbf r')\phi_s(\mathbf r')}
+       {|\mathbf r-\mathbf r'|}
+  \,d\mathbf r\,d\mathbf r',
+  \label{eq:x2c-coulomb}
+\end{equation}
+density fitted as in Chapter~\ref{ch:ri-df}.  The X2C transformation of
+the one-electron operator induces a picture-change correction on the
+two-electron operator; it is not applied here.  The missing term is the
+dominant residual of 1eX2C for heavy elements, and the SAP-X2C module
+is the separate approximation to it.
+
+\subsection{The SOMF operator}
+
+The Breit--Pauli spin--orbit operator for electron $i$ is
+\begin{equation}
+  H_{\mathrm{SO}}
+  = \frac{\alpha^{2}}{2}\sum_i\left[
+      \sum_A \frac{Z_A}{r_{iA}^{3}}
+      \left(\mathbf r_{iA}\times\mathbf p_i\right)\cdot\mathbf s_i
+      - \sum_{j\neq i}\frac{1}{r_{ij}^{3}}
+      \left(\mathbf r_{ij}\times\mathbf p_i\right)
+      \cdot\left(\mathbf s_i+2\mathbf s_j\right)
+    \right],
+  \label{eq:x2c-breit-pauli}
+\end{equation}
+with $\mathbf r_{iA}=\mathbf r_i-\mathbf R_A$,
+$\mathbf r_{ij}=\mathbf r_i-\mathbf r_j$, and
+$\alpha$ the fine-structure constant.  The first term is the nuclear
+one-electron SOC; the second contains spin-same-orbit and
+spin-other-orbit contributions.
+
+The spin-orbit mean-field (SOMF) approximation replaces the
+two-electron term by its contraction with the reference density $P$,
+\begin{equation}
+  h^{2e}_k[pq]
+  = \sum_{rs}P_{rs}\left[
+      (pq|g_k|rs)
+      - \frac{3}{2}(pr|g_k|sq)
+      - \frac{3}{2}(sq|g_k|pr)
+    \right],
+  \label{eq:x2c-somf}
+\end{equation}
+with the geometric kernel
+\begin{equation}
+  g_k(\mathbf r_i,\mathbf r_j)
+  = \frac{\left(\mathbf r_{ij}\times\mathbf p_i\right)_k}
+         {r_{ij}^{3}},
+  \label{eq:x2c-somf-kernel}
+\end{equation}
+in the raw \texttt{int2e\_p1vxp1} convention.  The global sign of the
+raw integral is the same as that of \texttt{int1e\_pnucxp}; it is a
+convention and cancels in the ratio tests.  The coefficients $1$ and
+$-3/2$ are the spin-summed spin-same-orbit and spin-other-orbit
+combinations.  The factor $\alpha^{2}/2$ is applied once, in
+Eq.~\eqref{eq:x2c-somf-total}: the \texttt{int2e\_p1vxp1} integral
+carries the geometric kernel without it, and the raw one-electron
+integral \texttt{int1e\_pnucxp} likewise carries no prefactor.  The
+\texttt{ECPso} integral is already an effective operator in energy
+units and receives no $\alpha^{2}/2$.  The one-electron nuclear term is
+\begin{equation}
+  h^{\mathrm{nuc}}_k[pq]
+  = \sum_A Z_A
+    \left\langle p\left|
+      \frac{\left(\mathbf r_{iA}\times\mathbf p_i\right)_k}{r_{iA}^{3}}
+    \right|q\right\rangle,
+  \label{eq:x2c-nuclear-soc}
+\end{equation}
+where the sum runs over all centers for the all-electron operator; in
+the ECP variant of Eq.~\eqref{eq:x2c-somf-ecp} it runs only over
+centers without a spin--orbit ECP.  The SOMF operator is
+\begin{equation}
+  h^{\mathrm{SOMF}}_k
+  = \frac{\alpha^{2}}{2}\left[h^{\mathrm{nuc}}_k+h^{2e}_k[P]\right].
+  \label{eq:x2c-somf-total}
+\end{equation}
+The two-electron kernel is not symmetric under the pair exchange
+$(pq)\leftrightarrow(rs)$, so the derivative of
+$\mathrm{tr}(D\,h^{2e}[P])$ with respect to $P$ is not
+$h^{2e}[D]$; it is the separate contraction in
+\texttt{somf\_density\_response}.  A gradient of an SOC matrix element
+must use that response, or the equivalent bilinear form.
+
+\subsection{The ECP spin--orbit term}
+
+With an effective core potential, the core electrons are absent from
+the calculation and the spin--orbit part of the ECP replaces their
+contribution.  On a center carrying a spin--orbit ECP the valence-level
+operator is
+\begin{equation}
+  h^{\mathrm{SOMF\text{-}ECP}}_k
+  = \frac{\alpha^{2}}{2}\left[h^{\mathrm{nuc}}_k+h^{2e}_k[P]\right]
+    - V^{\mathrm{ECP}}_k,
+  \label{eq:x2c-somf-ecp}
+\end{equation}
+where $h^{\mathrm{nuc}}_k$ is kept only on centers without a
+spin--orbit ECP, $h^{2e}_k[P]$ is the valence $J-\tfrac{3}{2}K$ mean
+field of the spin-summed density $P$ with
+$\mathrm{tr}(PS)=N_{\mathrm{elec}}$, and $V^{\mathrm{ECP}}_k$ is the
+three-component \texttt{ECPso} integral.  On a center carrying a
+spin--orbit ECP the ECP term replaces the nuclear term: the ECP is
+fitted to reproduce the all-electron spin--orbit splitting of the
+valence configuration and already contains the nuclear one-electron
+term and the core--valence screening for that center.  The
+Breit--Pauli terms carry $\alpha^{2}/2$; \texttt{ECPso} is already an
+effective operator in energy units and is subtracted.
+
+There is no unique first-principles decomposition of an ECP into one-
+and two-electron spin--orbit parts.  The ECP is fitted to atomic
+reference states, so part of the valence--valence mean field is already
+folded into its parameters.  Adding the explicit valence
+$J-\tfrac{3}{2}K$ term is therefore an approximation with a
+double-counting error that cannot be removed without the ECP generation
+data.  The pieces are exposed independently
+(\texttt{nuclear=}, \texttt{ecp\_term=}) so variants can be compared.
+
+\section{Input and operation}
+\label{sec:x2c-input}
+
+\subsection{Common conventions}
+
+\begin{itemize}
+\item \texttt{mol} is a built \texttt{pyscf.gto.Mole}.  The scalar layer
+  expects the spatial orbital basis; the two-component layer builds its
+  own decontracted spinor molecule internally through
+  \texttt{SpinorX2CHelper} and never asks the caller for a spinor
+  basis.
+\item Energies are in Eh.  Nuclear gradients are in Eh/Bohr.  Atom
+  coordinates may be supplied in Angstrom or Bohr through the usual
+  pyscf \texttt{unit} argument; the gradient is always Eh/Bohr.
+\item Only full-electron basis sets are accepted.  Both X2C helpers
+  raise \texttt{NotImplementedError} for a molecule that carries an
+  effective core potential.
+\item The auxiliary basis defaults to \texttt{def2-universal-jkfit},
+  resolved by \texttt{core.ri.make\_auxmol}, which falls back to the
+  orbital basis when a fitting set does not cover every element.  The
+  label actually used is \texttt{result.auxbasis} for the scalar
+  result and \texttt{result.factors.auxbasis} for the two-component
+  result; it should be quoted with any number.
+\item The scalar layer's \texttt{ncore}, \texttt{nact}, and
+  \texttt{nele} are spatial-orbital and electron counts, not spinor
+  counts.  The two-component layer has no active-space interface.
+\end{itemize}
+
+A minimal skeleton for both layers is
+\begin{lstlisting}[language=Python]
+import numpy as np
+from pyscf import gto
+from diffmrc.core import x2c_casscf_df as xc
+from diffmrc.core import x2c_df
+
+mol = gto.M(atom='O 0 0 0; H 0 -0.757 0.587; H 0 0.757 0.587',
+            basis='6-31g', unit='Angstrom', verbose=0)
+
+# Scalar (spin-free) CASSCF, CAS(2,2), four core spatial orbitals.
+res = xc.df_x2c_casscf(mol, ncore=4, nact=2, nele=2,
+                       auxbasis='def2-universal-jkfit')
+grad, parts = xc.df_x2c_casscf_gradient(mol, res)
+
+# Two-component Hartree-Fock on the same molecule.
+h = x2c_df.df_x2c_hcore(mol)
+hf = x2c_df.df_x2c_hf(mol, auxbasis='def2-universal-jkfit')
+g_hf, parts_hf = x2c_df.df_x2c_hf_gradient(mol, result=hf)
+\end{lstlisting}
+
+\subsection{Scalar DF-X2C CASSCF}
+
+The energy is
+\begin{equation}
+  E = \sum_{pq}\gamma_{pq}h_{pq}
+    + \tfrac{1}{2}\sum_{pqrs}\Gamma_{pqrs}(pq|rs)+E_{\mathrm{nuc}},
+  \qquad
+  h=\texttt{SpinFreeX2CHelper}(mol).\texttt{get\_hcore}(mol),
+  \label{eq:x2c-scalar-energy}
+\end{equation}
+with the density-fitted Coulomb operator of
+Eq.~\eqref{eq:x2c-coulomb}.  The wavefunction is a real spin-adapted
+determinant expansion over the active spin orbitals.
+
+\begin{center}
+\small
+\begin{tabularx}{\textwidth}{>{\raggedright\arraybackslash}p{0.42\textwidth}X}
+\toprule
+Entry point & Returns and purpose \\
+\midrule
+\texttt{sfx2c\_hcore(mol)} &
+  Spin-free X2C one-electron Hamiltonian in the spatial AO basis. \\
+\texttt{sfx2c\_hcore\_derivatives(mol)} &
+  Its nuclear derivatives, shape \texttt{(natm, 3, nao, nao)}. \\
+\texttt{spatial\_df\_factors(mol, auxmol=None, auxbasis=None,
+  rcond=1e-12)} &
+  \texttt{SpatialDFFactors} with \texttt{b}, \texttt{s},
+  \texttt{jhalf}, the metric eigendecomposition, the auxiliary label,
+  and the factor derivatives. \\
+\texttt{df\_x2c\_rhf(mol, factors=None, auxmol=None, auxbasis=None,
+  conv\_tol=1e-12, max\_cycle=200, dm0=None)} &
+  Closed-shell reference SCF on the same Hamiltonian. \\
+\texttt{df\_x2c\_casscf(mol, ncore, nact, nele, auxmol=None,
+  auxbasis=None, nroots=1, weights=None, target=0, max\_cycle=300,
+  g\_conv=1e-6, rcond=1e-12, theta0=None, rhf=None, verbose=False)} &
+  \texttt{DFX2CCASSCFResult} with orbitals, CI vectors, state
+  energies, state-averaged energy, and orbital-gradient norm. \\
+\texttt{df\_x2c\_casscf\_gradient(mol, result=None, state=None,
+  auxmol=None, auxbasis=None, rcond=1e-12)} &
+  \texttt{(grad, parts)} for one CI root, shape \texttt{(natm, 3)} in
+  Eh/Bohr; parts are one-electron, two-electron, Pulay, nuclear. \\
+\texttt{df\_x2c\_energies\_at(mol, result, theta=None)} &
+  State energies at a new geometry with the rotation parameters fixed;
+  the reference orbitals follow the geometry through a displaced SCF
+  aligned to \texttt{result.c\_ref}. \\
+\texttt{df\_x2c\_sa\_state\_gradient(mol, result=None, state=None,
+  fd\_step=1e-3, theta\_step=1e-5, rcond=1e-8, auxmol=None,
+  auxbasis=None, return\_info=False)} &
+  State-specific gradient of a state-averaged calculation; requires
+  \texttt{result.nroots >= 2}. \\
+\bottomrule
+\end{tabularx}
+\end{center}
+
+\texttt{nroots=1} is the single-state calculation.  With
+\texttt{nroots>1}, \texttt{weights} default to equal weights and
+\texttt{target} selects the state reported in \texttt{result.e\_tot}.
+The state-averaged energy is \texttt{result.e\_sa}; the individual
+energies are \texttt{result.state\_energies}.  The \texttt{converged}
+flag is \texttt{gnorm < 1e-5}; the energy and the nuclear gradient are
+insensitive to the residual along flat orbital directions through the
+envelope theorem.
+
+The single-state gradient is
+\begin{equation}
+  \frac{dE}{dR}
+  = \sum_{pq}\gamma_{pq}\frac{dh_{pq}}{dR}
+  + \sum_P\sum_{pq}\frac{dw_{pqP}}{dR}X_{pqP}
+  - \sum_{pq}F_{pq}\frac{dS_{pq}}{dR}
+  + \frac{dE_{\mathrm{nuc}}}{dR},
+  \qquad
+  X_{pqP}=\sum_{rs}w_{rsP}\Gamma_{pqrs}.
+  \label{eq:x2c-scalar-gradient}
+\end{equation}
+The one-electron derivative comes from pyscf's spin-free X2C hcore
+gradient generator; the three-center and metric derivatives reuse
+Chapter~\ref{ch:ri-df}.  The gradient entry point requires the
+converged \texttt{result}.
+
+A state-averaged calculation is different: the orbitals minimize
+$E_{\mathrm{SA}}$, so the target-state orbital gradient $g_t$ does not
+vanish, and
+\begin{equation}
+  \frac{dE_t}{dR}
+  = \left.\frac{dE_t}{dR}\right|_{\theta}+z^{T}M,
+  \qquad
+  Hz=-g_t,
+  \qquad
+  H=\frac{\partial^{2}E_{\mathrm{SA}}}{\partial\theta^{2}},
+  \label{eq:x2c-scalar-sa}
+\end{equation}
+with $M=\partial g_{\mathrm{SA}}/\partial R$.  Both $H$ and $M$ are
+finite-difference constructions around the analytic state-averaged
+orbital gradient: $H$ over $\theta$ (the CI vectors are re-diagonalized
+at every step, so the CI response is included) and $M$ over displaced
+geometries, rebuilding the integrals and the geometry-dependent
+reference orbitals.  The direct term is a central difference of the
+target-state energy along the envelope path; the closed-form
+single-state formula does not apply because the target state is not
+stationary at the SA orbitals.  The Hessian is pseudo-inverted with a
+relative cutoff; the retained directions are reported in
+\texttt{info}.
+
+\subsection{Two-component DF-X2C Hartree--Fock}
+
+The two-component layer solves
+\begin{equation}
+  E=\mathrm{tr}(DH_{\mathrm{X2C}})
+    +\tfrac{1}{2}\mathrm{tr}(DJ)
+    -\tfrac{1}{2}\mathrm{tr}(DK)+E_{\mathrm{nuc}},
+  \label{eq:x2c-two-component-energy}
+\end{equation}
+with the RI-JK factorization
+\begin{equation}
+  (ij|kl)\approx\sum_P w_{ijP}w_{klP},
+  \qquad
+  w=BS^{-1/2},
+  \qquad
+  B_{ijP}=(ij|P),
+  \label{eq:x2c-two-component-df}
+\end{equation}
+built directly with \texttt{int3c2e\_spinor}.  The one-electron
+operator is Eq.~\eqref{eq:x2c-renorm} from the spinor integrals.  The
+values agree with pyscf's \texttt{SpinorX2CHelper} to
+$4.5\times10^{-11}$ on H$_2$O/6-31G (test bound $10^{-9}$ absolute and
+$10^{-10}$ relative).
+
+The spinor ERI convention is the complex-GHF one,
+\begin{equation}
+  J_{ij}=\sum_{kl}E_{ijkl}D_{lk},
+  \qquad
+  K_{ij}=\sum_{kl}E_{ikjl}D_{kl},
+  \label{eq:x2c-spinor-jk}
+\end{equation}
+which for $w=BS^{-1/2}$ becomes
+\begin{equation}
+  \rho_P=\sum_{ij}w_{ijP}D_{ji},
+  \qquad
+  J=\sum_Pw_P\rho_P,
+  \qquad
+  K=\sum_Pw_PDw_P.
+  \label{eq:x2c-spinor-jk-factor}
+\end{equation}
+The three-center tensor is Hermitian in the AO pair,
+$B_{ijP}=\overline{B_{jiP}}$, so the derivative with respect to the
+second AO center carries a complex conjugate.  The conjugate was
+verified by finite differences of $B$ at $2.5\times10^{-9}$ relative
+on H$_2$O/6-31G.
+
+\begin{center}
+\small
+\begin{tabularx}{\textwidth}{>{\raggedright\arraybackslash}p{0.44\textwidth}X}
+\toprule
+Entry point & Returns and purpose \\
+\midrule
+\texttt{df\_x2c\_hcore(mol, C=None, c=LIGHT\_SPEED,
+  return\_deriv=False, step=1e-4)} &
+  Complex Hermitian two-component Hamiltonian, optionally in a
+  supplied basis and optionally with \texttt{dH/dR}, shape
+  \texttt{(natm, 3, n, n)}. \\
+\texttt{X2CTransform(mol, c=LIGHT\_SPEED)} &
+  Transform at one geometry: decontracted spinor molecule, spinor
+  contraction matrix, and the four input integrals. \\
+\texttt{spinor\_df\_factors(mol, auxmol=None, auxbasis=None,
+  rcond=1e-12)} &
+  \texttt{SpinorDFFactors} with \texttt{b}, \texttt{s}, \texttt{jhalf},
+  metric eigendecomposition, and factor derivatives. \\
+\texttt{df\_x2c\_hf(mol, auxmol=None, auxbasis=None, dm0=None,
+  conv\_tol=1e-11, max\_cycle=200, rcond=1e-12, verbose=False)} &
+  \texttt{DFX2CHFResult} with spinor density, orbitals, orbital
+  energies, occupations, Fock matrix, energy parts, and gradient norm. \\
+\texttt{df\_x2c\_hf\_gradient(mol, result=None, auxmol=None,
+  auxbasis=None, dm0=None, transform\_step=1e-4, rcond=1e-12,
+  verbose=False)} &
+  \texttt{(grad, parts)} for the converged DF-X2C HF energy. \\
+\texttt{energy\_weighted\_density(result)} &
+  $W=C_{\mathrm{occ}}\mathrm{diag}(\epsilon_i n_i)
+   C_{\mathrm{occ}}^{\dagger}$. \\
+\texttt{spinor\_overlap\_derivatives(mol)} &
+  $dS/dR$ of the contracted spinor overlap. \\
+\bottomrule
+\end{tabularx}
+\end{center}
+
+At a converged SCF the density response collapses to the Pulay term:
+\begin{equation}
+  \frac{dE}{dR}
+  = \sum_{ij}D_{ij}\frac{dH_{ji}}{dR}
+  + \left.\frac{dE_{2e}}{dR}\right|_{D}
+  - \sum_{ij}W_{ij}\frac{dS_{ji}}{dR}
+  + \frac{dE_{\mathrm{nuc}}}{dR}.
+  \label{eq:x2c-two-component-gradient}
+\end{equation}
+With $G_P=\rho_PD^{T}-(Dw_PD)^{T}$,
+\begin{equation}
+  dE_{2e}=\sum_{ijP}G_{ijP}\,dw_{ijP},
+  \qquad
+  dw=dBS^{-1/2}+B\,dS^{-1/2},
+  \label{eq:x2c-two-component-dE}
+\end{equation}
+and the metric inverse-square-root derivative uses the
+Daleckii--Krein form of Chapter~\ref{ch:ri-df}.  The X2C transform
+derivative combines analytic nuclear derivatives of the four input
+integrals, the implicit eigenbasis derivative of the picture-change
+matrix (a complement-space sum safe at the exact Kramers degeneracy),
+and a transform-layer central difference at $10^{-4}$ Bohr for the
+polynomial and matrix-square-root chain; the development probes
+measure its error at about $10^{-7}$ relative on H$_2$O.
+
+\section{Worked example}
+\label{sec:x2c-example}
+
+\subsection{OH and OF: one-electron versus SOMF spin--orbit splitting}
+
+The SOMF validation on OH and OF uses two state-averaged roots, the
+same geometry and active space for the stack and ORCA 6.1.1, and the
+SI convention of this stack.  The recorded numbers are
+\begin{center}
+\small
+\begin{tabular}{lrrrr}
+\toprule
+System & one-electron (ours) & SOMF (ours) & ORCA one-electron & ORCA SOMF \\
+\midrule
+OH & $206.52$ & $129.23$ & $205.88$ & $128.83$ \\
+OF & $273.06$ & $176.77$ & $272.06$ & $176.12$ \\
+\bottomrule
+\end{tabular}
+\end{center}
+in cm$^{-1}$.  The screening ratio SOMF/one-electron removes the
+overall one-electron convention offset between the codes.  The
+recorded ratios are $0.625738$ (OH) and $0.647358$ (OF), against ORCA
+$0.625753$ and $0.647357$; the scale-corrected SOMF values are
+$128.827$ and $176.120$~cm$^{-1}$, with deviations
+$-0.0030$~cm$^{-1}$ ($-2.35\times10^{-5}$ relative) and
+$+0.00024$~cm$^{-1}$ ($1.34\times10^{-6}$ relative).  The source file
+is \texttt{experiments/somf/results\_somf.json}; the driver is
+\texttt{experiments/somf/validate\_oh\_of.py}.
+
+The one-electron column is not the physical SOC; it omits the
+two-electron screening.  The SOMF column is the mean-field
+approximation to that screening.  The near-perfect ratio agreement is
+the evidence that the two-electron contraction has the right shape,
+not that the absolute operator is exact.
+
+\subsection{GeF with an ECP: the ECP spin--orbit operator}
+
+The ECP validation on GeF uses \texttt{lanl2dz} on Ge and F, the
+spin--orbit ECP \texttt{ecpds28mdfso} on Ge, and a two-state
+state-averaged calculation.  The recorded valence-level SOMF splitting
+is $28.37$~cm$^{-1}$, against $43.72$~cm$^{-1}$ for the nuclear-only
+operator on the same density.  The difference is the valence mean
+field and is the quantity the ECP decomposition does not fix uniquely.
+On YbF the \texttt{ECPso} norm on Yb is $17.04$ per component, while
+the raw nuclear operator norm on the same center is of order
+$10^{4}$; adding both would be dominated by an operator that the ECP
+was built to replace.  The gradient prototype on GeF follows a finite
+difference of the SOC matrix element to $2.4\times10^{-5}$ relative,
+with a density-response term of $4.4\times10^{-7}$ in that direction.
+The source files are
+\texttt{experiments/somf\_ecp/results\_compare\_orca\_gef.json} and
+\texttt{experiments/somf\_ecp/results\_somf\_grad\_f.json}.
+
+\subsection{H\texorpdfstring{$_2$}{2}O/6-31G: two-component X2C
+acceptance bounds}
+
+The two-component DF-X2C HF layer on H$_2$O/6-31G with
+\texttt{def2-universal-jkfit} is checked against pyscf's
+\texttt{SpinorX2CHelper} and exact-ERI X2C UHF.  The recorded
+acceptance bounds are
+\begin{center}
+\small
+\begin{tabular}{lr}
+\toprule
+Check & Bound \\
+\midrule
+hcore against \texttt{SpinorX2CHelper} & max $<10^{-9}$, relative $<10^{-10}$ \\
+DF SCF against exact X2C UHF & $<10^{-4}$~Eh (the fit) \\
+gradient against 3-point differences & relative $<2\times10^{-5}$ \\
+gradient against 5-point differences & relative $<2\times10^{-6}$ \\
+translation and rotation invariance & relative $<10^{-6}$ \\
+factor derivatives against geometry FD & relative $<10^{-6}$ \\
+\bottomrule
+\end{tabular}
+\end{center}
+These are the release's recorded criteria; the raw gradient components
+are not stored in the release tree.  A requested XeH$^{+}$
+three-direction gradient record is also not part of this tree; the
+XeH$^{+}$ file that is present
+(\texttt{tests/core/test\_x2c\_sap\_heavy.py}) checks only that the
+SAP-X2C energy moves toward the four-component DHF reference and is
+gated behind \texttt{DIFFMRC\_X2C\_SAP\_HEAVY=1}.  The source files for
+the table are \texttt{tests/core/test\_x2c\_df.py} and
+\texttt{experiments/df\_x2c\_gradient\_validation.py}.
+
+\section{Pitfalls}
+\label{sec:x2c-limits}
+
+\subsection{Scalar layer}
+
+{\sloppy
+\begin{itemize}
+\item Effective core potentials are not supported.  The spin-free X2C
+  helper raises \texttt{NotImplementedError} for an ECP molecule, and
+  the layer inherits that limit.
+\item The CI, RDM, and Fock contractions are dense in the spin-orbital
+  space; the 2-RDM is an $n_{\mathrm{so}}^4$ object.  The prototype is
+  sized for the validation systems.  Production f-block active spaces
+  need a factorized 2-RDM route.
+\item The complex two-component CI, complex orbital rotations, and the
+  Kramers-restricted response are designed but not implemented.
+\item The state-averaged response is a finite-difference construction
+  of $H$ and $M$ around the analytic orbital gradient.  Its cost grows
+  with the number of rotation parameters and displaced geometries.
+\item The displaced-geometry reference has a second orbital minimum on
+  H$_2$O in the same $\theta$ space.  \texttt{df\_x2c\_energies\_at}
+  follows the envelope path; re-optimizing at the displaced geometry is
+  a different, branch-sensitive path and is not the reference for the
+  analytic gradient.
+\end{itemize}
+\par}
+
+\subsection{Two-component layer}
+
+\begin{itemize}
+\item The layer is Hartree--Fock.  A state-specific or state-averaged
+  two-component CASSCF is not implemented.
+\item Full-electron basis sets only; the ECP limit is the same as in
+  the scalar layer.
+\item The physical X2C multireference path remains open.  The pyscf
+  \texttt{int2e\_spinor} array does not obey the chemist pair symmetry
+  (measured violation $0.62$ on H$_2$O/6-31G), and the CI Hamiltonian
+  built from it with the determinant-energy ordering does not commute
+  with many-body time reversal on OH/6-31G.  Kramers-restricted
+  response is therefore not available on this stack.
+\item The X2C transform derivative carries a transform-layer central
+  difference at $10^{-4}$ Bohr, with a measured error about $10^{-7}$
+  relative on H$_2$O.  It is not an analytic derivative of the
+  transform chain.
+\item A scalar-versus-two-component energy difference is not a pure
+  X2C effect when the two layers use different wavefunction methods.
+  Hold the method and the two-electron operator fixed before assigning
+  the difference to relativity.
+\end{itemize}
+
+\subsection{SOMF and ECP}
+
+\begin{itemize}
+\item The SOMF operator is density dependent.  A gradient of an SOC
+  matrix element must include the density response; the
+  Hellmann--Feynman expression alone is incomplete.
+\item The two-electron kernel is not symmetric under
+  $(pq)\leftrightarrow(rs)$; use \texttt{somf\_density\_response},
+  not the value contraction, for a derivative.
+\item The ECP decomposition is not unique.  The split between the ECP
+  spin--orbit operator and the explicit valence mean field is a fitting
+  freedom; report the variant bracket.
+\item Eligibility is a property of the ECP data, not of the atomic
+  number.  A scalar-only ECP does not supply \texttt{ECPso}.
+\end{itemize}
+
+\section{Validation and references}
+\label{sec:x2c-validation}
+
+{\raggedright
+The files behind this chapter are
+\texttt{tests/core/test\_x2c\_casscf\_df.py},
+\texttt{tests/core/test\_x2c\_df.py},
+\texttt{tests/core/test\_somf.py},
+\texttt{tests/core/test\_somf\_ecp.py},
+\texttt{experiments/df\_x2c\_casscf\_validation.py},
+\texttt{experiments/df\_x2c\_gradient\_validation.py},
+\texttt{experiments/somf/validate\_oh\_of.py},
+\texttt{experiments/somf\_ecp/validate\_ecp\_somf.py}, and
+\texttt{experiments/somf\_ecp/validate\_somf\_grad.py}.  The measured
+values are the OH/OF splittings, the GeF ECP splitting and gradient,
+the YbF ECP norms, and the acceptance bounds of
+Section~\ref{sec:x2c-example}.\par}
+
+The X2C construction follows W.~Kutzelnigg and W.~Liu,
+\emph{J. Chem. Phys.} \textbf{123}, 241102 (2005), and the review in
+M.~Reiher and A.~Wolf, \emph{Relativistic Quantum Chemistry}
+(Wiley, 2009).  The SOMF operator follows the ORCA 6.1 manual
+(Section 5.26), F.~Hess, C.~M.~Marian, U.~Wahlgren and O.~Gropen,
+\emph{Chem. Phys. Lett.} \textbf{251}, 365 (1996), and F.~Neese,
+\emph{J. Chem. Phys.} \textbf{122}, 034107 (2005).  The
+effective-core-potential construction and its spin--orbit integrals
+are documented in the pyscf \texttt{gto} and \texttt{ECPso}
+documentation and in the Stuttgart--K\"oln ECP papers cited by the
+\texttt{stuttgart\_rsc} basis data.

@@ -1,0 +1,198 @@
+\section{RIJONX SCF: an RI-J Coulomb reference with exact exchange}
+\label{sec:rijonx-tutorial}
+
+The multireference chain consumes a converged SCF reference.  The
+RIJONX driver fits the Coulomb term with the same three-center factors
+as the correlation layers and keeps the exchange four-center exact:
+\begin{equation}
+  E = E_{\mathrm{nuc}} + \mathrm{Tr}(Dh)
+    + \tfrac{1}{2}\mathrm{Tr}(D J_{\mathrm{RI}})
+    - \tfrac{1}{4}\mathrm{Tr}(D K_{\mathrm{exact}}),
+  \qquad
+  J_{\mathrm{RI}} = W D W^{T},
+  \label{eq:tutorial-rijonx}
+\end{equation}
+with $W = B S^{-1/2}$.  This is RIJONX, not RI-JK and not RIJCOSX.  The
+exchange branch is the dense four-center integral, so the method
+removes the Coulomb four-center work, not the exchange four-center
+work.
+
+\subsection{Closed-shell water}
+
+\begin{lstlisting}[language=Python]
+import os
+os.environ['JAX_PLATFORMS'] = 'cpu'
+for v in ('OMP_NUM_THREADS', 'MKL_NUM_THREADS',
+          'OPENBLAS_NUM_THREADS', 'NUMEXPR_NUM_THREADS'):
+    os.environ[v] = '4'
+
+import numpy as np
+import jax
+jax.config.update('jax_enable_x64', True)
+
+from pyscfad import gto, scf
+from diffmrc.driver.ri_scf_driver import rijonx_scf, rijonx_scf_gradient
+
+mol = gto.Mole()
+mol.atom = 'O 0 0 0.1173; H 0 0.7572 -0.4692; H 0 -0.7572 -0.4692'
+mol.basis = '6-31g'
+mol.verbose = 0
+mol.build()
+
+mf = rijonx_scf(mol)
+ref = scf.RHF(mol)
+ref.kernel()
+print('RIJONX ', mf.e_tot)
+print('dense  ', ref.e_tot)
+print('difference', mf.e_tot - ref.e_tot)
+\end{lstlisting}
+
+The difference is the J fit, typically of order $10^{-5}$~Eh for this
+basis and auxiliary set.  It is not an implementation error, and it
+does not shrink with SCF convergence; the SCF is converged on the
+RIJONX energy surface, not on the dense one.
+
+\subsection{Where the error comes from}
+
+Write the fitted Coulomb matrix as
+\begin{equation}
+  J_{\mathrm{RI}} = J_{\mathrm{exact}} + \Delta J_{\mathrm{fit}},
+  \label{eq:tutorial-rijonx-jerror}
+\end{equation}
+with the exchange matrix left exact.  At a fixed density the energy
+error is
+\begin{equation}
+  \Delta E_{\mathrm{fit}}
+  = \tfrac{1}{2}\mathrm{Tr}\left(D\,\Delta J_{\mathrm{fit}}\right),
+  \label{eq:tutorial-rijonx-eerror}
+\end{equation}
+and no corresponding exchange term exists, because $K$ is not fitted.
+At self-consistency the density also relaxes on the RIJONX surface, so
+the difference to a dense RHF calculation is
+\begin{equation}
+  E_{\mathrm{RIJONX}}-E_{\mathrm{RHF}}
+  = \Delta E_{\mathrm{fit}}[D_{\mathrm{RI}}]
+    + \left(E_{\mathrm{RIJONX}}[D_{\mathrm{RI}}]
+           -E_{\mathrm{RIJONX}}[D_{\mathrm{RHF}}]\right),
+  \label{eq:tutorial-rijonx-relax}
+\end{equation}
+where the second term is the density-relaxation contribution.  The
+recorded H$_2$O/6-31G shift is $-3.75\times10^{-5}$~Eh
+(\texttt{tests/driver/test\_ri\_scf\_driver.py}); OH/6-31G gives
+$-2.73\times10^{-5}$~Eh and HI/def2-svp with an ECP gives
+$-2.56\times10^{-5}$~Eh.  These are fitting errors, not implementation
+errors, and they should be quoted with the auxiliary basis.
+
+The same split applies to the gradient:
+\begin{equation}
+  \frac{dE}{dR}
+  = \left(\frac{\partial E}{\partial R}\right)_{\mathrm{RI}}
+  + \left(\frac{\partial E}{\partial D}\right)
+    \frac{dD}{dR},
+  \label{eq:tutorial-rijonx-grad-error}
+\end{equation}
+where the first term contains the analytic RI-J factor derivative and
+the dense exact-K derivative, and the second is the orbital-response
+completion supplied by \texttt{rijonx\_scf\_gradient}.  Dropping the
+second term is the fixed-coefficient error of order $1$~Eh/bohr
+discussed below.
+
+\subsection{The converged gradient}
+
+\texttt{rijonx\_scf\_gradient} is the entry point for a converged
+reference.  It combines the fixed-coefficient (skeleton) gradient with
+the overlap-derivative completion that the skeleton alone misses.
+
+\begin{lstlisting}[language=Python]
+g = rijonx_scf_gradient(mf)
+g_imp = np.asarray(mf.energy_grad().coords)
+print('explicit', g)
+print('implicit', g_imp)
+print('max difference', np.abs(g - g_imp).max())
+\end{lstlisting}
+
+The fixed-coefficient functions in \texttt{driver.ri\_scf}
+(\texttt{rijonx\_energy}, \texttt{rijonx\_gradient}) are not SCF
+gradients even at a converged density.  They are useful for checking
+the integral and factor derivatives at fixed coefficients, and
+\texttt{tests/driver/test\_ri\_scf.py} does exactly that against finite
+differences.  Using them as a molecular gradient misses the orbital
+response and is wrong at order $1$~Eh/Bohr.
+
+\subsection{Open shell: ROHF and UHF}
+
+A non-zero \texttt{mol.spin} selects \texttt{RIJONX\_ROHF}.  Pass
+\texttt{uhf=True} to select \texttt{RIJONX\_UHF}.  The explicit
+gradient handles both layouts; it is not necessary to fall back to
+implicit differentiation.
+
+\begin{lstlisting}[language=Python]
+mol = gto.Mole()
+mol.atom = 'O 0 0 0; H 0 0 2.30'
+mol.basis = '6-31g'
+mol.spin = 1
+mol.verbose = 0
+mol.build()
+
+mf_rohf = rijonx_scf(mol)
+g_rohf = rijonx_scf_gradient(mf_rohf)
+g_imp = np.asarray(mf_rohf.energy_grad().coords)
+print('ROHF explicit vs implicit', np.abs(g_rohf - g_imp).max())
+
+mf_uhf = rijonx_scf(mol, uhf=True)
+g_uhf = rijonx_scf_gradient(mf_uhf)
+g_imp_uhf = np.asarray(mf_uhf.energy_grad().coords)
+print('UHF explicit vs implicit', np.abs(g_uhf - g_imp_uhf).max())
+\end{lstlisting}
+
+The stretched OH geometry is the useful test.  At equilibrium the
+gradient is close to zero, and an absolute tolerance cannot distinguish
+a wrong response term from a small one.  The recorded checks are
+$10^{-6}$~Eh/Bohr for ROHF explicit against implicit and $10^{-5}$ for
+UHF, with central differences at the same scale.
+
+\subsection{ECP references}
+
+An ECP molecule works when the molecule is built with an explicit
+\texttt{ecp} argument.  The core-Hamiltonian helper adds the scalar ECP
+term, and the auxiliary basis is built from the same atom list.
+
+\begin{lstlisting}[language=Python]
+mol = gto.Mole()
+mol.atom = 'H 0 0 0; I 0 0 1.61'
+mol.basis = 'def2-svp'
+mol.ecp = 'def2-svp'
+mol.verbose = 0
+mol.build()
+
+mf = rijonx_scf(mol)
+print('HI ECP energy', mf.e_tot)
+g = rijonx_scf_gradient(mf)
+print('gradient', g)
+\end{lstlisting}
+
+The recorded ECP gradient deviation against a central difference is
+$3.0\times10^{-7}$~Eh/Bohr on this system.  The RI-J-minus-dense energy
+shift is $-2.6\times10^{-5}$~Eh, which is the fit.
+
+\subsection{Limits that bite in practice}
+
+\begin{itemize}
+\item Build a fresh \texttt{Mole} and mean-field object per geometry.
+  The RI factor cache and the pyscfad integral caches are keyed on the
+  built molecule and are not reliably refreshed by an in-place geometry
+  edit.
+\item Range-separated Coulomb is refused: the factors are built for the
+  full operator.  RI-JK and a production RIJCOSX route are out of
+  scope; the COSX functions in \texttt{driver.ri\_scf} are a fixed-grid
+  prototype for exchange and are not a production path.
+\item The exact exchange branch still forms and caches the dense
+  \texttt{nao}$^{4}$ tensor and, under geometry differentiation, its
+  dense derivative.  RI-J removes the Coulomb part of that work, not
+  the exchange part.
+\item Fractional occupations are refused by the explicit gradient.  Use
+  integer-occupation RHF, ROHF, or UHF references.
+\item A non-converged SCF raises rather than returning a reference.
+  This is deliberate: every downstream multireference number would
+  otherwise rest on an unconverged density.
+\end{itemize}

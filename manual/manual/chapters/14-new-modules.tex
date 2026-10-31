@@ -2,16 +2,25 @@
 \chapter{New modules in version 0.3}
 \label{ch:new-modules}
 
-Version 0.3 adds five layers to the public surface: a relaxed-path
-NEVPT2 nuclear gradient, a coupled CASPT2 contraction, a valence-level
-spin-orbit mean field for effective-core potentials, a RIJONX
-self-consistent-field driver, and a scalar density-fitted X2C CASSCF
-layer.  Each is additive: no existing signature changed, and the
+Version 0.3 adds the layers of this chapter to the public surface: a
+relaxed-path NEVPT2 nuclear gradient, a coupled CASPT2 contraction, a
+valence-level spin-orbit mean field for effective-core potentials, a
+RIJONX self-consistent-field driver, and a scalar density-fitted X2C
+CASSCF layer.  Each is additive: no existing signature changed, and the
 release core described in Chapter~\ref{ch:differentiable-chain} is
 untouched.  This chapter states, for each layer, what the entry point
 computes, what the caller must supply, and where the implementation
 stops.  The RI factor conventions reused by two of the layers are those
 of Chapter~\ref{ch:ri-df}.
+
+Two subjects receive dedicated chapters because they carry a class
+table or a second wavefunction representation rather than a single
+entry point.  The eight CASPT2 classes, the three-active-index
+treatment, the coupled path, and the three-center contraction are in
+Chapter~\ref{ch:caspt2-classes}.  The scalar and two-component X2C
+layers, including the two-component Hartree--Fock layer that is not
+part of this chapter's scalar summary, are in
+Chapter~\ref{ch:relativistic-layers}.
 
 \begin{center}
 \small
@@ -25,6 +34,9 @@ Module & Main entry point & Layer \\
 \texttt{core.caspt2} &
   \texttt{caspt2\_contracted\_e2\_coupled} &
   value (NumPy) \\
+\texttt{core.caspt2\_three\_center} &
+  \texttt{caspt2\_contracted\_e2\_\allowbreak three\_center} &
+  value (NumPy, three-center coupling) \\
 \texttt{core.somf\_ecp} &
   \texttt{valence\_somf\_matrix} &
   value (NumPy) \\
@@ -34,6 +46,9 @@ Module & Main entry point & Layer \\
 \texttt{core.x2c\_casscf\_df} &
   \texttt{df\_x2c\_casscf} &
   value and analytic gradient \\
+\texttt{core.x2c\_df} &
+  \texttt{df\_x2c\_hf}, \texttt{df\_x2c\_hf\_gradient} &
+  two-component HF value and analytic gradient \\
 \bottomrule
 \end{tabularx}
 \end{center}
@@ -151,7 +166,7 @@ from diffmrc.core.orblib import orbital_pairs
 from diffmrc.driver.nevpt2_zvector import (
     make_nevpt2_joint_fn_si_exact, nevpt2_relaxed_gradient_zvector)
 
-ncore, nact, nele = 1, 2, 2
+ncore, nact, nele = 4, 2, 2
 nmo = mol.nao_nr()
 pairs = orbital_pairs(ncore, nact, nmo, include_cv=True)
 
@@ -184,11 +199,30 @@ $3.8\times10^{-6}$, condition number $2.3\times10^{7}$) whose response
 is not part of the correlation source; $10^{-7}$ cuts it, while a looser
 cutoff keeps it and amplifies roundoff.
 
+The response is validated on the closed-shell frozen-core systems
+H$_2$O/6-31G and LiH/6-31G, both CAS(2,2), against finite differences
+of the relaxed path.  The chain-level checks that the exact
+\texttt{Si} assembly does not disturb the release total are in
+\texttt{tests/driver/test\_nevpt2\_zvector.py}: with a core present the
+corrected and release totals agree to $10^{-11}$ on H$_2$O/STO-3G, the
+LiH/6-31G chain reproduces the release total to $10^{-10}$ with a
+masked channel, and the no-core case reduces identically.  The same
+file pins the algebra of \texttt{si\_energy\_from\_invariants}, the
+blockwise alignment map, the adjoint solve, the Lagrangian identity,
+and the soft-mode cutoff.  The scope of the response operator is
+narrower than the scope of the energy: open-shell, ECP, f-block, and
+large-basis relaxed gradients are outside the validated range, and the
+exact near-zero treatment covers the \texttt{Si} class only.  The other
+four contraction classes retain the release value mask; no validation
+system with a masked channel outside \texttt{Si} has been found.
+
 \section{Coupled CASPT2}
 \label{sec:new-caspt2-coupled}
 
 \texttt{core.caspt2} has two contraction schemes of the same eight-class
-internally contracted basis.  The diagonal path
+internally contracted basis; the class table and the three-active-index
+treatment are documented in Chapter~\ref{ch:caspt2-classes}, and the
+summary here is limited to the coupled path.  The diagonal path
 (\texttt{caspt2\_contracted\_e2}) evaluates each contracted function
 with its own denominator,
 
@@ -378,6 +412,33 @@ component, while the raw nuclear operator norm on the same center is of
 order $10^{4}$; adding both would be dominated by an operator that the
 ECP was built to replace.
 
+\subsection{Element range and validation}
+
+The operator applies exactly to the centers whose effective core
+potential carries a spin--orbit component.  A molecule is eligible when
+\texttt{mol.has\_ecp\_soc()} is true; otherwise \texttt{ecp\_soc}
+raises and the caller must use the all-electron \texttt{core.somf}
+module instead.  A scalar-only ECP does not supply \texttt{ECPso} and
+cannot be promoted to a spin--orbit operator by this module.  Within
+the validated set, the parameterizations exercised are the
+shape-consistent and energy-consistent spin--orbit sets exposed by
+pyscf: Ge with \texttt{ecpds28mdfso} and Yb with
+\texttt{ecpds28mwbso}, in both cases paired with a matching orbital
+basis and a scalar ECP on the ligand centers.  The module makes no
+statement about elements outside that set; eligibility is a property of
+the ECP data, not of the atomic number.
+
+On GeF with a spin--orbit ECP the valence-level SOMF splitting is
+$28.37$~cm$^{-1}$, against $43.72$~cm$^{-1}$ for the nuclear-only
+operator on the same density.  The difference is the valence mean
+field and is the quantity the ECP decomposition does not fix uniquely.
+The gradient prototype on the same system follows a finite difference
+of the SOC matrix element to $2.4\times10^{-5}$ relative; the separate
+density-response term is $4.4\times10^{-7}$ in that direction, which is
+the size the non-symmetric kernel contributes and the reason
+\texttt{somf\_density\_response} exists.  The YbF case exercises the
+opposite regime, where the ECP term dominates the nuclear operator.
+
 \section{RIJONX SCF}
 \label{sec:new-rijonx}
 
@@ -408,13 +469,14 @@ Entry point & Returns and purpose \\
 \midrule
 \texttt{rijonx\_scf(...)} &
   A converged pyscfad mean-field object; arguments \texttt{(mol,
-  auxbasis=None, rcond, **kernel\_kwargs)}.  \texttt{RIJONX\_ROHF} is
-  selected when \texttt{mol.spin} is non-zero, and a non-converged run
-  raises. \\
+  auxbasis=None, rcond=1e-12, uhf=False, **kernel\_kwargs)}.
+  \texttt{RIJONX\_ROHF} is selected when \texttt{mol.spin} is
+  non-zero, and \texttt{RIJONX\_UHF} when \texttt{uhf=True}; a
+  non-converged run raises. \\
 \texttt{rijonx\_scf\_gradient(...)} &
-  Full nuclear gradient of the converged closed-shell energy, shape
-  \texttt{(natm, 3)} in Eh/bohr; arguments \texttt{(mf, auxbasis,
-  rcond)}. \\
+  Full nuclear gradient of the converged RIJONX energy (RHF, ROHF, or
+  UHF layout), shape \texttt{(natm, 3)} in Eh/bohr; arguments
+  \texttt{(mf, auxbasis, rcond)}. \\
 \texttt{rijonx\_energy(mol, C, ...)} &
   The energy of Eq.~\eqref{eq:new-rijonx} at fixed coefficients. \\
 \texttt{rijonx\_gradient(mol, C, ...)} &
@@ -452,13 +514,36 @@ not reliably refreshed by an in-place geometry edit.
 The exact exchange branch still forms and caches the dense
 \texttt{nao}$^{4}$ tensor and, under geometry differentiation, its
 dense derivative.  RI-J removes the Coulomb part of that work, not the
-exchange part.  The explicit open-shell gradient is not implemented;
-\texttt{rijonx\_scf\_gradient} refuses fractional or single
-occupations, and the implicit route \texttt{mf.energy\_grad()} is the
-only open-shell path and has not been checked against finite
-differences.  Range-separated Coulomb is refused because the factors
+exchange part.  Range-separated Coulomb is refused because the factors
 are built for the full operator.  ECP molecules work when the molecule
 is built with an explicit \texttt{ecp} argument.
+
+The explicit gradient covers closed-shell and open-shell references.
+\texttt{rijonx\_scf\_gradient} dispatches on the occupation layout.
+For a closed-shell reference it uses the overlap completion with
+$W = 2C_{\mathrm{occ}}\epsilon C_{\mathrm{occ}}^{T}$.  For an ROHF or
+UHF reference it calls the open-shell branch, which assembles the
+skeleton gradient from the spin-summed energy
+\begin{equation}
+  E = E_{\mathrm{nuc}} + \mathrm{Tr}(D_{\mathrm{tot}}h)
+    + \tfrac{1}{2}\mathrm{Tr}(D_{\mathrm{tot}}J_{\mathrm{RI}}
+      [D_{\mathrm{tot}}])
+    - \tfrac{1}{2}\sum_{\sigma}
+      \mathrm{Tr}(D_{\sigma}K[D_{\sigma}]),
+  \label{eq:new-rijonx-open}
+\end{equation}
+so the RI-J term and the core Hamiltonian see the total density while
+the exact exchange sees each spin density separately.  The orbital
+response is the overlap term $-2\sum_{\mu\in A}W_{\mu\nu}
+\,\partial S_{\mu\nu}/\partial R$, with the spin-resolved
+energy-weighted density that pyscf's ROHF and UHF gradient modules use:
+$P_a f_a P_a + P_b f_b P_b$ for ROHF, and the occupation-weighted
+orbital-energy densities for UHF.  The Fock matrices come from
+\texttt{mf.get\_veff}, that is, from the same RI-J plus exact-K
+assembly the SCF converged on.  A restricted open-shell reference is
+the default for a non-zero \texttt{mol.spin}; pass
+\texttt{rijonx\_scf(mol, uhf=True)} to select \texttt{RIJONX\_UHF}.
+Fractional occupations are still refused.
 
 \begin{lstlisting}[language=Python]
 from diffmrc.driver.ri_scf_driver import rijonx_scf, rijonx_scf_gradient
@@ -469,23 +554,37 @@ e_tot = mf.e_tot
 # Closed-shell full gradient (skeleton plus overlap completion):
 grad = rijonx_scf_gradient(mf)
 
-# Open shell: only the implicit path is available.
-# grad_open = mf.energy_grad().coords
+# ROHF reference (mol.spin != 0), same entry point:
+# grad_open = rijonx_scf_gradient(mf_rohf)
+
+# UHF reference:
+# mf_uhf = rijonx_scf(mol, uhf=True)
+# grad_uhf = rijonx_scf_gradient(mf_uhf)
 \end{lstlisting}
 
 The energy and gradient are validated on H$_2$O and CO (closed shell),
-the OH radical (open-shell energy), and HI/def2-svp with an ECP
-(gradient against central differences).  The explicit and implicit
-closed-shell gradients agree to $10^{-6}$~Eh/bohr; the measured
-RIJONX-minus-dense energy difference on HI is $-2.6\times10^{-5}$~Eh,
-which is the J fit, not an implementation error.
+the OH radical (ROHF and UHF, gradients against implicit
+differentiation and central differences), OF (a second ROHF system),
+and HI/def2-svp with an ECP (gradient against central differences).
+The explicit and implicit closed-shell gradients agree to
+$10^{-6}$~Eh/bohr; the ROHF explicit gradient agrees with implicit
+differentiation to $10^{-6}$~Eh/bohr and with central differences to
+$10^{-5}$~Eh/bohr; the UHF explicit gradient agrees with implicit
+differentiation to $10^{-5}$~Eh/bohr; and the ECP gradient deviation is
+$3.0\times10^{-7}$~Eh/bohr.  The measured RIJONX-minus-dense energy
+difference on HI is $-2.6\times10^{-5}$~Eh, which is the J fit, not an
+implementation error.
 
 \section{Scalar DF-X2C CASSCF}
 \label{sec:new-x2c-casscf}
 
 \texttt{core.x2c\_casscf\_df} adds a state-specific and state-averaged
 CASSCF layer on the scalar (spin-free) X2C one-electron Hamiltonian
-with a density-fitted two-electron part:
+with a density-fitted two-electron part.  The full relativistic family,
+including the two-component DF-X2C Hartree--Fock layer of
+\texttt{core.x2c\_df} and the common input conventions, is in
+Chapter~\ref{ch:relativistic-layers}; this section states the scalar
+layer's energy and entry points:
 
 \begin{equation}
   E = \sum_{pq}\gamma_{pq} h_{pq}
@@ -621,16 +720,24 @@ Module & Validated on & Not covered \\
   table &
   differentiable coupled path; large active spaces \\
 \texttt{somf\_ecp} &
-  GeF with a spin-orbit ECP; YbF \texttt{ECPso} norms; operator and
-  response identities &
-  production absolute SOC; orbital and CI response \\
+  GeF with a spin-orbit ECP (splitting and gradient); YbF
+  \texttt{ECPso} norms; operator and response identities &
+  production absolute SOC; orbital and CI response; elements outside
+  the fitted spin-orbit ECP sets \\
 \texttt{ri\_scf}, \texttt{ri\_scf\_driver} &
-  H$_2$O, CO, OH (energy), HI/def2-svp with an ECP (gradient) &
-  open-shell analytic gradient; RI-JK; production COSX \\
+  H$_2$O, CO, OH ROHF and UHF (energies and explicit gradients), OF
+  ROHF, HI/def2-svp with an ECP (gradient) &
+  fractional occupations; RI-JK; production COSX \\
 \texttt{x2c\_casscf\_df} &
   H$_2$O/6-31G, CAS(2,2) and SA(2), against density-fitted sfx2c1e
   CASSCF &
-  ECP; complex two-component CI; Kramers response; large active spaces \\
+  ECP; complex two-component CI; Kramers response; large active spaces
+  (see Chapter~\ref{ch:relativistic-layers}) \\
+\texttt{x2c\_df} &
+  H$_2$O/6-31G two-component HF, against pyscf \texttt{SpinorX2CHelper}
+  and exact-ERI X2C UHF &
+  multireference response; Kramers-restricted CASSCF; ECP
+  (see Chapter~\ref{ch:relativistic-layers}) \\
 \bottomrule
 \end{tabularx}
 \end{center}

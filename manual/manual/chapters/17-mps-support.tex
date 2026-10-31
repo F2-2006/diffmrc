@@ -1,0 +1,262 @@
+\chapter{MPS/DMRG support in the release}
+\label{ch:mps-support}
+
+\section{Purpose and scope}
+
+The release tree does not contain a tensor-network DMRG solver, and it
+does not contain the material-diffusion tools of the development
+branch.  What it contains is one graduated DMRG-line utility,
+\texttt{core.mps.pin\_degenerate\_columns}, which resolves a
+reproducibility problem that appears before any DMRG calculation can be
+run: pyscf RHF orbitals are unique only up to arbitrary orthogonal
+rotations inside exactly degenerate irreps, so two processes can return
+different representatives of the same degenerate pair.  A
+column-referenced active-space window, such as ``columns 6 and 7'', then
+means different orbitals in different runs.
+
+The utility applies to any column-referenced orbital window on a
+canonical SCF or CASSCF orbital set.  It does not select an active
+space, rank windows, or run a DMRG calculation; it only fixes the
+representative of a degenerate group.  It is NumPy-only and has no JAX
+or pyscf dependency.
+
+\section{Theory and derivation}
+\label{sec:pin-theory}
+
+\subsection{Degenerate subspaces and gauge freedom}
+
+Let $F$ and $S$ be the Fock and overlap matrices in the AO basis, and
+let $C$ be a set of orthonormal molecular orbitals,
+\begin{equation}
+  C^{T}SC = I,
+  \qquad
+  F C = S C\,\epsilon,
+  \label{eq:pin-eigen}
+\end{equation}
+with $\epsilon=\mathrm{diag}(\epsilon_1,\dots,\epsilon_{n_{\mathrm{mo}}})$.
+Suppose a group of columns $G=\{g_1,\dots,g_m\}$ has
+\begin{equation}
+  |\epsilon_i-\epsilon_j|<\tau_{\mathrm{deg}},
+  \qquad i,j\in G,
+  \label{eq:pin-group}
+\end{equation}
+with $\tau_{\mathrm{deg}}$ the \texttt{deg\_tol} parameter.  For any
+orthogonal matrix $U\in O(m)$ the rotated set
+\begin{equation}
+  C'_G = C_G\,U
+  \label{eq:pin-rotation}
+\end{equation}
+is an equally valid orthonormal eigenbasis of the same degenerate
+subspace: the span is unchanged, the Fock eigenvalues are unchanged,
+and the energy of any wavefunction built from the complete group is
+unchanged.  Different SCF runs, different linear-algebra backends, or
+different starting guesses can return different $U$.
+
+If a column-referenced window cuts a degenerate group, the selected
+columns are not a well-defined subspace.  On N$_2$/6-31G the RHF
+spectrum carries the $\pi_u$ pair at columns $(5,6)$, the $\pi_g$ pair
+at $(7,8)$, and two higher pairs.  A CAS(2,2) on the recorded start
+window $\{6,7\}$ scattered over $0.02$~Ha across fresh builds although
+the RHF energy matched to $3\times10^{-13}$, because the occupied
+$\pi_u$ mixture decides which combination sits in the frozen core.
+
+\subsection{The pinning map}
+
+The utility picks a deterministic basis inside each degenerate group
+by diagonalizing a caller-supplied Hermitian operator $X^{2}$ in the
+group's span:
+\begin{equation}
+  \left(C_G^{T}X^{2}C_G\right)V = V\,\Lambda,
+  \qquad
+  \Lambda=\mathrm{diag}(\lambda_1,\dots,\lambda_m),
+  \label{eq:pin-x2}
+\end{equation}
+and replaces
+\begin{equation}
+  C_G \leftarrow C_G\,V_{[:,\pi]},
+  \label{eq:pin-replace}
+\end{equation}
+where $\pi$ orders the eigenvalues in descending order.  The
+expectation values $\lambda_i$ are the diagonal $X^{2}$ values of the
+new columns, and the columns are ordered by that value.  The phase of
+each resulting column is fixed by making its largest-magnitude
+coefficient positive:
+\begin{equation}
+  c_i \leftarrow \mathrm{sign}\!\left(c_{i,\mu(i)}\right)c_i,
+  \qquad
+  \mu(i)=\arg\max_\mu |c_{i\mu}|.
+  \label{eq:pin-phase}
+\end{equation}
+Non-degenerate columns pass through unchanged except for this phase
+convention.
+
+The map has three properties that make it safe to insert into an
+existing workflow:
+
+\begin{itemize}
+\item \emph{Span invariance.}  A window that contains a degenerate group
+  whole is invariant under Eq.~\eqref{eq:pin-replace}: the span is
+  preserved, so its CI energies do not move.
+\item \emph{Determinism.}  A split group becomes deterministic.  Any
+  single representative of a degenerate pair is symmetry-equivalent,
+  but the process-to-process arbitrariness is removed.
+\item \emph{Idempotence and gauge invariance.}  Pinning is idempotent
+  and invariant to an input rotation applied inside a degenerate group:
+  if $C_G$ is replaced by $C_GU$, the projected operator
+  $U^{T}(C_G^{T}X^{2}C_G)U$ has the same eigenvectors transformed by
+  $U$, and the final columns agree.
+\end{itemize}
+
+\subsection{Conditions and failure modes}
+
+The construction is unique only when the restriction of $X^{2}$ to the
+group has a non-degenerate spectrum.  If two eigenvalues of
+$\Lambda$ coincide, the eigenvectors inside that sub-block are again
+arbitrary, and the pinning cannot resolve the remaining gauge.  The
+energy of a complete window is still invariant, but a column-split
+window is not.  On a linear molecule the $x^{2}$ operator distinguishes
+the two components of a $\pi$ pair, which is why it is the operator
+used in the recorded calibration; a spherical operator would not.
+
+The grouping is an energy window, not a symmetry classification.  A
+\texttt{deg\_tol} that is too small splits a physical near-degeneracy
+and pins only part of the group; one that is too large merges distinct
+states.  The recorded test checks both sides of the tolerance
+($2.0+0.5\times10^{-7}$ inside, $2.0+5.0\times10^{-7}$ outside the
+default $10^{-7}$ window).
+
+\section{Input and operation}
+\label{sec:pin-input}
+
+\begin{center}
+\small
+\begin{tabularx}{\textwidth}{>{\raggedright\arraybackslash}p{0.36\textwidth}X}
+\toprule
+Entry point & Returns and purpose \\
+\midrule
+\texttt{pin\_degenerate\_columns} &
+  Arguments \texttt{(mo\_coeff, mo\_energy, x2\_ao, deg\_tol=1e-7)}.
+  Returns \texttt{(C\_pinned, n\_rotated)}.  Every group of columns
+  whose energies agree within \texttt{deg\_tol} is rotated into the
+  eigenbasis of \texttt{x2\_ao}, ordered by descending expectation
+  value; each column's phase is then fixed by making its
+  largest-magnitude entry positive. \\
+\bottomrule
+\end{tabularx}
+\end{center}
+
+\texttt{mo\_coeff} has shape \texttt{(nao, nmo)} and is column-ordered;
+\texttt{mo\_energy} has length \texttt{nmo}; \texttt{x2\_ao} is the
+\texttt{(nao, nao)} matrix of the chosen operator in the same AO basis,
+and \texttt{deg\_tol} is in the energy unit of \texttt{mo\_energy}
+(Eh for SCF orbital energies).  \texttt{n\_rotated} counts the columns
+inside degenerate groups that were re-rotated; the phase convention is
+applied to all columns but is not counted.  The function returns a new
+array and does not modify the input.
+
+A minimal call is
+\begin{lstlisting}[language=Python]
+import numpy as np
+from pyscf import gto, scf
+from diffmrc.core.mps import pin_degenerate_columns
+
+mol = gto.M(atom='N 0 0 0; N 0 0 1.10', basis='6-31g',
+            charge=0, spin=0, verbose=0)
+mf = scf.RHF(mol).run(verbose=0)
+
+rx = mol.intor('int1e_r')[0]
+C, n_rot = pin_degenerate_columns(np.asarray(mf.mo_coeff),
+                                  np.asarray(mf.mo_energy), rx @ rx)
+print('re-rotated columns', n_rot)
+\end{lstlisting}
+
+\section{Worked example}
+\label{sec:pin-example}
+
+\subsection{N\texorpdfstring{$_2$}{2}/6-31G: the recorded start window
+\{6,7\}}
+
+On N$_2$/6-31G at $R=1.10$~\AA{} the raw RHF energy is
+$-108.867618373058$~Eh.  The call above returns \texttt{n\_rot}=8:
+four degenerate pairs are re-rotated.  A CAS(2,2) on the pinned
+$\{6,7\}$ window gives
+\begin{equation}
+  E_{\mathrm{CAS(2,2)}} = -108.8679136653~\text{Eh},
+  \label{eq:pin-n2-window}
+\end{equation}
+stable across fresh builds to the printed digits.  Without pinning the
+same window scattered over $0.02$~Ha.  The regression is the
+\texttt{test\_n2\_6\_31g\_start\_window\_reference} case in
+\texttt{tests/core/test\_mps.py}.
+
+\subsection{N\texorpdfstring{$_2$}{2}/6-31G: the exhaustive-window
+best}
+
+The same pinned basis reproduces the exhaustive-window best of the
+calibration:
+\begin{equation}
+  E_{\mathrm{elec}} = -132.4777614802~\text{Eh},
+  \qquad
+  E_{\mathrm{tot}} = -108.9053220847~\text{Eh},
+  \label{eq:pin-n2-best}
+\end{equation}
+to $8\times10^{-11}$.  The two examples differ in the window, not in
+the pinning: the first is the recorded start window, the second is the
+best window found by the exhaustive scan.  The module docstring records
+the calibration and the reproduction margins; the test pins the first
+window, and the second value is the reference quoted in the same
+graduation record.
+
+\section{Pitfalls}
+\label{sec:pin-pitfalls}
+
+\begin{itemize}
+\item \emph{A split group.}  Pinning a subset of a degenerate group
+  preserves that subset's span but not the physical subspace.  The
+  window must contain the group whole, or the calculation must use a
+  window defined after pinning.
+\item \emph{A degenerate \texttt{x2\_ao} restriction.}  If the chosen
+  operator has equal expectation values inside the group, the
+  eigenbasis is again arbitrary.  The $x^{2}$ operator works for the
+  $\pi$ pairs of a linear molecule; a spherical operator does not.
+\item \emph{The tolerance.}  \texttt{deg\_tol} is an energy window, not
+  a symmetry test.  A value below the numerical splitting of a
+  physical degeneracy leaves the group split; a value above a physical
+  gap merges distinct states.
+\item \emph{Non-Hermitian or non-Hermitianized \texttt{x2\_ao}.}  The
+  eigenproblem in Eq.~\eqref{eq:pin-x2} assumes a Hermitian
+  restriction; a non-symmetric input can return complex or unordered
+  eigenvectors.
+\item \emph{Wrong basis.}  \texttt{x2\_ao} must be in the same AO basis
+  as \texttt{mo\_coeff}.  A Cartesian component from a different
+  basis or a different unit system defines a different deterministic
+  basis; the span invariance still holds, but the recorded reference
+  values do not transfer.
+\item \emph{It is not a DMRG solver.}  The function fixes orbital
+  representatives for column-referenced windows; the DMRG candidate
+  space and the material-diffusion tools mentioned in the development
+  notes are not part of this release tree.
+\end{itemize}
+
+\section{Validation and references}
+\label{sec:pin-validation}
+
+\texttt{tests/core/test\_mps.py} pins the synthetic contracts (pair
+axes, span, phases, idempotence, invariance to an input rotation,
+tolerance behaviour, and the no-group case) and the N$_2$/6-31G
+molecule regression: RHF $-108.867618373058$~Eh, \texttt{n\_rot}$=8$,
+pinned CAS(2,2) $-108.8679136653$~Eh.  The test needs pyscf for the
+molecular case and NumPy only for the synthetic cases.  The graduation
+record is the module docstring of \texttt{core.mps}; the original
+measurements were made in the T5 prototype driver
+(\texttt{code/t416\_t5\_paper\_systems.py} in the development tree) and
+are summarized in the T5 report, neither of which is part of this
+release tree.
+
+The construction is the standard resolution of an orbital gauge
+freedom inside a degenerate subspace; the pyscf orbital conventions and
+the Fock eigenproblem are documented in the pyscf \texttt{scf} and
+\texttt{mcscf} documentation.  The $x^{2}$-based pinning was chosen for
+the linear-molecule $\pi$ pairs because the $x^{2}$ restriction has a
+real eigenvalue gap inside the pair; the calibration and the
+reproduction margins are the record cited above.

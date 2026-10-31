@@ -1,0 +1,234 @@
+\section{Relativistic layers: scalar X2C, two-component X2C, and ECP spin--orbit}
+\label{sec:relativistic-tutorial}
+
+This chapter runs the three relativistic entry points that do not
+belong to the differentiable multireference chain: the scalar
+(spin-free) density-fitted X2C CASSCF, the two-component density-fitted
+X2C Hartree--Fock, and the valence-level spin--orbit mean field for
+effective core potentials.  All three are NumPy or pyscf layers; none
+runs on pyscfad and none contributes to the JAX derivative chain.
+
+\subsection{Scalar DF-X2C CASSCF}
+
+The scalar layer transforms the one-electron Hamiltonian with the
+spin-free Foldy--Wouthuysen operator and keeps the non-relativistic
+Coulomb interaction, density fitted.  The wavefunction is a real
+spin-adapted determinant expansion, so the CASSCF machinery is the same
+as in the non-relativistic chapters.
+
+\begin{lstlisting}[language=Python]
+import numpy as np
+from pyscf import gto
+from diffmrc.core import x2c_casscf_df as xc
+
+mol = gto.M(atom='O 0 0 0; H 0 -0.757 0.587; H 0 0.757 0.587',
+            basis='6-31g', unit='Angstrom', verbose=0)
+
+res = xc.df_x2c_casscf(mol, ncore=4, nact=2, nele=2,
+                       auxbasis='def2-universal-jkfit',
+                       g_conv=1e-6, max_cycle=400)
+print('E', res.e_tot, 'gnorm', res.gnorm,
+      'converged', res.converged)
+print('aux basis', res.auxbasis)
+
+grad, parts = xc.df_x2c_casscf_gradient(mol, res)
+print('gradient', grad)
+for name, value in parts.items():
+    print(f'{name:14s} {np.abs(value).max(): .3e}')
+\end{lstlisting}
+
+The four \texttt{parts} are the one-electron X2C term, the
+density-fitted two-electron term, the Pulay term, and the nuclear
+repulsion.  Their sum is the gradient; the split is useful when a
+gradient looks wrong, because a factor-derivative error and a Pulay
+sign error do not have the same size.
+
+The single-state gradient is the direct derivative at fixed orbitals
+and CI vector: at a converged CASSCF point both responses vanish.  A
+state-averaged calculation is different, because the orbitals minimize
+the average and the target state is not stationary:
+
+\begin{lstlisting}[language=Python]
+res_sa = xc.df_x2c_casscf(mol, ncore=4, nact=2, nele=2,
+                          auxbasis='def2-universal-jkfit',
+                          nroots=2, weights=[0.5, 0.5],
+                          g_conv=1e-6, max_cycle=400)
+print('SA energy', res_sa.e_sa, 'states', res_sa.state_energies)
+
+g0, info = xc.df_x2c_sa_state_gradient(mol, res_sa, state=0,
+                                       return_info=True)
+print('state 0 gradient', g0)
+print('response directions', info['n_response'])
+print('retained directions', info['n_kept'])
+print('Hessian spectrum', info['hess_eigvals'])
+\end{lstlisting}
+
+The state-averaged response is a finite-difference construction of the
+orbital Hessian and the mixed derivative around the analytic
+state-averaged orbital gradient.  The CI vectors are re-diagonalized at
+every displacement, so the CI response is inside the Hessian.  This is
+the route to use when a per-state gradient is needed; do not replace it
+by re-optimizing the orbitals at the displaced geometry, which on water
+can land in a second orbital minimum.
+
+\subsection{Two-component DF-X2C Hartree--Fock}
+
+The two-component layer keeps the spinor structure of the X2C
+transform.  The Hamiltonian is complex Hermitian, the SCF is a complex
+generalized Hartree--Fock, and the density-fitted Coulomb and exchange
+matrices are built directly in the contracted spinor basis.
+
+\begin{lstlisting}[language=Python]
+import numpy as np
+from pyscf import gto
+from pyscf.x2c import x2c as pyscf_x2c
+from diffmrc.core import x2c_df
+
+mol = gto.M(atom='O 0 0 0; H 0 -0.757 0.587; H 0 0.757 0.587',
+            basis='6-31g', unit='Angstrom', verbose=0)
+
+h = x2c_df.df_x2c_hcore(mol)
+h_ref = pyscf_x2c.SpinorX2CHelper(mol).get_hcore(mol)
+print('hcore max difference', np.abs(h - h_ref).max())
+
+hf = x2c_df.df_x2c_hf(mol, auxbasis='def2-universal-jkfit')
+print('E', hf.e_tot, 'gnorm', hf.gradient_norm,
+      'converged', hf.converged)
+print('orbital energies', hf.mo_energy[:4])
+
+grad, parts = x2c_df.df_x2c_hf_gradient(mol, result=hf)
+print('gradient', grad)
+print('parts', {k: float(np.abs(v).max()) for k, v in parts.items()})
+\end{lstlisting}
+
+The one-electron check against pyscf is the first thing to run on a
+new basis: it isolates the X2C transform from the density fitting.  If
+the Hamiltonian differs, the SCF and the gradient will both be wrong
+for a reason that has nothing to do with the two-electron part.
+
+The spinor ERI convention is the complex-GHF one.  The three-center
+tensor is Hermitian in the AO pair, and the derivative with respect to
+the second AO center carries a complex conjugate.  The test suite pins
+that conjugate against a geometry finite difference; a gradient that
+looks right at the $10^{-3}$ level but not at $10^{-6}$ usually has a
+missing conjugate or a wrong AO slice.
+
+\subsection{Valence-level SOMF for ECP calculations}
+
+The all-electron SOMF operator uses the bare nuclear charges and the
+full electron density.  With an effective core potential the core
+electrons are absent, and the spin--orbit part of the ECP replaces
+their contribution.  The valence-level operator is
+\begin{equation}
+  h^{\mathrm{SOMF\text{-}ECP}}_k
+  = \frac{\alpha^{2}}{2}\left[h^{\mathrm{nuc}}_k + h^{2e}_k[P]\right]
+    - V^{\mathrm{ECP}}_k,
+  \label{eq:tutorial-somf-ecp}
+\end{equation}
+with the nuclear term kept only on centers without a spin--orbit ECP,
+the valence $J-\tfrac{3}{2}K$ mean field of the spin-summed density
+$P$, and the three-component \texttt{ECPso} integral.
+
+\begin{lstlisting}[language=Python]
+import numpy as np
+from pyscf import gto
+from diffmrc.core import somf_ecp
+
+mol = gto.M(atom=[('Ge', (0.0, 0.0, 0.0)), ('F', (0.5, 0.3, 2.4))],
+            basis={'Ge': 'lanl2dz', 'F': '6-31g'},
+            ecp={'Ge': 'ecpds28mdfso'}, spin=1,
+            unit='Bohr', verbose=0)
+
+# A density of the electrons present in the calculation.  Here it is the
+# equal-occupation reference density; a converged SCF density works too.
+s = mol.intor('int1e_ovlp')
+P = (mol.nelectron / mol.nao_nr()) * np.linalg.inv(s)
+P = 0.5 * (P + P.T)
+
+h_soc = somf_ecp.valence_somf_matrix(mol, P, convention='i', check=True)
+print('SOC matrix shape', h_soc.shape)
+print('antisymmetry', np.abs(h_soc + h_soc.transpose(0, 2, 1)).max())
+
+# The density response is a separate contraction; the SOC kernel is not
+# symmetric under (pq) <-> (rs).
+m_resp = somf_ecp.somf_density_response(mol, P)
+print('response shape', m_resp.shape)
+
+print(somf_ecp.somf_definition(mol))
+\end{lstlisting}
+
+\texttt{somf\_definition} records which centers contribute the ECP
+term, which keep the nuclear term, and the approximations that the ECP
+data do not fix.  The operator is a prototype for relative comparisons,
+not a production absolute spin--orbit method: the split between the
+ECP spin--orbit operator and the explicit valence mean field is a
+fitting freedom.  On the GeF model the valence-level splitting is
+$28.37$~cm$^{-1}$ against $43.72$~cm$^{-1}$ for the nuclear-only
+operator; report the variant bracket rather than a single number.
+
+The eligibility rule is simple: the molecule must carry at least one
+spin--orbit ECP (\texttt{mol.has\_ecp\_soc()} is true).  A scalar-only
+ECP does not supply \texttt{ECPso}, and \texttt{ecp\_soc} raises.  On
+centers without a spin--orbit ECP the nuclear term is used with the
+effective charge from the atom table.
+
+\subsection{Where the scalar and two-component X2C energies differ}
+
+The scalar layer and the two-component layer are not a controlled
+one-parameter pair: the scalar layer is CASSCF and the two-component
+layer is HF.  At the same wavefunction level the X2C-specific
+difference separates into three terms,
+\begin{equation}
+  E_{2c}-E_{1c}
+  = \Delta E_{\mathrm{spin\text{-}free}}
+  + \Delta E_{\mathrm{SO}}
+  + \Delta E_{2e},
+  \label{eq:tutorial-x2c-difference}
+\end{equation}
+where $\Delta E_{\mathrm{spin\text{-}free}}$ is the change from the
+spin-dependent renormalization and picture-change matrix that the
+spin-free transform drops, $\Delta E_{\mathrm{SO}}$ is the
+spin--orbit contribution, and $\Delta E_{2e}$ is the difference
+between the spatial DF and spinor RI-JK two-electron treatments.
+
+For a non-degenerate closed-shell determinant the first-order
+spin--orbit expectation value is quenched:
+\begin{equation}
+  \langle \Phi | H_{\mathrm{SO}} | \Phi \rangle = 0
+  \qquad \text{(closed-shell, non-degenerate)}.
+  \label{eq:tutorial-soc-quenched}
+\end{equation}
+The surviving $\Delta E_{\mathrm{SO}}$ is second order and comes from
+the response of the orbitals and the CI, not from a direct matrix
+element.  For an open-shell or degenerate system the first-order term
+is not quenched and can dominate.  The measured OH/OF splittings in the
+manual chapter are an open-shell example; a closed-shell water
+comparison is dominated by the spin-free and two-electron terms.
+
+The practical rule is: do not quote a scalar-versus-two-component
+energy difference as a relativistic correction unless the wavefunction
+method and the two-electron operator are the same on both sides.  The
+shipped scalar CASSCF and two-component HF do not satisfy that
+condition.
+
+\subsection{Which layer to use}
+
+\begin{center}
+\small
+\begin{tabularx}{\textwidth}{>{\raggedright\arraybackslash}p{0.25\textwidth}X}
+\toprule
+Situation & Layer \\
+\midrule
+Real, spin-free multireference calculation on a full-electron basis &
+  \texttt{core.x2c\_casscf\_df} \\
+Complex one-electron spin--orbit at the HF level &
+  \texttt{core.x2c\_df} \\
+Spin--orbit splitting of a valence configuration with an ECP &
+  \texttt{core.somf\_ecp} (relative comparisons) \\
+Two-electron picture-change correction &
+  \texttt{core.x2c\_sap} (separate, not covered here) \\
+ECP multireference with spin--orbit coupling &
+  not in this release \\
+\bottomrule
+\end{tabularx}
+\end{center}

@@ -1,6 +1,8 @@
 \chapter{Resolution of identity (RI/DF)}
 \label{ch:ri-df}
 
+\section{Purpose and scope}
+
 The four-center two-electron integrals of the multireference chain are
 the memory bottleneck of its nuclear-derivative path.  Under
 \texttt{pyscfad}, the derivative of \texttt{int2e} allocates a dense
@@ -10,58 +12,212 @@ for the systems measured here.  The module \texttt{diffmrc.core.ri}
 replaces the four-center tensor in the correlation stage by two
 three-center factors and a metric, and supplies a nuclear-derivative
 path whose working set is \texttt{nao}$^2$~$\times$~\texttt{naux} per
-atom.  This chapter states the approximation, the public interface, the
-axis and sign conventions, the measured error budget, the memory
-figures, and the boundaries of the implementation.
+atom.
 
-\section{The approximation}
+The layer applies to any energy assembled from two-electron integrals
+in a Gaussian basis, provided the caller supplies a matching auxiliary
+basis and accepts the density-fitting approximation.  It does not
+make the reference SCF layer RI; the SCF layer remains dense unless the
+separate RIJONX driver of Chapter~\ref{ch:new-modules} is used.  It
+does not provide analytic second derivatives, and it does not provide
+an actinide fitting basis beyond the elements covered by the def2 and
+cc-pVDZ-RI families.  Those boundaries are stated again in
+Section~\ref{sec:ri-pitfalls}.
 
-The RI (density-fitting) approximation writes
+\section{Theory and derivation}
+\label{sec:ri-theory}
 
+\subsection{Density fitting as a least-squares problem}
+
+For each orbital product
+$\rho_{pq}(\mathbf r)=\phi_p(\mathbf r)\phi_q(\mathbf r)$, introduce an
+auxiliary expansion
 \begin{equation}
-(pq|rs) \;\approx\; \sum_{P Q} (pq|P)\, S^{-1}_{PQ}\, (Q|rs),
-\qquad S_{PQ} = (P|Q),
-\label{eq:ri}
+  \tilde\rho_{pq}(\mathbf r)
+  = \sum_{P} c_P^{pq}\,\chi_P(\mathbf r),
+  \label{eq:ri-fit}
 \end{equation}
-
-where capital indices run over an auxiliary basis and $S$ is the
-auxiliary metric.  With the three-center tensor
-$B_{\mu\nu P} = (\mu\nu|P)$ and the symmetric inverse square root
-$J = S^{-1/2}$, the four-center tensor is assembled as
-
+where $\{\chi_P\}$ is the auxiliary basis.  The coefficients are chosen
+by minimizing the Coulomb self-repulsion of the residual,
 \begin{equation}
-W = B J, \qquad
-(\mu\nu|\lambda\sigma) = \sum_{P} W_{\mu\nu P} W_{\lambda\sigma P},
-\label{eq:ri-assembly}
+  J[\epsilon]
+  = \frac{1}{2}\iint
+    \epsilon(\mathbf r)\,\frac{1}{|\mathbf r-\mathbf r'|}\,
+    \epsilon(\mathbf r')\,d\mathbf r\,d\mathbf r',
+  \qquad
+  \epsilon = \tilde\rho_{pq}-\rho_{pq}.
+  \label{eq:ri-metric}
 \end{equation}
+Stationarity with respect to $c_P^{pq}$ gives the linear system
+\begin{align}
+  \sum_{Q} S_{PQ}\,c_Q^{pq} &= b_{pq,P}, \nonumber\\
+  S_{PQ} &= (P|Q), \qquad b_{pq,P}=(pq|P),
+  \label{eq:ri-normal}
+\end{align}
+so
+\begin{equation}
+  c^{pq}=S^{-1}b^{pq}.
+  \label{eq:ri-coeff}
+\end{equation}
+Approximating one product in the integral by its fit and keeping the
+other exact gives
+\begin{equation}
+  (pq|rs)
+  \approx \left(\tilde\rho_{pq}\big|\rho_{rs}\right)
+  = \left(c^{pq}\right)^{T} S\,c^{rs}
+  = b_{pq}^{T} S^{-1} b_{rs}
+  = \sum_{PQ}(pq|P)\,S^{-1}_{PQ}\,(Q|rs),
+  \label{eq:ri}
+\end{equation}
+which is the RI approximation used by the code.  The same metric is
+used for both products; this symmetrizes the approximation and is the
+standard density-fitting form.  The residual metric
+Eq.~\eqref{eq:ri-metric} is the origin of the physical error: the fit
+is optimal in the Coulomb norm, not in the wavefunction energy.
 
-that is, one matrix product followed by one GEMM over the pair index.
-The two-step form is the implementation, not an optimization: an
-algebraically equivalent single four-operand einsum showed absolute
-errors of order $10^{-6}$ on a $96^4$ array on this stack, and two such
-chains differed by eight percent in the rotation gradient.
+\subsection{The \texorpdfstring{$B S^{-1/2}$}{B S^-1/2} factorization}
 
-The inverse square root is computed from the symmetric eigendecomposition
-of $S$.  Directions with eigenvalue below \texttt{rcond}~$\times$~the
-largest eigenvalue are truncated to zero in $J$; the default
-\texttt{rcond} is $10^{-12}$, and the number of dropped directions is
-reported by the factor container.
+Because $S$ is symmetric and positive definite on its retained
+subspace, define the symmetric inverse square root
+\begin{equation}
+  S = U\,\Lambda\,U^{T},
+  \qquad
+  J \equiv S^{-1/2}
+  = U\,\Lambda^{-1/2}\,U^{T},
+  \qquad
+  J^{T}=J.
+  \label{eq:ri-j}
+\end{equation}
+With $W=BJ$, the four-center tensor is
+\begin{equation}
+  \left(W W^{T}\right)_{pq,rs}
+  = \sum_{P} W_{pqP}W_{rsP}
+  = \left(B S^{-1}B^{T}\right)_{pq,rs}
+  = (pq|rs)_{\mathrm{RI}}.
+  \label{eq:ri-assembly}
+\end{equation}
+The implementation builds $W$ as a matrix product and then one GEMM
+over the pair index.  The two-step form is the implementation, not an
+optimization: an algebraically equivalent single four-operand einsum
+showed absolute errors of order $10^{-6}$ on a $96^4$ array on this
+stack, and two such chains differed by eight percent in the rotation
+gradient.
 
-The derivative path uses the factor-level form of
-Eq.~\eqref{eq:ri-assembly}: the host code supplies $B$, $J$ and their
-nuclear derivatives, and a pure-JAX function with an explicit
-\texttt{custom\_jvp} maps $(B, J)$ to the four-center tensor.  No
-four-center derivative integral is ever formed, and no
-eigendecomposition is differentiated inside JAX; the derivative of $J$
-is the analytic Daleckii--Krein divided difference of $x^{-1/2}$, which
-is finite at degenerate metric eigenvalues.
+Directions with eigenvalue below \texttt{rcond}~$\times$~the largest
+eigenvalue are truncated to zero in $J$; the default \texttt{rcond} is
+$10^{-12}$, and the number of dropped directions is reported by the
+factor container.  Truncation is a numerical regularization of the
+metric inverse, not part of the physical RI approximation.
 
-\section{API reference}
+\subsection{Derivative of the symmetric inverse square root}
+
+Let $\dot S$ be the derivative of the metric along a nuclear
+displacement, and let $\dot J$ be the corresponding derivative of
+$J=S^{-1/2}$.  From the eigendecomposition and the Daleckii--Krein
+divided difference,
+\begin{equation}
+  \dot J
+  = U\left[
+      f^{[1]}(\lambda_i,\lambda_j)\circ
+      \left(U^{T}\dot S\,U\right)
+    \right]U^{T},
+  \qquad
+  f(\lambda)=\lambda^{-1/2},
+  \label{eq:ri-dj}
+\end{equation}
+where $\circ$ is the Hadamard product and
+\begin{equation}
+  f^{[1]}(x,y)=
+  \begin{cases}
+    \dfrac{f(x)-f(y)}{x-y}
+      = -\dfrac{1}{\sqrt{x}\sqrt{y}\,(\sqrt{x}+\sqrt{y})},
+      & x\neq y,\\[2mm]
+    f'(x)=-\dfrac{1}{2}x^{-3/2}, & x=y.
+  \end{cases}
+  \label{eq:ri-divided}
+\end{equation}
+The diagonal limit is finite at an exact degeneracy, which is why the
+differentiated path does not eigendecompose inside JAX and does not
+return NaN when two metric eigenvalues coincide.  The same rule is
+exposed as \texttt{inv\_sqrt\_metric\_jvp}.  The derivative path uses
+the factor-level form of Eq.~\eqref{eq:ri-assembly}: the host code
+supplies $B$, $J$, and their nuclear derivatives, and a pure-JAX
+function with an explicit \texttt{custom\_jvp} maps $(B,J)$ to the
+four-center tensor.  No four-center derivative integral is ever formed.
+
+\subsection{Error sources}
+
+Three error classes have different origins and different remedies.
+
+\begin{itemize}
+\item \emph{Implementation error.}  The two-step assembly against an
+  independent DF reconstruction is $5.8\times10^{-13}$ on
+  H$_2$O/6-31G and $1.3\times10^{-12}$ on N$_2$/cc-pVDZ.  This is the
+  numerical floor of the contraction, not a physical error.
+\item \emph{Fitting error.}  The residual of
+  Eq.~\eqref{eq:ri-metric} propagates into the energy.  At fixed
+  orbitals and CI vector the measured NEVPT2 correction difference is
+  $+1.1\times10^{-5}$~Ha on N$_2$/cc-pVDZ and $-7.2\times10^{-6}$~Ha on
+  CO/cc-pVDZ; on ThO/6-31G with the \texttt{autoaux} set it is
+  $-1.8\times10^{-6}$~Ha.  The sign is not fixed, because the fit is
+  not variational in the wavefunction.
+\item \emph{Derivative-chain error.}  The RI-CASCI gradient against a
+  finite difference of the same RI energy is $9.6\times10^{-8}$ on
+  H$_2$O/6-31G and $3.1\times10^{-7}$ on N$_2$/cc-pVDZ, absolute, in
+  Eh/bohr.
+\end{itemize}
+
+The physical error is controlled by the fitting basis, not by the code.
+The values sit at the lower edge of the usual RI band
+($10^{-5}$--$10^{-3}$~Ha for correlation energies) and must be quoted
+with the fitting basis and the system attached.
+
+\subsection{Memory scaling}
+
+Let $n_{\mathrm{ctr}}$ be the number of contracted shell coefficients
+whose derivative is materialized by the dense path.  The dense
+integral-derivative array carries three Cartesian components and has
+\begin{equation}
+  N_{\mathrm{dense}} = 3\,n_{\mathrm{ctr}}\,n_{\mathrm{ao}}^{4}
+  \label{eq:ri-dense-elements}
+\end{equation}
+elements, that is $8N_{\mathrm{dense}}$ bytes in double precision.  The
+RI three-center factor derivative for one atom, over the same three
+Cartesian directions, has
+\begin{equation}
+  N_{\mathrm{RI}}^{(1)}
+  = 3\,n_{\mathrm{ao}}^{2}\,n_{\mathrm{aux}}
+  \label{eq:ri-factor-elements}
+\end{equation}
+elements, plus the two metric-derivative matrices of size
+$3n_{\mathrm{aux}}^{2}$.  The ratio of the leading terms is therefore
+\begin{equation}
+  \frac{N_{\mathrm{dense}}}{N_{\mathrm{RI}}^{(1)}}
+  = \frac{3\,n_{\mathrm{ctr}}\,n_{\mathrm{ao}}^{4}}
+         {3\,n_{\mathrm{ao}}^{2}\,n_{\mathrm{aux}}}
+  = \frac{n_{\mathrm{ctr}}\,n_{\mathrm{ao}}^{2}}
+         {n_{\mathrm{aux}}}.
+  \label{eq:ri-memory-ratio}
+\end{equation}
+The ratio grows with $n_{\mathrm{ao}}^{2}$ and falls with $n_{\mathrm{aux}}$;
+the auxiliary basis therefore has to grow only linearly with system size
+to keep the derivative working set below the dense array.  The table in
+Section~\ref{sec:ri-example} compares the dense array with the peak of
+the whole RI chain, not with the single per-atom factor: the chain peak
+includes several factor arrays and intermediates, so its ratio is
+smaller than Eq.~\eqref{eq:ri-memory-ratio}.  The value path still
+materializes the dense \texttt{nao}$^4$ tensor, because that is the
+object the CI layer consumes; only the derivative path is factor-level.
+
+\section{Input and operation}
+\label{sec:ri-input}
 
 The functions below are exported by \texttt{core.ri}.  Shapes follow the
-conventions of Section~\ref{sec:ri-conventions}.
+conventions of Section~\ref{sec:ri-conventions}.  All auxiliary indices
+are last; all integrals are real double precision.
 
 \begin{center}
+\small
 \begin{tabularx}{\textwidth}{>{\raggedright\arraybackslash}p{0.40\textwidth}>{\raggedright\arraybackslash}X}
 \toprule
 Entry point & Returns and purpose \\
@@ -107,14 +263,17 @@ Entry point & Returns and purpose \\
 \end{tabularx}
 \end{center}
 
-Two further entries exist for validation only.  \texttt{ri\_eri\_deriv}
-materializes the full \texttt{(3, nao, nao, nao, nao)} derivative and
-refuses to allocate above a caller-supplied byte limit; production code
-uses the factor derivatives with \texttt{ri\_eri\_deriv\_contract} or
-the JAX rule instead.  \texttt{inv\_sqrt\_metric\_jvp} exposes the
-metric derivative on its own.
+\texttt{rcond} is relative to the largest metric eigenvalue and
+defaults to $10^{-12}$.  \texttt{auxbasis=None} means the priority
+list; when the caller needs a specific family (for example cc-pVDZ-RI
+with a cc-pVDZ orbital basis), pass it explicitly.
+\texttt{ri\_eri\_deriv} materializes the full
+\texttt{(3, nao, nao, nao, nao)} derivative and refuses to allocate
+above a caller-supplied byte limit; production code uses the factor
+derivatives with \texttt{ri\_eri\_deriv\_contract} or the JAX rule
+instead.
 
-The intended nuclear-gradient recipe is:
+The intended nuclear-gradient recipe is
 
 \begin{lstlisting}[language=Python]
 from diffmrc.core import ri
@@ -133,7 +292,7 @@ The only derivative integrals touched are the three-center
 \texttt{ip1}/\texttt{ip2} arrays and the metric \texttt{ip1}/\texttt{ip2}
 arrays.
 
-\section{Axis and sign conventions}
+\subsection{Axis and sign conventions}
 \label{sec:ri-conventions}
 
 The conventions are fixed in the module and verified by isolated finite
@@ -162,57 +321,66 @@ and the auxiliary basis with the molecule fixed: the two groups of terms
 reproduce their finite differences to $7.9\times10^{-11}$, and the sum
 reproduces the full displacement to $4.8\times10^{-11}$.
 
-\section{Error budget}
+\section{Worked example}
+\label{sec:ri-example}
 
-Three error classes are reported separately, because they have
-different origins and different remedies.
+\subsection{H\texorpdfstring{$_2$}{2}O/6-31G: assembly, CASCI, and one
+derivative check}
 
+\texttt{examples/ri\_df.py} runs the complete H$_2$O/6-31G CAS(2,2)
+case.  The measured output of that run, as recorded in
+\texttt{manual/tutorial/chapters/10-ri-df.tex}, is
 \begin{center}
-\begin{tabularx}{\textwidth}{>{\raggedright\arraybackslash}p{0.18\textwidth}X}
+\small
+\begin{tabular}{lr}
 \toprule
-Class & Measured value and meaning \\
+Quantity & Value \\
 \midrule
-Implementation &
-  RI assembly against the pyscf DF reconstruction:
-  $5.8\times10^{-13}$ (H$_2$O/6-31G) and $1.3\times10^{-12}$
-  (N$_2$/cc-pVDZ).  This is the numerical floor of the contraction,
-  not a physical error. \\
-RI physical &
-  The approximation of Eq.~\eqref{eq:ri} at fixed orbitals and CI
-  vector: NEVPT2 $\Delta e_2$ of $+1.1\times10^{-5}$ (N$_2$/cc-pVDZ)
-  and $-7.2\times10^{-6}$~Ha (CO/cc-pVDZ); $-1.8\times10^{-6}$~Ha on
-  ThO/6-31G with the \texttt{autoaux} fitting set. \\
-Chain derivative &
-  RI-CASCI gradient against a finite difference of the same RI energy:
-  $9.6\times10^{-8}$ (H$_2$O/6-31G) and $3.1\times10^{-7}$
-  (N$_2$/cc-pVDZ), absolute, in Eh/bohr. \\
+assembly identity residual & $1.068\times10^{-12}$ \\
+dense-versus-RI RMS & $8.317\times10^{-6}$ \\
+dense-versus-RI maximum & $7.967\times10^{-4}$ \\
+RI-CASCI energy shift & $+1.05\times10^{-5}$~Eh \\
+worst three-center derivative deviation & $3.6\times10^{-9}$ \\
+worst ERI derivative deviation & $3.7\times10^{-8}$ \\
+script wall time & $6.4$~s \\
 \bottomrule
-\end{tabularx}
+\end{tabular}
 \end{center}
+The assembly identity is the implementation check: it compares the
+two-step GEMM with an explicit metric solve and should be at the
+$10^{-12}$ level.  The dense-versus-RI columns are the approximation
+itself and are four to eight orders of magnitude larger.  The
+derivative deviations are at the finite-difference floor.
 
-The derivative integrals themselves agree with central differences at a
-$10^{-4}$~bohr step to $3.6\times10^{-9}$ (three-center tensor) and
-$1.2\times10^{-9}$ (metric) on H$_2$O/6-31G.  The materialized ERI
-derivative shows $2.5\times10^{-8}$ on the same system with the default
-fitting basis, whose metric condition number is $2.5\times10^{7}$;
-switching to a fitting basis with condition number $2.5\times10^{5}$
-brings every component below $6.7\times10^{-9}$.  The residual on the
-default basis is the finite-difference floor amplified by the metric
-condition number, not an implementation defect.
+\subsection{N\texorpdfstring{$_2$}{2}/cc-pVDZ and CO/cc-pVDZ: the
+physical error}
 
-The physical error is controlled by the fitting basis, not by the code.
-The values above sit at the lower edge of the usual RI band
-($10^{-5}$--$10^{-3}$~Ha for correlation energies) and must be quoted
-with the fitting basis and the system attached.
+At fixed orbitals and CI vector, the recorded NEVPT2 correction
+differences are
+\begin{center}
+\small
+\begin{tabular}{lrr}
+\toprule
+System & Implementation residual & $\Delta e_2$ (Ha) \\
+\midrule
+N$_2$/cc-pVDZ & $1.3\times10^{-12}$ & $+1.1\times10^{-5}$ \\
+CO/cc-pVDZ    & ---                 & $-7.2\times10^{-6}$ \\
+H$_2$O/6-31G  & $5.8\times10^{-13}$ & --- \\
+\bottomrule
+\end{tabular}
+\end{center}
+The RI-CASCI gradient against a finite difference of the same RI energy
+is $9.6\times10^{-8}$~Eh/bohr on H$_2$O/6-31G and
+$3.1\times10^{-7}$~Eh/bohr on N$_2$/cc-pVDZ.  These are the recorded
+numbers for the two requested systems, with the basis noted: the N$_2$
+record is cc-pVDZ, not def2.  A timing comparison for N$_2$/def2 and
+CO/cc-pVDZ is not part of the release record; the released timing is
+the H$_2$O/6-31G run above and the memory table below.
 
-\section{Memory}
-
-The value path still materializes the dense \texttt{nao}$^4$ tensor,
-because that is the object the CI layer consumes.  The derivative path
-does not: its per-atom working set is three three-index arrays of size
-\texttt{nao}$^2$~$\times$~\texttt{naux}, plus the metric derivative.
+\subsection{Memory at the two measured sizes}
 
 \begin{center}
+\small
 \begin{tabular}{lrrrr}
 \toprule
 \texttt{nao} & \texttt{naux} & RI chain peak RSS & dense derivative array
@@ -223,51 +391,17 @@ does not: its per-atom working set is three three-index arrays of size
 \bottomrule
 \end{tabular}
 \end{center}
-
 The peaks cover the integral-and-derivative chain only, without SCF or
 CI.  The \texttt{nao}~$=96$ row uses the orbital-basis fallback and the
 \texttt{nao}~$=175$ row the \texttt{autoaux} route; the memory scaling
 depends on \texttt{naux}, not on which fitting route produced it.  The
-derivative-array ratio in the table is $26\times$ at
-\texttt{nao}~$=96$ and $127\times$ at \texttt{nao}~$=175$.  Against the
-measured dense whole-chain peak of 210--213~GB at \texttt{nao}~$=96$,
-the end-to-end reduction is about $100\times$.  The per-atom derivative
-factors occupy 152.9~MB at \texttt{nao}~$=96$.
+per-atom derivative factors occupy 152.9~MB at \texttt{nao}~$=96$.
+Against the measured dense whole-chain peak of 210--213~GB at
+\texttt{nao}~$=96$, the end-to-end reduction is about $100\times$.
 
-\section{Boundaries}
+\subsection{A standalone gradient script}
 
-\begin{itemize}
-\item \emph{The SCF layer remains dense.}  RI removes the memory wall
-  of the correlation stage, not of the reference determinant.  A
-  full-chain nuclear gradient for an actinide still requires an RI-JK
-  SCF or an explicit frozen-reference partial-derivative semantics.
-\item \emph{Second derivatives are not implemented.}  The factor-level
-  \texttt{custom\_jvp} is first order.  Differentiating the reverse pass
-  a second time is possible in principle but is outside the validated
-  surface; the analytic $S^{-1/2}$ rule is available first-order only.
-\item \emph{Actinide fitting sets are missing.}  The def2 and
-  cc-pVDZ-RI fitting families stop at Rn.  For Th the module falls back
-  to the orbital basis (\texttt{naux}~$=646$, metric condition number
-  $1.5\times10^{9}$), which shifts a CASCI energy by $-0.594$~mHa.  The
-  even-tempered construction \texttt{aug\_etb\_for\_dfbasis} is the best
-  available substitute ($+0.021$~mHa, \texttt{naux}~$=625$); a dedicated
-  actinide JKfit basis remains an open item.
-\item \emph{Basis-family matching is the caller's responsibility.}
-  \texttt{make\_auxmol} implements a priority list, not a
-  family-aware selector.  A cc-pVDZ orbital basis should be paired with
-  cc-pVDZ-RI explicitly.
-\item \emph{The truncated metric has a floor.}  \texttt{rcond} defaults
-  to $10^{-12}$ and no direction was dropped in the systems measured
-  here, but the Th fallback metric is already at the $10^{9}$ condition
-  number where the truncation choice starts to matter.
-\end{itemize}
-
-\section{A standalone example}
-
-\texttt{examples/ri\_df.py} in the repository runs the H$_2$O/6-31G
-CAS(2,2) case end to end: assembly against the pyscf DF solve, RI-CASCI,
-the three-center and ERI derivatives against central differences, and
-the JAX rule.  The core of the script is:
+The core of \texttt{examples/ri\_df.py} is
 
 \begin{lstlisting}[language=Python]
 import numpy as np
@@ -295,11 +429,71 @@ for atom in range(mol.natm):
     # compare d3 against a central difference of ri_three_center
 \end{lstlisting}
 
-The measured run on the H$_2$O/6-31G system prints an assembly identity
-residual of $1.1\times10^{-12}$, a dense-vs-RI RMS of
-$8.3\times10^{-6}$, an RI-CASCI shift of $+1.05\times10^{-5}$~Eh, a
-worst three-center derivative deviation of $3.6\times10^{-9}$, and a
-worst ERI derivative deviation of $3.7\times10^{-8}$, in 6.4~s of
-script time.  The companion \texttt{examples/ri\_nevpt2.py} reports the
-RI-NEVPT2 correction, $+1.7\times10^{-5}$~Ha from the dense value on the
-same system.
+The companion \texttt{examples/ri\_nevpt2.py} reports the RI-NEVPT2
+correction, $+1.7\times10^{-5}$~Ha from the dense value on the same
+system.
+
+\section{Pitfalls}
+\label{sec:ri-pitfalls}
+
+\begin{itemize}
+\item \emph{The SCF layer remains dense.}  RI removes the memory wall
+  of the correlation stage, not of the reference determinant.  A
+  full-chain nuclear gradient for an actinide still requires an RI-JK
+  SCF or an explicit frozen-reference partial-derivative semantics.
+\item \emph{Second derivatives are not implemented.}  The factor-level
+  \texttt{custom\_jvp} is first order.  Differentiating the reverse
+  pass a second time is possible in principle but is outside the
+  validated surface; the analytic $S^{-1/2}$ rule is available
+  first-order only.
+\item \emph{Actinide fitting sets are missing.}  The def2 and
+  cc-pVDZ-RI fitting families stop at Rn.  For Th the module falls back
+  to the orbital basis (\texttt{naux}~$=646$, metric condition number
+  $1.5\times10^{9}$), which shifts a CASCI energy by $-0.594$~mHa.  The
+  even-tempered construction \texttt{aug\_etb\_for\_dfbasis} is the best
+  available substitute ($+0.021$~mHa, \texttt{naux}~$=625$); a
+  dedicated actinide JKfit basis remains an open item.
+\item \emph{Basis-family matching is the caller's responsibility.}
+  \texttt{make\_auxmol} implements a priority list, not a family-aware
+  selector.  A cc-pVDZ orbital basis should be paired with cc-pVDZ-RI
+  explicitly.
+\item \emph{The truncated metric has a floor.}  \texttt{rcond} defaults
+  to $10^{-12}$ and no direction was dropped in the systems measured
+  here, but the Th fallback metric is already at the $10^{9}$ condition
+  number where the truncation choice starts to matter.
+\item \emph{The two-step assembly is not cosmetic.}  A one-shot
+  four-operand einsum is algebraically equivalent but numerically
+  weaker on this stack; the measured rotation-gradient difference was
+  eight percent on a degenerate system.
+\item \emph{Geometry caches.}  Build a fresh auxiliary molecule and
+  factor set per geometry.  The factor cache is keyed on the built
+  molecule; an in-place geometry edit is not reliably refreshed.
+\end{itemize}
+
+\section{Validation and references}
+\label{sec:ri-validation}
+
+The records behind this chapter are
+\texttt{tests/core/test\_ri.py} (assembly, transforms, derivative
+contractions, JAX rule),
+\texttt{tests/core/test\_caspt2\_three\_center.py} (the three-center
+CASPT2 consumer),
+\texttt{examples/ri\_df.py} and \texttt{examples/ri\_nevpt2.py} (the
+runnable H$_2$O/6-31G examples),
+\texttt{experiments/measure\_ri\_scf\_driver.py} (the RIJONX
+comparison), and the tutorial chapter
+\texttt{manual/tutorial/chapters/10-ri-df.tex}.  The error-budget table
+and the memory table above are the recorded values.
+
+The density-fitting approximation and its error behaviour are
+documented in J.~L.~Whitten, \emph{J. Chem. Phys.} \textbf{58}, 4496
+(1973); B.~I.~Dunlap, D.~W.~Connolly and J.~R.~Sabin,
+\emph{J. Chem. Phys.} \textbf{71}, 3396 (1979);
+O.~Vahtras, J.~Alml{\"o}f and M.~W.~Feyereisen,
+Chem. Phys. Lett. \textbf{213}, 514 (1993); K.~Eichkorn,
+O.~Treutler, H.~{\"O}hm, M.~H{\"a}ser and R.~Ahlrichs,
+Chem. Phys. Lett. \textbf{240}, 283 (1995); and F.~Weigend,
+\emph{Phys. Chem. Chem. Phys.} \textbf{8}, 1057 (2006).  The
+eigendecomposition derivative uses the Daleckii--Krein divided
+difference; see N.~J.~Higham, \emph{Functions of Matrices: Theory and
+Computation} (SIAM, 2008), Chapter 3.

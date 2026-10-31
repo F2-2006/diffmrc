@@ -1,0 +1,639 @@
+\chapter{CASPT2 class structure and contraction paths}
+\label{ch:caspt2-classes}
+
+\section{Purpose and scope}
+
+The perturbation layer of the release is a contracted second-order
+treatment of dynamic correlation on a CASSCF reference.  Its energy is
+assembled from eight excitation classes, and the class table is part of
+the result rather than a diagnostic: the total is meaningful only when
+the classes that carry the reference's correlation are present, and the
+comparison with an external program is meaningful only when the two
+programs use the same class definitions.
+
+The chapter applies to a CASSCF reference whose orbitals are
+semicanonical, whose CI vector is state-specific, and whose active space
+is small enough for the determinant expansion.  It does not cover a
+state-averaged reference, a reference built from a CASCI calculation
+alone, or a production-size active space.  The coupled and three-center
+paths are value layers; only the diagonal path has a JAX twin.
+
+\section{Theory and derivation}
+\label{sec:caspt2-theory}
+
+\subsection{Reference, excitation operators, and the first-order
+wavefunction}
+
+Let $|0\rangle$ be the state-specific CASSCF reference,
+\begin{equation}
+  |0\rangle = \sum_I c_I\,|I\rangle,
+  \label{eq:caspt2-reference}
+\end{equation}
+and let
+\begin{equation}
+  E_{pq} = \sum_{\sigma\in\{\uparrow,\downarrow\}}
+           a^{\dagger}_{p\sigma}a_{q\sigma}
+  \label{eq:caspt2-eoperator}
+\end{equation}
+be the spin-summed excitation operator.  A contracted class function is
+a product of two such operators acting on the reference,
+\begin{equation}
+  |K_p\rangle = O_p|0\rangle,
+  \qquad
+  O_p = E_{p_1q_1}E_{p_2q_2},
+  \label{eq:caspt2-class-op}
+\end{equation}
+with the index pairs drawn from the core, active, and virtual pools.
+The first-order wavefunction is the internally contracted expansion
+\begin{equation}
+  |1\rangle = \sum_p x_p\,|K_p\rangle,
+  \label{eq:caspt2-first-order}
+\end{equation}
+and the second-order energy is
+\begin{equation}
+  e_2 = \langle 0|H|1\rangle
+      = \sum_p W_p\,x_p,
+  \qquad
+  W_p = \langle 0|H|K_p\rangle.
+  \label{eq:caspt2-e2}
+\end{equation}
+The functions are orthogonal to the reference for every excitation
+class, $\langle 0|K_p\rangle=0$, so no overlap with $|0\rangle$ enters
+the energy expression.
+
+\subsection{The projected amplitude equation}
+
+Projecting the Schrödinger equation $(H-E_0)|0+1\rangle=0$ onto the
+class space gives
+\begin{equation}
+  \sum_q \langle K_p|(H_0-E_0)|K_q\rangle\,x_q
+  = -\langle K_p|H|0\rangle,
+  \label{eq:caspt2-projected}
+\end{equation}
+or, in matrix form,
+\begin{equation}
+  (A-E_0 S)\,x = -W,
+  \qquad
+  A_{pq}=\langle K_p|H_0|K_q\rangle,
+  \qquad
+  S_{pq}=\langle K_p|K_q\rangle.
+  \label{eq:caspt2-system}
+\end{equation}
+The energy is $e_2=W^{T}x$, and the class decomposition is
+$e_{2,\mathrm{class}}=\sum_{p\in\mathrm{class}}W_p x_p$.
+
+Two choices of $H_0$ are implemented.  The diagonal-Fock choice is
+\begin{equation}
+  H_0^{\mathrm{diag}} = \sum_p \epsilon_p E_{pp},
+  \qquad
+  E_0 = \sum_p n_p^0\epsilon_p,
+  \label{eq:caspt2-h0-diag}
+\end{equation}
+where $\epsilon_p$ is the semicanonical Fock diagonal and $n_p^0$ is
+the reference occupation.  The state-specific generalized-Fock choice
+is
+\begin{equation}
+  H_0 = \sum_{pq} f_{pq}E_{pq},
+  \qquad
+  f_{pq} = h_{pq}
+         + \sum_{rs}D_{rs}\left[(pq|rs)-\tfrac{1}{2}(pr|qs)\right],
+  \label{eq:caspt2-h0}
+\end{equation}
+with $D$ the state 1-RDM and
+$E_0=\sum_{pq}f_{pq}D_{pq}$ (the state 1-RDM is symmetric).  The
+diagonal of $f$ is the semicanonical
+orbital-energy array when the reference orbitals are semicanonical;
+its off-diagonal blocks connect determinants of different excitation
+classes.  The diagonal choice drops those blocks; the coupled choice
+keeps them.
+
+\subsection{The diagonal approximation}
+
+If both $A$ and $S$ are approximated by their diagonal elements, the
+projected system decouples:
+\begin{equation}
+  x_p = -\frac{W_p}{A_{pp}-E_0 S_{pp}},
+  \qquad
+  e_2 = -\sum_p \frac{W_p^{2}}{A_{pp}-E_0 S_{pp}}.
+  \label{eq:caspt2-diagonal}
+\end{equation}
+For a single contracted function $K$ the quantities are
+\begin{equation}
+  A_{KK} = \langle K|H_0^{\mathrm{diag}}|K\rangle
+         = \sum_p n_p(K)\,\epsilon_p,
+  \qquad
+  S_{KK} = \langle K|K\rangle,
+  \label{eq:caspt2-AK}
+\end{equation}
+where $n_p(K)$ is the diagonal occupation of orbital $p$ in the
+contracted function.  This is the CASPT2-D approximation: the
+off-diagonal Fock coupling between functions is neglected.
+
+The diagonal reading is not unique when the class overlap has
+degenerate eigenvalues.  The implementation builds the plain-product
+basis $E(p_1q_1)E(p_2q_2)|0\rangle$, diagonalizes
+\begin{equation}
+  S = U\,\mathrm{diag}(\lambda)\,U^{T},
+  \label{eq:caspt2-overlap}
+\end{equation}
+keeps eigenvectors above
+$\lambda>\texttt{nthresh}\cdot\lambda_{\max}$, and evaluates
+\begin{equation}
+  e_2 = -\sum_k \frac{(T^{T}W)_k^{2}}{(T^{T}AT)_{kk}},
+  \qquad
+  T = U\,\mathrm{diag}(\lambda^{-1/2}),
+  \label{eq:caspt2-ortho}
+\end{equation}
+in the orthonormalized basis.  The option
+\texttt{class\_diagonal='block'} instead solves
+Eq.~\eqref{eq:caspt2-system} inside the retained subspace,
+\begin{equation}
+  (A-E_0 S)\,x=-W,
+  \qquad
+  e_2=W^{T}x,
+  \label{eq:caspt2-block}
+\end{equation}
+which includes the intra-class coupling and is invariant under a change
+of basis inside the class.  The option \texttt{'function'} is the
+per-function Molcas VP/VM reading of Eq.~\eqref{eq:caspt2-diagonal}.
+
+\subsection{The VP/VM pairing}
+
+For a double excitation with both pairs non-diagonal, the two orderings
+of the excitation operators define two components
+\begin{equation}
+  V_P = \mathrm{cross}+\mathrm{direct},
+  \qquad
+  V_M = \sqrt{3}\left(\mathrm{cross}-\mathrm{direct}\right),
+  \label{eq:caspt2-vpvm}
+\end{equation}
+which is the OpenMolcas \texttt{mkrhsh} normalization.  The $\sqrt{3}$
+multiplies the whole $V_M$ function and cancels in
+$W^{2}/(A-E_0S)$ and in the projected linear solve, so the operator
+content carried by the code is the relative weight $-1$ between the two
+orderings.  Both components enter the energy independently for
+off-diagonal pairs and coincide for diagonal pairs.  The $V_M$ component
+exists only when both pairs are non-diagonal.
+
+\subsection{The eight classes}
+
+The orbital space is partitioned into core ($C$, \texttt{ncore}
+spatial orbitals), active ($A$, \texttt{nact}), and virtual ($V$,
+\texttt{nmo}-\texttt{ncore}-\texttt{nact}).  A class is labelled by
+the two orbital pools it excites out of and the two it excites into.
+
+\begin{center}
+\small
+\begin{tabularx}{\textwidth}{>{\raggedright\arraybackslash}p{0.13\textwidth}>{\raggedright\arraybackslash}p{0.14\textwidth}>{\raggedright\arraybackslash}p{0.20\textwidth}X}
+\toprule
+Class & Pool labels & Operator content & Comment \\
+\midrule
+\texttt{V0\_ijab} & $(C,C)\to(V,V)$ &
+  $E(a,i)E(b,j)$ & two core electrons to two virtuals \\
+\texttt{Vm1\_iab} & $(A,C)\to(V,V)$ &
+  $E(a,t)E(b,i)$ & one active, one core to two virtuals \\
+\texttt{Vm2\_ab} & $(A,A)\to(V,V)$ &
+  $E(a,t)E(b,u)$ & two active electrons to two virtuals \\
+\texttt{V1\_ija} & $(C,C)\to(A,V)$ &
+  $E(t,i)E(a,j)$ & two core electrons to one active and one virtual \\
+\texttt{V2\_ij} & $(C,C)\to(A,A)$ &
+  $E(t,i)E(u,j)$ & two core electrons to two active orbitals \\
+\texttt{V0\_ia} & $(C)\to(V)$, active pair &
+  cross $E(v,u)E(a,j)$, direct $E(v,j)E(a,u)$ &
+  one inactive hole and one virtual particle dressed by an active-pair
+  reorganization; the two components coincide for $u=v$ \\
+\texttt{Vm1\_a} & TUVA &
+  $E(a,t)E(u,v)$ & three active indices, $a$ virtual,
+  $t,u,v$ active \\
+\texttt{V1\_i} & ITUV &
+  $E(t,i)E(u,v)$ & three active indices, $i$ core,
+  $t,u,v$ active \\
+\bottomrule
+\end{tabularx}
+\end{center}
+
+The two three-active-index classes are not single excitations.  They
+were single-excitation functions before version 0.3.2; the release
+treats them as the plain products shown in the table.
+
+\subsection{The three-active-index classes}
+\label{sec:caspt2-tuva}
+
+The products $E(a,t)E(u,v)|0\rangle$ and $E(t,i)E(u,v)|0\rangle$ span a
+strongly linearly dependent set.  At \texttt{nthresh}$=10^{-6}$ the
+TUVA basis of N$_2$/6-31G CAS(6,6) has rank 1264 of 1728 functions and
+the ITUV basis rank 632 of 864, that is, about $73\%$ of the function
+count.  A per-function sum $\sum_i W_i^2/(A_{ii}-E_0S_{ii})$ therefore
+overcounts the same direction by roughly a factor of three.  Both
+classes are evaluated by the orthonormalized diagonal of
+Eq.~\eqref{eq:caspt2-ortho} with the deterministic gauge described
+above.
+
+On the CAS(2,2) anchors the two classes are below $10^{-9}$~Eh.  On
+N$_2$ they contribute $-0.003648$~Eh (\texttt{Vm1\_a}) and
+$-0.001625$~Eh (\texttt{V1\_i}), and the default-path total moves from
+$0.916$ to $0.989$ of the Wave~12 frozen ORCA CASPT2-D reference.
+Against the release reference measured with a single BLAS thread the
+default-path ratio is $0.983$; the difference between the two reference
+sets is a property of the reference calculation, not of the class
+treatment.
+
+A residual remains, and it is a class-space difference rather than a
+numerical one.  \texttt{V1\_ija} stands at $1.553$ of the ORCA
+CASPT2-D value in every basis, because the diagonal approximation of
+that class is gauge dependent (random gauges inside the degenerate
+overlap blocks span $0.88$ to $1.29$ of the reference) while its exact
+class-block value is gauge invariant at $1.553$.  ORCA prints 192
+functions for the class against the 768 of the plain-product basis, so
+the two programs are contracting different class spaces.
+
+\subsection{The coupled full-Fock system}
+
+The coupled path keeps the off-diagonal blocks of
+Eq.~\eqref{eq:caspt2-h0}.  The amplitudes solve
+Eq.~\eqref{eq:caspt2-system} with the state-specific $H_0$, and the
+class decomposition is the same $e_{2,\mathrm{class}}=\sum W_px_p$.
+
+The overlap matrix is regularly linearly dependent.  It is
+diagonalized and eigenvectors with eigenvalue below
+$\texttt{rtol}\times\max(1,\lambda_{\max})$ are dropped; the default
+\texttt{rtol} is $10^{-8}$.  The assembly costs $n_{\mathrm{fn}}^2$
+function-pair contractions plus one $H_0$ application per function.  It
+is a NumPy pilot intended for small and medium active spaces, and it
+has no JAX twin.  The differentiable production route remains the
+diagonal-Fock \texttt{caspt2\_contracted\_e2\_jax} at the CASPT2-D
+level.
+
+\subsection{The three-center contraction}
+
+\texttt{core.caspt2\_three\_center} replaces the four-center MO tensor
+by a three-center factor
+\begin{equation}
+  (ab|cd) \approx \sum_P u_{abP}\,u_{cdP},
+  \label{eq:caspt2-three-center-factor}
+\end{equation}
+with the metric factor already folded into $u$, as returned by
+\texttt{ri\_eri\_mo} in \texttt{core.ri} with \texttt{full=False}.  To
+derive the coupling assembly, expand
+\begin{equation}
+  g(D) = \sum_J c_J\langle J|H|D\rangle
+      = g_h(D) + \sum_{abcd} \eta_{abcd}(D)\,(ab|cd),
+  \label{eq:caspt2-g}
+\end{equation}
+where $\eta(D)$ collects the Slater--Condon coefficients of the ERI
+terms.  Substituting Eq.~\eqref{eq:caspt2-three-center-factor},
+\begin{equation}
+  g(D) = g_h(D)
+      + \sum_{abP}\left(\sum_{cd}\eta_{abcd}(D)\,u_{cdP}\right)u_{abP}.
+  \label{eq:caspt2-g-factor}
+\end{equation}
+The inner sum is the pair-density tensor
+$Z_{abP}(D)=\sum_{cd}\eta_{abcd}(D)u_{cdP}$, and the coupling of a
+contracted function is one contraction
+$W=\sum_{abP}Z_{abP}u_{abP}$ plus the one-electron terms.  Neither the
+four-center MO tensor nor the spin-orbital tensor is formed: the
+working set is $n_{\mathrm{mo}}^2n_{\mathrm{aux}}$ per function,
+against $n_{\mathrm{mo}}^4$ for the materialized array and
+$16n_{\mathrm{mo}}^4$ for the spin-orbital array of the reference path.
+
+The three-center path is a value layer.  It is not wired into the JAX
+chain, and it does not change the approximation level: it computes the
+same CASPT2-D energy with the RI factorization of the integrals.
+
+\section{Input and operation}
+\label{sec:caspt2-input}
+
+All contraction functions consume the same five objects:
+
+\begin{itemize}
+\item \texttt{h1e\_mo}: the one-electron Hamiltonian in the MO basis,
+  shape \texttt{(nmo, nmo)}.
+\item \texttt{eri\_mo}: the two-electron integrals in chemist notation,
+  shape \texttt{(nmo, nmo, nmo, nmo)}; the three-center path replaces
+  this object by \texttt{u\_mo}.
+\item \texttt{ci}: the state-specific reference CI vector over the
+  determinant list.
+\item \texttt{dets}: determinant bitmaps with the core spin orbitals
+  first, as returned by \texttt{cas\_dets\_for2} in
+  \texttt{core.nevpt2.impl} for the arguments \texttt{(ncore,nact,nele)}.
+\item \texttt{eps}: the semicanonical Fock diagonal over the same MOs,
+  from \texttt{canonicalize\_jax}.  The SCF orbital energies are not a
+  substitute: both the CASPT2 and the NEVPT2 denominators are defined
+  only in the semicanonical basis.
+\end{itemize}
+
+The reference chain is RHF, CASSCF, state-specific CASCI, then
+canonicalization with \texttt{canonicalize\_jax}.  The four entry
+points are
+
+\begin{center}
+\small
+\begin{tabularx}{\textwidth}{>{\raggedright\arraybackslash}p{0.44\textwidth}X}
+\toprule
+Entry point & Role and defaults \\
+\midrule
+\texttt{caspt2\_contracted\_e2} &
+  diagonal-Fock (CASPT2-D level), NumPy; defaults
+  \texttt{nthresh}$=10^{-6}$, \texttt{active\_row='replica'},
+  \texttt{class\_diagonal='function'}, \texttt{v0\_ia='block'} \\
+\texttt{caspt2\_contracted\_e2\_jax} &
+  differentiable twin of the diagonal path; same options for
+  \texttt{active\_row}, traceable in the CI coefficients \\
+\texttt{caspt2\_contracted\_e2\_coupled} &
+  state-specific generalized-Fock zeroth order, NumPy; default
+  \texttt{rtol}$=10^{-8}$, optional \texttt{fock} and
+  \texttt{return\_system} \\
+\texttt{caspt2\_contracted\_e2\_three\_center} &
+  same eight classes and diagonal denominator, with the coupling from
+  a three-center factor; \texttt{u\_mo} shape
+  \texttt{(nmo,nmo,naux)} \\
+\bottomrule
+\end{tabularx}
+\end{center}
+
+{\sloppy
+The options change how the class space is represented, not what the
+class is.  \texttt{active\_row='replica'} drops every $(u,u)$ active row
+beyond the first active orbital in \texttt{Vm2\_ab} and \texttt{V2\_ij};
+it is exact only for a two-orbital active space and is ignored by the
+\texttt{ortho} and \texttt{block} readings, which enumerate every index
+tuple.  \texttt{'keep'} retains all rows.  \texttt{class\_diagonal='function'} is the
+per-function Molcas pairing, \texttt{'ortho'} the orthonormalized
+diagonal of Eq.~\eqref{eq:caspt2-ortho}, and \texttt{'block'} the
+projected class solve of Eq.~\eqref{eq:caspt2-block}.
+\texttt{v0\_ia='block'} solves one two-component system per
+$(u,v,j,a)$; \texttt{'class'} solves the whole class as one projected
+system.  The three-active-index classes keep the orthonormalized
+diagonal in every setting.\par}
+
+The coupled call is
+\begin{lstlisting}[language=Python]
+caspt2_contracted_e2_coupled(h1e_mo, eri_mo, ci, dets, *, ncore, nact,
+                             nele, fock=None, rtol=1e-8,
+                             return_system=False)
+\end{lstlisting}
+With \texttt{return\_system=True} the function also returns a dictionary
+with \texttt{S}, \texttt{A}, \texttt{W}, \texttt{E0}, \texttt{x},
+\texttt{T}, \texttt{labels}, \texttt{fock}, \texttt{dm1}, and
+\texttt{functions}.  The system is the object to inspect when a class
+value is questioned: the smallest eigenvalues of \texttt{S}, the
+condition number of the reduced matrix, and the projection of
+\texttt{W} on the dropped directions are available without re-running
+the assembly.
+
+\section{Worked example}
+\label{sec:caspt2-example}
+
+\subsection{N\texorpdfstring{$_2$}{2}/6-31G CAS(6,6): three paths}
+
+The recorded N$_2$/6-31G CAS(6,6) comparison against the ORCA class
+table is below.  The three rows are the default per-function reading
+(\texttt{class\_diagonal='function'}), the class-block reading
+(\texttt{class\_diagonal='block'} with \texttt{v0\_ia='class'}), and
+the coupled full-Fock path.
+\begin{center}
+\small
+\begin{tabularx}{\textwidth}{>{\raggedright\arraybackslash}p{0.18\textwidth}>{\raggedright\arraybackslash}p{0.24\textwidth}X}
+\toprule
+Path & Total ratio & Class evidence \\
+\midrule
+default (\texttt{function}) &
+  $0.989$ (Wave~12 frozen), $0.983$ (release, one BLAS thread) &
+  apparent agreement is a cancellation: \texttt{V1\_ija} $1.553$
+  ($+55\%$), \texttt{V2\_ij} $0.24$ ($-76\%$), \texttt{V0\_ia} $+10\%$,
+  \texttt{Vm2\_ab} $+12\%$ \\
+class-block &
+  $1.0232$ &
+  \texttt{Vm2\_ab} $1.0000$, \texttt{V0\_ia} $0.9970$; the class
+  projections are gauge invariant \\
+coupled full-Fock &
+  $1.0232$ &
+  full-FIC level; diagonal/full coupling ratio $0.9795831$ against the
+  ORCA $0.9795829$ \\
+\bottomrule
+\end{tabularx}
+\end{center}
+The ratios are the release record in \texttt{README.md} and
+\texttt{CHANGELOG.md}; the runnable driver is
+\texttt{scripts/caspt2\_n2\_validation.py}, run in three stages:
+\begin{lstlisting}
+python scripts/caspt2_n2_validation.py --stage ref --outdir out
+python scripts/caspt2_n2_validation.py --stage default --outdir out
+python scripts/caspt2_n2_validation.py --stage coupled --outdir out
+\end{lstlisting}
+The default path's total is close to the reference for the wrong
+reason: the class residuals have opposite signs and cancel.  The block
+reading and the coupled path agree on the total because both include
+the intra-class coupling; they differ in what they keep beyond that,
+and the agreement is the diagnostic that the class-space projection is
+the missing piece of the default path.
+
+\subsection{H\texorpdfstring{$_2$}{2}O/6-31G and CO/6-31G: the
+CAS(2,2) class table}
+
+On the two-orbital active space the class-resolved ratios against the
+ORCA CASPT2 class table are
+\begin{center}
+\small
+\begin{tabular}{lrrrrr}
+\toprule
+System & \texttt{V0\_ijab} & \texttt{Vm1\_iab} & \texttt{Vm2\_ab} &
+\texttt{V1\_ija} & \texttt{V2\_ij} \\
+\midrule
+H$_2$O/6-31G & $1.017$ & $1.011$ & $0.999$ & $1.009$ & $0.955$ \\
+CO/6-31G    & $1.009$ & $1.011$ & $0.963$ & $0.999$ & $0.987$ \\
+\bottomrule
+\end{tabular}
+\end{center}
+The eight-class totals are $1.0103$ (H$_2$O) and $1.0026$ (CO).  The
+H$_2$O case uses \texttt{ncore}$=4$ and the CO case \texttt{ncore}$=6$;
+both follow the reference chain of the runnable example below.  The
+\texttt{V0\_ia} target on H$_2$O is $-0.011135$~Eh (ORCA).  These are
+the anchors that establish the class definitions before the
+three-active-index treatment is exercised on N$_2$.
+
+\subsection{Running the three contraction routes}
+
+\begin{lstlisting}[language=Python]
+import numpy as np
+import jax
+jax.config.update('jax_enable_x64', True)
+import jax.numpy as jnp
+
+from pyscf import gto, scf, mcscf
+from diffmrc.core.casci import cs_casci
+from diffmrc.core.nevpt2.impl import canonicalize_jax, cas_dets_for2
+from diffmrc.core.caspt2 import (caspt2_contracted_e2,
+                                 caspt2_contracted_e2_coupled)
+from diffmrc.core.caspt2_three_center import (
+    caspt2_contracted_e2_three_center)
+from diffmrc.core import ri
+
+ncore, nact, nele = 4, 2, 2
+nocc = ncore + nact
+
+mol = gto.M(atom='O 0 0 0; H 0.7557 0 0.5880; H -0.7557 0 0.5880',
+            basis='6-31g', unit='Angstrom', verbose=0)
+mf = scf.RHF(mol).run(verbose=0)
+mc = mcscf.CASSCF(mf, nact, nele)
+mc.kernel()
+
+C = jnp.asarray(mc.mo_coeff)
+h1e = jnp.asarray(mol.intor('int1e_kin') + mol.intor('int1e_nuc'))
+eri = jnp.asarray(mol.intor('int2e', aosym='s1'))
+
+def mo_ints(C, h1e, eri):
+    h1 = jnp.einsum('ai,ab,bj->ij', C, h1e, C)
+    z = jnp.einsum('pi,pqrs->iqrs', C, eri)
+    z = jnp.einsum('qj,iqrs->ijrs', C, z)
+    z = jnp.einsum('rk,ijrs->ijks', C, z)
+    return h1, jnp.einsum('sl,ijks->ijkl', C, z)
+
+nmo = mol.nao_nr()
+h1_mo, eri_mo = mo_ints(C, h1e, eri)
+_, ci = cs_casci(h1_mo[:nocc, :nocc],
+                 eri_mo[:nocc, :nocc, :nocc, :nocc],
+                 ncore=ncore, nact=nact, nele_act=nele,
+                 nroots=1, return_ci=True)
+C2, ci2, eps = canonicalize_jax(C, h1e, eri, ci, ncore=ncore,
+                                nact=nact, nele_act=nele)
+h1_mo2, eri_mo2 = mo_ints(C2, h1e, eri)
+dets = cas_dets_for2(ncore, nact, nele)
+
+e2, breakdown = caspt2_contracted_e2(
+    np.asarray(h1_mo2), np.asarray(eri_mo2), np.asarray(ci2), dets,
+    ncore=ncore, nact=nact, nele=nele, eps=np.asarray(eps))
+for name, value in breakdown.items():
+    print(f'{name:10s} {value: .9f}')
+print('default', e2)
+
+e2_block, bd_block = caspt2_contracted_e2(
+    np.asarray(h1_mo2), np.asarray(eri_mo2), np.asarray(ci2), dets,
+    ncore=ncore, nact=nact, nele=nele, eps=np.asarray(eps),
+    class_diagonal='block', v0_ia='class')
+print('class-block', e2_block)
+
+e2_cpl, bd_cpl, system = caspt2_contracted_e2_coupled(
+    np.asarray(h1_mo2), np.asarray(eri_mo2), np.asarray(ci2), dets,
+    ncore=ncore, nact=nact, nele=nele, return_system=True)
+print('coupled', e2_cpl,
+      'min |eig(S)|', np.min(np.abs(np.linalg.eigvalsh(system['S']))))
+
+auxmol, label = ri.make_auxmol(mol)
+factors = ri.ri_factors(mol, auxmol)
+u_mo, _ = ri.ri_eri_mo(np.asarray(C2), factors.b, factors.jhalf,
+                       full=False)
+e2_3c, bd_3c = caspt2_contracted_e2_three_center(
+    np.asarray(h1_mo2), u_mo, np.asarray(ci2), dets,
+    ncore=ncore, nact=nact, nele=nele, eps=np.asarray(eps))
+print('three-center', e2_3c,
+      'max class difference',
+      max(abs(bd_3c[k] - breakdown[k]) for k in breakdown))
+\end{lstlisting}
+
+Three points about the call are easy to get wrong.  First,
+\texttt{ci} must be the state-specific CI vector of the same determinant
+list, not a state-averaged vector and not the natural-orbital CI of a
+different active-space ordering.  Second, \texttt{eps} must come from
+\texttt{canonicalize\_jax}; passing the RHF orbital energies leaves the
+denominators undefined.  Third, \texttt{u\_mo} must be the
+metric-folded factor; the raw \texttt{ri.ri\_three\_center} tensor
+without \texttt{factors.jhalf} changes the energy by the metric factor.
+
+\section{Pitfalls}
+\label{sec:caspt2-limits}
+
+\begin{itemize}
+\item \emph{Reading only the total.}  The default N$_2$ total agrees
+  with the reference through a cancellation between classes with
+  opposite errors.  Read the class table and quote the class ratios
+  when the total is used for a comparison.
+\item \emph{Comparing a gauge-dependent class.}  When the class overlap
+  has degenerate eigenvalues, the diagonal approximation depends on the
+  basis chosen inside the block.  Random rotations inside the blocks
+  move a class energy by up to $25\%$ (\texttt{V2\_ij}, measured).  Use
+  \texttt{class\_diagonal='block'} when the class energy enters a
+  decision.
+\item \emph{The \texttt{active\_row} replica assumption.}  The default
+  \texttt{'replica'} drops $(u,u)$ rows beyond the first active orbital.
+  It is exact only for a two-orbital active space; on larger spaces the
+  rows are not replicas unless the block projection is used.
+\item \emph{The \texttt{V1\_ija} class-space residual.}  It stands at
+  $1.553$ of the ORCA value in every basis and does not shrink with the
+  basis set.  This is a definition difference (ORCA prints 192
+  functions for the class against 768 in the plain-product basis), not
+  a convergence artifact.
+\item \emph{Using the three-center path as a different method.}  It is
+  the same CASPT2-D energy with RI integrals; the RI fitting error
+  enters through \texttt{u\_mo}.
+\item \emph{Scaling the coupled path.}  The assembly is
+  $n_{\mathrm{fn}}^2$ and is intended for small and medium active
+  spaces; it is not a production-scale implementation.
+\item \emph{Forgetting the canonical basis.}  The denominators are
+  defined in the semicanonical basis.  A CASCI reference with SCF
+  orbital energies is not the same calculation.
+\end{itemize}
+
+\section{Validation and references}
+\label{sec:caspt2-validation}
+
+\begin{center}
+\small
+\begin{tabularx}{\textwidth}{>{\raggedright\arraybackslash}p{0.22\textwidth}>{\raggedright\arraybackslash}p{0.30\textwidth}X}
+\toprule
+Check & System & Reference and result \\
+\midrule
+Diagonal class table &
+  H$_2$O/6-31G CAS(2,2) &
+  ORCA CASPT2 class table; class ratios $1.017$, $1.011$, $0.999$,
+  $1.009$, $0.955$; eight-class total $1.0103$ \\
+Diagonal class table &
+  CO/6-31G CAS(2,2) &
+  class ratios $1.009$, $1.011$, $0.963$, $0.999$, $0.987$; total
+  $1.0026$ \\
+Three-active-index classes &
+  N$_2$/6-31G CAS(6,6) &
+  default-path ratio $0.989$ (Wave~12 frozen), $0.983$ (release, one
+  BLAS thread); class contributions $-0.003648$~Eh and
+  $-0.001625$~Eh \\
+Three paths &
+  N$_2$/6-31G CAS(6,6) &
+  default $0.989$, class-block $1.0232$, coupled $1.0232$;
+  \texttt{Vm2\_ab} $1.0000$, \texttt{V0\_ia} $0.9970$,
+  \texttt{V1\_ija} $1.553$, \texttt{V2\_ij} $0.24$ \\
+Coupled path &
+  H$_2$O, CO CAS(2,2) &
+  totals $1.0081$, $1.0100$; N$_2$ diagonal/full ratio $0.9795831$
+  against $0.9795829$ \\
+Three-center parity &
+  deterministic exact-factor tensor &
+  class-by-class agreement with the materialized path at $10^{-10}$;
+  dense-coupling elementwise check \\
+\bottomrule
+\end{tabularx}
+\end{center}
+
+The files behind the table are
+\texttt{tests/core/test\_caspt2.py} (class definitions, JAX twin,
+option behaviour), \texttt{tests/core/test\_caspt2\_three\_center.py}
+(three-center parity and coupling scatter),
+\texttt{scripts/caspt2\_n2\_validation.py} (the N$_2$ reference chain
+and the ORCA comparison; stages \texttt{ref}, \texttt{default},
+\texttt{coupled}), and \texttt{scripts/caspt2\_sparse\_assembly.py}
+(sparse class assembly).
+
+The class structure and the internally contracted amplitude equations
+follow the OpenMolcas and ORCA conventions documented in
+K.~Andersson, P.-A.~Malmqvist, B.~O.~Roos, A.~J.~Sadlej and
+K.~Wolinski, \emph{J. Phys. Chem.} \textbf{94}, 5483 (1990);
+K.~Andersson, P.-A.~Malmqvist and B.~O.~Roos,
+\emph{J. Chem. Phys.} \textbf{96}, 1218 (1992);
+C.~Angeli, R.~Cimiraglia, S.~Evangelisti, T.~Leininger and
+J.-P.~Malrieu, \emph{J. Chem. Phys.} \textbf{114}, 10252 (2001) and
+\textbf{117}, 9138 (2002); and the class table of
+D.~Kollmar, K.~Sivalingam and F.~Neese,
+\emph{J. Chem. Theory Comput.} (2020), and
+D.~Kollmar, Y.~Guo and F.~Neese,
+\emph{J. Chem. Theory Comput.} (2021).  The
+OpenMolcas implementation records are the \texttt{mkrhsh} and
+\texttt{caspt2} sources referred to in the module docstrings.

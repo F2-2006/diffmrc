@@ -1,76 +1,359 @@
 \chapter{Second derivatives}
 \label{ch:second-derivatives}
 
+\section{Purpose and scope}
+
 The package differentiates its energy chain twice, so that harmonic
-frequencies and curvature checks come out of the same code path that
-produced the gradients.  This chapter records the construction and the
-numerical facts that forced their design.
+frequencies, curvature checks, and trust-region steps come out of the
+same code path that produced the gradients.  The target quantity is the
+nuclear Hessian of the relaxed energy $E^{*}(R)$ of
+Chapter~\ref{ch:differentiable-chain}, not the Hessian at frozen
+orbitals.  The frozen object is available as an intermediate, but it is
+not the physical second derivative: the orbital response contributes at
+the same order and, on the systems measured here, moves every frequency
+in the same direction.
 
-\section{The nuclear Hessian by implicit differentiation}
+The chapter applies to any energy whose orbitals are determined by a
+stationarity condition and whose Hessian is available through
+automatic differentiation.  It does not cover analytic second
+derivatives of the single-reference SCF surface, and it does not cover
+a matrix-free solver that removes the iteration cap of the
+least-squares response; both are listed as open problems in the
+README.
 
-Differentiating through a converged orbital optimization naively ---
-differentiating the unrolled iteration --- scales with the number of
-iterations and inherits every numerical accident of the solver.  The
-production route instead treats the optimized orbital parameters as an
-implicit function of the geometry, $\theta^*(R)$, and assembles the
-second derivative from the partial derivatives of the energy at the
-converged point plus a response term built from the orbital Hessian.
+\section{Theory and derivation}
+\label{sec:hessian-theory}
 
-Two implementation facts came out of the verification work.  The
-response solve must use a pseudoinverse rather than a plain solve:
-the orbital Hessian at a converged point is singular in the
-directions the optimizer is free to ignore, and the plain solve
-either fails or returns noise.  And the implicitly assembled Hessian
-must be pinned against the alternative construction: the two routes
-agree to $1.6 \times 10^{-11}$ on the validation systems, with the
-implicit route costing about a third of the unrolled one.
+\subsection{Implicit differentiation of the stationarity condition}
 
-\section{The second-order stages never materialize the Hessian}
+Let $g(\theta,R)=\partial E/\partial\theta$ and let
+$\theta^{*}(R)$ satisfy
+\begin{equation}
+  g\bigl(\theta^{*}(R),R\bigr)=0.
+  \label{eq:hess-stationarity}
+\end{equation}
+Differentiating Eq.~\eqref{eq:hess-stationarity} with respect to $R$,
+\begin{equation}
+  H_{\theta\theta}\frac{d\theta^{*}}{dR}
+  + \frac{\partial g}{\partial R}=0,
+  \qquad
+  H_{\theta\theta}
+  = \frac{\partial^{2}E}{\partial\theta^{2}},
+  \qquad
+  \frac{\partial g}{\partial R}
+  = \frac{\partial^{2}E}{\partial\theta\,\partial R}
+  \equiv M,
+  \label{eq:hess-implicit}
+\end{equation}
+so
+\begin{equation}
+  \frac{d\theta^{*}}{dR} = -H_{\theta\theta}^{-1}M.
+  \label{eq:hess-dtheta}
+\end{equation}
+The relaxed energy is $E^{*}(R)=E(\theta^{*}(R),R)$.  Its first
+derivative is the envelope result
+\begin{equation}
+  \frac{dE^{*}}{dR}
+  = \left.\frac{\partial E}{\partial R}\right|_{\theta},
+  \label{eq:hess-first}
+\end{equation}
+and its second derivative follows from differentiating
+Eq.~\eqref{eq:hess-first}:
+\begin{equation}
+  \frac{d^{2}E^{*}}{dR^{2}}
+  = \left.\frac{\partial^{2}E}{\partial R^{2}}\right|_{\theta}
+  + M^{T}\frac{d\theta^{*}}{dR}
+  = H_{RR} - M^{T}H_{\theta\theta}^{-1}M.
+  \label{eq:hess-total}
+\end{equation}
+Here $H_{RR}=\partial^{2}E/\partial R^{2}|_{\theta}$ is the frozen
+Hessian, and
+\begin{equation}
+  H_{\mathrm{response}} = -M^{T}H_{\theta\theta}^{-1}M
+  \label{eq:hess-response}
+\end{equation}
+is the orbital-response contribution.  Equation~\eqref{eq:hess-total}
+is the construction implemented by
+\texttt{core.hessian.implicit\_hessian}; the result object exposes
+$H_{RR}$, $H_{\mathrm{response}}$, and the total separately.
 
-The orbital refinement (damped Newton) and the trust-region polish
-need the Hessian only through its action on vectors.  The earlier
-implementation built it explicitly with \texttt{jax.hessian}, which is
-forward-over-forward: every intermediate of the chain is broadcast
-over the square of the parameter count.  At five hundred parameters
-that construction requested a single 402~GB allocation and died.  Both
-stages now receive Hessian-vector products --- a forward-mode
-derivative of the gradient --- which carry one tangent per reverse
-pass: the refinement solves its Newton step by conjugate gradients on
-those products, and the trust-region stage consumes them through the
-optimizer's \texttt{hessp} interface.  The budgets are deliberately
-shallow (tolerance $10^{-6}$, forty iterations): an inexact Newton
-step feeds a damping ladder and a downhill acceptance test that
-correct it.  The deep solver cost hours of product evaluations per
-molecule, and the shallow budget passes the same refinement
-regressions.
+\subsection{The pseudo-inverse and null-space exclusion}
 
-\section{Degenerate pairs and the derivative basis}
+The orbital Hessian is not positive definite and is singular along
+directions that leave the energy invariant.  Rotations inside a block
+are the physical example: the core block is fully occupied, the virtual
+block is empty, and the active block is complete inside the CI step, so
+a rotation that only mixes orbitals inside one block changes no
+occupied--virtual or occupied--active matrix element.  The optimized
+$\theta$ is also free to move along any direction that the optimizer
+never constrained.
 
-A symmetry-degenerate pair of orbitals has no canonical derivative
-basis: the eigenvectors inside the degenerate subspace are arbitrary,
-so a naive derivative of a decomposition returns a quantity that
-depends on the solver's internal ordering.  For a linear molecule
-this is not an edge case --- the $\pi$ pairs are exactly degenerate,
-and a gradient assembled through an unguarded decomposition returns
-NaN.  The kernels use degeneracy-safe eigensolvers throughout the
-differentiated path, and the second-order routes avoid differentiating
-decompositions where the response construction allows it.
+Write the symmetric eigendecomposition
+\begin{equation}
+  H_{\theta\theta} = \sum_i \lambda_i\,v_i v_i^{T},
+  \qquad
+  v_i^{T}v_j=\delta_{ij}.
+  \label{eq:hess-eig}
+\end{equation}
+The truncated pseudo-inverse with relative cutoff $\tau$ is
+\begin{equation}
+  H_{\theta\theta}^{+}
+  = \sum_{|\lambda_i|>\tau\lambda_{\max}}
+    \lambda_i^{-1}\,v_i v_i^{T},
+  \label{eq:hess-pinv}
+\end{equation}
+and the response becomes
+\begin{equation}
+  \frac{d\theta^{*}}{dR}
+  = -\sum_{|\lambda_i|>\tau\lambda_{\max}}
+    \lambda_i^{-1}\,v_i\left(v_i^{T}M\right).
+  \label{eq:hess-response-sum}
+\end{equation}
+A dropped direction contributes to $d\theta^{*}/dR$ only through
+$v_i^{T}M$.  If $M$ has no component along the null space, dropping the
+direction changes nothing.  If it does, the response along that
+direction is not determined by the second-order expansion, and the
+pseudo-inverse silently omits it.  The result object exposes
+$H_{\theta\theta}$ and $M$, so the projection $v_i^{T}M$ can be formed
+for any discarded direction; the curvature report records the spectrum
+and the near-null count, not the projection itself.
 
-\section{From the Hessian to frequencies, and one cautionary record}
+A relative cutoff is not interchangeable with an absolute one.  An
+earlier script used an absolute singular-value threshold of $10^{-3}$;
+on a matrix with condition number $10^{12}$ the absolute and relative
+rules retained five and two singular values and produced solutions
+differing by $99.9\%$.  The default in \texttt{core.hessian} is
+relative, \texttt{rcond}$=10^{-9}$.
 
-Harmonic frequencies follow from the mass-weighted Hessian by the
-standard normal-mode analysis, using PySCF's driver on a Hessian this
-package assembles.  The conversion has a layout trap that cost this
-project a wrong number: the Hessian must be handed over in the
-(atom, coordinate) block layout the thermodynamics module expects,
-not as a plain reshape.  The wrong layout comes out plausible and
-silent --- for CO at 6-31G it produced $1501.8$~cm$^{-1}$ against the
-correct $2293.5$~cm$^{-1}$.
+\subsection{The unrolled route and its consistency}
 
-The frequency route is anchored against an independent value: the CO
-molecule at 6-31G gives $2294.2$ and $2293.5$~cm$^{-1}$ from the two
-assembly routes, against an external anchor at $2293.5$~cm$^{-1}$.
-When a validation target sits near zero, do not reach for finite
-differences: this project measured finite-difference errors of over
-one hundredfold on a near-zero mixed derivative, growing as the step
-shrank.  Use an invariance or an analytic cross-check instead.
+The alternative construction differentiates the optimizer itself.
+Write one Newton-type step as
+\begin{equation}
+  \theta_{k+1}(R)
+  = \theta_k(R) - H_k^{-1}g\bigl(\theta_k(R),R\bigr),
+  \label{eq:hess-newton-map}
+\end{equation}
+and evaluate $N$ steps inside the computational graph.  At a fixed
+point $\theta_N=\theta^{*}$ the derivative of the map satisfies
+\begin{equation}
+  \frac{d\theta_{k+1}}{dR}
+  = \left(I-H_k^{-1}H_k\right)\frac{d\theta_k}{dR}
+    - H_k^{-1}M_k
+  = -H_k^{-1}M_k.
+  \label{eq:hess-unrolled}
+\end{equation}
+With an exact Hessian the fixed-point derivative is reached in one
+step; with the quasi-Newton or damped Hessian used in practice the
+iteration converges linearly with the contraction factor of the
+optimizer.  The unrolled and implicit routes therefore agree in the
+limit of a converged iteration and an exact response solve.  The
+measured agreement on the validation systems is
+$1.6\times10^{-11}$ (Chapter~\ref{ch:verification}).
+
+The unrolled route has two costs that the implicit route avoids.  It
+inherits every numerical accident of the optimizer, and its memory and
+time scale with the number of unrolled steps.  It is retained as the
+independent check, not as the production route.
+
+\subsection{Hessian-vector products}
+
+The refinement and trust-region stages need the Hessian only through
+its action on a vector.  The product is the directional derivative of
+the gradient,
+\begin{equation}
+  H v = \left.\frac{d}{d\epsilon}
+        g(\theta+\epsilon v)\right|_{\epsilon=0}
+      = \mathrm{jvp}_v(g)(\theta),
+  \label{eq:hess-hvp}
+\end{equation}
+and one forward-mode tangent per reverse pass is enough.  Forming the
+full Hessian with \texttt{jax.hessian} is forward-over-forward: every
+intermediate is broadcast over the square of the parameter count.  At
+about five hundred parameters that construction requested a single
+$402$~GB allocation and died; the Hessian-vector form is what keeps the
+memory at one tangent vector.
+
+\section{Input and operation}
+\label{sec:hessian-input}
+
+The production entry point is
+\begin{lstlisting}[language=Python]
+from diffmrc.core.hessian import (implicit_hessian,
+                                  make_joint_energy_fn,
+                                  make_theta_energy_fn,
+                                  implicit_hessian_columnwise,
+                                  implicit_hessian_hvp)
+\end{lstlisting}
+\texttt{implicit\_hessian(mol, theta, E\_joint, rcond=1e-9)} returns an
+\texttt{ImplicitHessianResult} with the fields \texttt{H\_tt},
+\texttt{H\_tt\_inverse}, \texttt{curvature}, \texttt{mixed},
+\texttt{H\_RR}, \texttt{H\_response}, \texttt{H\_total},
+\texttt{dtheta\_dR\_max}, and \texttt{rcond}.  The total is in
+Eh/bohr$^{2}$ with shape \texttt{(3 natm, 3 natm)}.  \texttt{theta} is
+in radians; \texttt{rcond} is a relative cutoff on the singular values
+of \texttt{H\_tt}.
+
+\texttt{E\_joint} is built by \texttt{make\_joint\_energy\_fn} and has
+the signature \texttt{(mol, theta) -> energy}.  The SCF is rebuilt
+inside every call, which is what makes the geometry derivative correct
+and what makes each evaluation expensive.  \texttt{E\_tt}, when
+available from \texttt{make\_theta\_energy\_fn}, removes the SCF from
+the theta-only part of the graph; the mixed and frozen blocks still use
+the joint function because they differentiate the reference orbitals
+with respect to geometry.
+
+For large parameter counts, \texttt{implicit\_hessian\_columnwise}
+takes one tangent per column, and \texttt{implicit\_hessian\_hvp}
+assembles the total without forming \texttt{H\_tt}, \texttt{M}, or
+\texttt{H\_RR}.  The matrix-free route solves
+\texttt{H\_tt x = M v} by LSMR and records \texttt{lsmr\_iterations},
+\texttt{lsmr\_istop}, and \texttt{lsmr\_residual} per column.  A
+converged solve is part of the result; the iteration cap is
+$8n_{\mathrm{par}}$.
+
+Harmonic frequencies are computed from the total Hessian with the
+\texttt{wavenumbers} routine in \texttt{analysis.vibrations}, which
+performs the mass-weighting and the normal-mode analysis.  The Hessian must be
+handed over in the (atom, coordinate) block layout the thermodynamics
+module expects.  A plain reshape compiles and returns a plausible
+number; for CO/6-31G it produced $1501.8$~cm$^{-1}$ against the correct
+$2293.5$~cm$^{-1}$.
+
+\section{Worked example}
+\label{sec:hessian-example}
+
+\subsection{H\texorpdfstring{$_2$}{2}/STO-3G: orbital-space HVP against
+a finite-difference ladder}
+
+The HVP test in \texttt{tests/driver/test\_nevpt2.py} uses the
+NEVPT2 joint energy on H$_2$/STO-3G, a symmetric bond-stretch probe
+vector, and a ladder of central differences of the AD gradient.  The
+recorded errors of the HVP against the ladder are
+\begin{center}
+\small
+\begin{tabular}{lr}
+\toprule
+Step $\delta$ (bohr) & $\max|\mathrm{HVP}-\mathrm{FD}|$ \\
+\midrule
+$1\times10^{-3}$ & $6.6\times10^{-6}$ \\
+$3\times10^{-4}$ & $6.0\times10^{-7}$ \\
+\bottomrule
+\end{tabular}
+\end{center}
+The ratio is approximately $(10/3)^2$, which is the expected quadratic
+truncation term of the central difference.  The test requires monotone
+improvement and the bounds $2\times10^{-5}$ at $\delta=10^{-3}$ and
+$2\times10^{-6}$ at $\delta=3\times10^{-4}$.  This is an HVP in the
+orbital-parameter space, not in the nuclear-coordinate space; the
+probe vector is the bond stretch because a generic displacement of a
+diatomic would compare zero against zero.
+
+\subsection{H\texorpdfstring{$_2$}{2}O/6-31G: relaxed Hessian against
+the golden finite-difference standard}
+
+The recorded H$_2$O/6-31G CAS(2,2) Hessian diagonal for the three
+oxygen displacements is
+\begin{center}
+\small
+\begin{tabular}{lrrr}
+\toprule
+Route & $H_{xx}$ & $H_{yy}$ & $H_{zz}$ \\
+\midrule
+golden standard (finite differences) & $0.7192711493$ & $0.0217924736$ & $0.4702696863$ \\
+unrolled iteration, $N=3$ & $0.7192706205$ & $0.0217921326$ & $0.4702703066$ \\
+frozen orbitals (no response) & $0.7261828915$ & $0.0217921326$ & $0.4711140468$ \\
+\bottomrule
+\end{tabular}
+\end{center}
+{\raggedright
+The values are in Eh/bohr$^{2}$ and come from the \texttt{REF['H2O']}
+record in \texttt{experiments/orbital\_response\_implicit.py}; the
+golden standard is the Newton-refined reference recorded in the same
+file and in \texttt{experiments/orbital\_response\_generalize.py}.  The
+unrolled route differs from the golden standard by
+$5.3\times10^{-7}$, $3.4\times10^{-7}$, and $6.2\times10^{-7}$~Eh/bohr$^2$
+(relative $7.4\times10^{-7}$, $1.6\times10^{-5}$, and
+$1.3\times10^{-6}$).  The frozen route misses the first and third
+components by $6.9\times10^{-3}$ and $8.4\times10^{-4}$~Eh/bohr$^2$:
+the response term is not a small correction.  The implicit route
+reproduces the unrolled construction to $1.6\times10^{-11}$.\par}
+
+\subsection{CO/6-31G: the frequency anchor}
+
+The frequency conversion is anchored against an independent value: CO
+at 6-31G gives $2294.2$ and $2293.5$~cm$^{-1}$ from the two assembly
+routes, against an external anchor at $2293.5$~cm$^{-1}$.  The
+near-agreement of the two routes is the internal check; the external
+anchor is the physical check.  A validation target near zero should not
+be checked by finite differences: this project measured
+finite-difference errors of over one hundredfold on a near-zero mixed
+derivative, growing as the step shrank.
+
+\section{Pitfalls}
+\label{sec:hessian-pitfalls}
+
+\begin{itemize}
+\item \emph{A plain solve on a singular Hessian.}  The orbital Hessian
+  reaches a condition number of $2.6\times10^{15}$ on N$_2$.  A direct
+  solve inverts the near-null direction and amplifies whatever the
+  right-hand side has there.  Use the pseudo-inverse, and report the
+  cutoff.
+\item \emph{An absolute instead of a relative cutoff.}  The two rules
+  retain different subspaces on an ill-conditioned matrix; the measured
+  difference was $99.9\%$ in the response vector.  \texttt{rcond} is
+  relative.
+\item \emph{Forgetting \texttt{stop\_gradient} on $\theta$ in the
+  frozen Hessian.}  The frozen term then silently acquires the orbital
+  response, and the two routes stop being distinguishable.
+\item \emph{Unsymmetrized AD Hessians.}  AD returns a matrix symmetric
+  only to round-off; \texttt{eigvalsh} and \texttt{pinv} assume exact
+  symmetry.  Symmetrize as $0.5(H+H^{T})$.
+\item \emph{Finite differences near a zero derivative.}  The measured
+  failure is over one hundredfold, with the error growing as the step
+  shrinks.  Use an invariance or an analytic cross-check.
+\item \emph{The frequency layout trap.}  A plain reshape of the Hessian
+  gives a plausible but wrong spectrum ($1501.8$ against
+  $2293.5$~cm$^{-1}$ for CO/6-31G).  Use the (atom, coordinate) block
+  layout.
+\item \emph{Unblocked eigensolvers and degenerate pairs.}  A plain
+  eigensolver's second derivative is NaN at a cross-$S_z$ degeneracy;
+  linear molecules need the blocked solver and, for bit-exact
+  degenerate pairs, the Lanczos kernel.
+\item \emph{Unrolled iteration cost.}  The unrolled route scales with
+  the number of steps and inherits optimizer noise; it is the
+  independent check, not the production path.
+\end{itemize}
+
+\section{Validation and references}
+\label{sec:hessian-validation}
+
+{\raggedright
+The records behind this chapter are
+\texttt{tests/core/test\_hessian.py} (implicit assembly on analytic
+surrogates, pseudo-inverse behaviour),
+\texttt{tests/core/test\_stationary.py} (Newton--CG and saddle checks),
+\texttt{tests/driver/test\_orbitals.py} (Hessian-vector products
+against the explicit Hessian), and
+\texttt{tests/driver/test\_nevpt2.py} (the H$_2$/STO-3G HVP ladder).
+The experimental records are
+\texttt{experiments/orbital\_response\_implicit.py},
+\texttt{experiments/orbital\_response\_unrolled.py},
+\texttt{experiments/orbital\_response\_generalize.py},
+\texttt{experiments/hessian\_to\_frequencies.py},
+\texttt{experiments/verify\_nevpt2\_an.py}, and
+\texttt{experiments/verify\_rcond\_choice.py}.  Chapter~\ref{ch:verification}
+collects the measured agreement values: $1.6\times10^{-11}$ between
+the implicit and unrolled routes, $10^{-10}$ for the HVP against the
+explicit Hessian on a non-quadratic fixture, and the CO frequency
+anchor.\par}
+
+The derivation is the implicit-function construction of analytic
+second derivatives for MCSCF.  The relevant references are
+P.~Pulay, \emph{Mol. Phys.} \textbf{17}, 197 (1969); N.~C.~Handy and
+H.~F.~Schaefer, \emph{J. Chem. Phys.} \textbf{81}, 5031 (1984);
+T.~Helgaker, P.~J{\o}rgensen and J.~Olsen, \emph{Molecular
+Electronic-Structure Theory} (Wiley, 2000), Chapters 10--12; and
+J.~A.~Pople, R.~Krishnan, H.~B.~Schlegel and J.~S.~Binkley,
+\emph{Int. J. Quantum Chem. Symp.} \textbf{13}, 225 (1979), for the
+coupled-perturbed second-derivative construction.

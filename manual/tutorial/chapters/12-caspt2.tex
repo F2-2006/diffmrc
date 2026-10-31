@@ -1,0 +1,243 @@
+\section{CASPT2: the class table and the three contraction paths}
+\label{sec:caspt2-tutorial}
+
+The perturbation layer reports its energy class by class:
+\texttt{V0\_ijab}, \texttt{Vm1\_iab}, \texttt{Vm2\_ab},
+\texttt{V1\_ija}, \texttt{V2\_ij}, \texttt{V0\_ia},
+\texttt{Vm1\_a}, and \texttt{V1\_i}.  Reading that table is the
+difference between knowing that a number is close to a reference and
+knowing which part of the wavefunction produced it.  This chapter
+builds a small reference, runs the three contraction routes, and shows
+how to compare them.
+
+\subsection{Build a reference}
+
+The reference chain is RHF, CASSCF, state-specific CASCI, then
+canonicalization.  The canonicalization is not cosmetic: the CASPT2
+denominators are defined in the semicanonical basis, and the
+active-natural-orbital rotation is part of the definition.
+
+\begin{lstlisting}[language=Python]
+import numpy as np
+import jax
+jax.config.update('jax_enable_x64', True)
+import jax.numpy as jnp
+
+from pyscf import gto, scf, mcscf
+from diffmrc.core.casci import cs_casci
+from diffmrc.core.nevpt2.impl import canonicalize_jax, cas_dets_for2
+
+ncore, nact, nele = 4, 2, 2
+nocc = ncore + nact
+
+mol = gto.M(atom='O 0 0 0; H 0.7557 0 0.5880; H -0.7557 0 0.5880',
+            basis='6-31g', unit='Angstrom', verbose=0)
+mf = scf.RHF(mol).run(verbose=0)
+mc = mcscf.CASSCF(mf, nact, nele)
+mc.kernel()
+
+C = jnp.asarray(mc.mo_coeff)
+h1e = jnp.asarray(mol.intor('int1e_kin') + mol.intor('int1e_nuc'))
+eri = jnp.asarray(mol.intor('int2e', aosym='s1'))
+
+def mo_ints(C, h1e, eri):
+    h1 = jnp.einsum('ai,ab,bj->ij', C, h1e, C)
+    z = jnp.einsum('pi,pqrs->iqrs', C, eri)
+    z = jnp.einsum('qj,iqrs->ijrs', C, z)
+    z = jnp.einsum('rk,ijrs->ijks', C, z)
+    return h1, jnp.einsum('sl,ijks->ijkl', C, z)
+
+h1_mo, eri_mo = mo_ints(C, h1e, eri)
+_, ci = cs_casci(h1_mo[:nocc, :nocc],
+                 eri_mo[:nocc, :nocc, :nocc, :nocc],
+                 ncore=ncore, nact=nact, nele_act=nele,
+                 nroots=1, return_ci=True)
+C2, ci2, eps = canonicalize_jax(C, h1e, eri, ci, ncore=ncore,
+                                nact=nact, nele_act=nele)
+h1_mo2, eri_mo2 = mo_ints(C2, h1e, eri)
+dets = cas_dets_for2(ncore, nact, nele)
+
+print('CASSCF', mc.e_tot, 'CI norm', float(jnp.linalg.norm(ci2)))
+print('eps', np.asarray(eps))
+\end{lstlisting}
+
+\texttt{dets} is a list of determinant bitmaps with the core spin
+orbitals first.  \texttt{eps} is the semicanonical Fock diagonal; it
+must not be replaced by the RHF orbital energies.
+
+\subsection{The diagonal path and its class table}
+
+\begin{lstlisting}[language=Python]
+from diffmrc.core.caspt2 import caspt2_contracted_e2
+
+e2, breakdown = caspt2_contracted_e2(
+    np.asarray(h1_mo2), np.asarray(eri_mo2), np.asarray(ci2), dets,
+    ncore=ncore, nact=nact, nele=nele, eps=np.asarray(eps))
+
+for name, value in breakdown.items():
+    print(f'{name:10s} {value: .10f}')
+print('total', e2)
+\end{lstlisting}
+
+For H$_2$O/6-31G CAS(2,2) the two three-active-index classes
+\texttt{Vm1\_a} and \texttt{V1\_i} are below $10^{-9}$~Eh: they vanish
+on a two-orbital active space.  The five double and single classes and
+the \texttt{V0\_ia} block carry the correction.  On CO/6-31G CAS(2,2)
+the same structure holds with different weights.
+
+\subsection{How to read the class table}
+
+For a class $c$ with energy $e_{2,c}$ and total $e_2$, the two useful
+scalars are the signed share and the absolute share,
+\begin{equation}
+  s_c = \frac{e_{2,c}}{e_2},
+  \qquad
+  a_c = \frac{|e_{2,c}|}{\sum_{c'}|e_{2,c'}|}.
+  \label{eq:tutorial-class-shares}
+\end{equation}
+The signed share says whether the class lowers or raises the energy
+relative to the total; the absolute share says which class dominates
+the correlation.  A large signed share with a small absolute share is
+possible when the total is small.  A cancellation index
+\begin{equation}
+  C = \frac{\sum_c |e_{2,c}|}{|e_2|}
+  \label{eq:tutorial-class-cancellation}
+\end{equation}
+near one means the classes add coherently; $C\gg1$ means the total is
+a cancellation between classes and the total alone is not a safe
+diagnostic.
+
+The point is not academic.  On N$_2$/6-31G CAS(6,6) the default-path
+total is $0.989$ of the reference, but the class residuals are
+\texttt{V1\_ija} $+55\%$, \texttt{V2\_ij} $-76\%$, \texttt{V0\_ia}
+$+10\%$, and \texttt{Vm2\_ab} $+12\%$.  The total is close for the
+wrong reason; the class table is what identifies the cancellation.
+On the CAS(2,2) anchors the class ratios are all within a few percent
+of one, so the total is a meaningful summary there.
+
+The denominator sign matters too.  A class with $A-E_0S>0$ lowers the
+energy; a class with $A-E_0S<0$ would raise it.  The code skips a
+denominator with $|A-E_0S|<10^{-10}$; a skipped class is reported as
+zero in the breakdown, not as a missing key.  When a class is
+unexpectedly zero, print the denominator and the overlap eigenvalue
+before attributing it to symmetry.
+
+The default \texttt{class\_diagonal='function'} evaluates each
+contracted function with its own denominator.  When the class overlap
+has degenerate eigenvalues the diagonal reading depends on the basis
+chosen inside the degenerate block.  The deterministic gauge makes the
+number reproducible, but the class energy is invariant only under
+\texttt{class\_diagonal='block'}:
+
+\begin{lstlisting}[language=Python]
+e2_block, bd_block = caspt2_contracted_e2(
+    np.asarray(h1_mo2), np.asarray(eri_mo2), np.asarray(ci2), dets,
+    ncore=ncore, nact=nact, nele=nele, eps=np.asarray(eps),
+    class_diagonal='block', v0_ia='class')
+
+for name in breakdown:
+    print(f'{name:10s} default {breakdown[name]: .8f}'
+          f'   block {bd_block[name]: .8f}')
+\end{lstlisting}
+
+On the CAS(2,2) anchors the block and per-function readings lie close
+together.  The documented machine-precision agreement is between the
+per-function reading and the orthonormalized diagonal
+(\texttt{class\_diagonal='ortho'}); on larger active spaces the
+readings separate, and the N$_2$ case in the manual chapter is the one
+that separates them.
+
+\subsection{The coupled full-Fock path}
+
+\begin{lstlisting}[language=Python]
+from diffmrc.core.caspt2 import caspt2_contracted_e2_coupled
+
+e2_cpl, bd_cpl, system = caspt2_contracted_e2_coupled(
+    np.asarray(h1_mo2), np.asarray(eri_mo2), np.asarray(ci2), dets,
+    ncore=ncore, nact=nact, nele=nele, return_system=True)
+
+print('coupled', e2_cpl)
+print('labels ', system['labels'])
+print('E0     ', system['E0'])
+print('x norm ', float(np.linalg.norm(system['x'])))
+print('min eig(S)', float(np.min(np.linalg.eigvalsh(system['S']))))
+\end{lstlisting}
+
+The coupled path keeps the inter-class coupling of the state-specific
+generalized Fock operator.  It is a NumPy value layer; it does not
+replace the differentiable diagonal path.  The \texttt{system}
+dictionary is the object to inspect when a class value is questioned:
+the overlap spectrum, the reduced solution \texttt{x}, and the class
+labels are all there.
+
+\subsection{The three-center path}
+
+The three-center contraction consumes the metric-folded factor
+\texttt{u\_mo} instead of the four-center tensor:
+
+\begin{lstlisting}[language=Python]
+from diffmrc.core import ri
+from diffmrc.core.caspt2_three_center import (
+    caspt2_contracted_e2_three_center)
+
+auxmol, label = ri.make_auxmol(mol)
+factors = ri.ri_factors(mol, auxmol)
+u_mo, _ = ri.ri_eri_mo(np.asarray(C2), factors.b, factors.jhalf,
+                       full=False)
+
+e2_3c, bd_3c = caspt2_contracted_e2_three_center(
+    np.asarray(h1_mo2), u_mo, np.asarray(ci2), dets,
+    ncore=ncore, nact=nact, nele=nele, eps=np.asarray(eps))
+
+print(label)
+print('three-center', e2_3c)
+print('max class difference',
+      max(abs(bd_3c[k] - breakdown[k]) for k in breakdown))
+\end{lstlisting}
+
+The two paths use the same class definitions and the same relative
+weight between the two orderings, so the class difference is at the
+roundoff level.  The three-center path is not a different
+approximation: it computes the same CASPT2-D energy with the RI
+factorization of the integrals.  The RI error enters through
+\texttt{u\_mo}, as it does in the RI-CASCI chapter.
+
+\subsection{The N\texorpdfstring{$_2$}{2} case}
+
+The system that exercises the three-active-index classes is
+N$_2$/6-31G CAS(6,6).  It needs a converged CASSCF with the NR orbital
+step and a tight gradient tolerance; the reference values used by the
+validation are RHF $-108.867763375101$, CASSCF
+$-109.01554685351947$, CASPT2-D $-0.071520733$, and full-FIC
+$-0.07301141705494$~Eh.  The driver in
+\texttt{scripts/caspt2\_n2\_validation.py} splits the reference build
+and the two expensive contractions into separate stages:
+
+\begin{lstlisting}
+python scripts/caspt2_n2_validation.py --stage ref --outdir out
+python scripts/caspt2_n2_validation.py --stage default --outdir out
+python scripts/caspt2_n2_validation.py --stage coupled --outdir out
+\end{lstlisting}
+
+The default-path ratio to the frozen ORCA CASPT2-D reference is
+$0.989$; against the release reference at one BLAS thread it is
+$0.983$.  The two three-active-index classes contribute $-0.003648$ and
+$-0.001625$~Eh.  The coupled path reaches $1.0232$.  The residual is a
+class-space difference in \texttt{V1\_ija}, documented in the manual
+chapter, not a convergence artifact.
+
+\subsection{What to check before trusting a number}
+
+\begin{itemize}
+\item The CI vector is state-specific and matches the determinant list.
+\item \texttt{eps} comes from \texttt{canonicalize\_jax}, not from the
+  SCF.
+\item The class table is read, not just the total.  A total that looks
+  close to a reference can be a cancellation between classes with
+  opposite errors.
+\item When a class value enters a decision, use
+  \texttt{class\_diagonal='block'} and \texttt{v0\_ia='class'}; the
+  default diagonal is gauge dependent on degenerate class overlaps.
+\item The three-center path needs the metric-folded factor; the raw
+  \texttt{ri\_three\_center} tensor is not the input.
+\end{itemize}
