@@ -194,3 +194,95 @@ def test_per_state_entropies_from_the_state_average_vectors():
         assert np.all(np.isfinite(s_k))
         assert np.all(s_k >= -1e-12)
         assert np.all(s_k <= np.log(4) + 1e-12)
+
+
+# ---------------------------------------------------------------------------
+# eig_solver='davidson': the matrix-free CI route.
+# ---------------------------------------------------------------------------
+
+
+def test_the_matrix_free_solver_reproduces_the_dense_block():
+    """Davidson on the matrix-free operator against the dense block eigh.
+
+    The two routes build the Hamiltonian by independent code paths
+    (``core.ci_matvec`` assembles a string-excitation operator, the dense
+    path applies the Condon-Slater rules determinant by determinant) and
+    use different determinant orderings; the returned vector is mapped
+    back into the ``cs_casci`` layout by ``_mf_global_order``. Agreement
+    of both the energy and the vector pins the mapping and the sign
+    convention.
+    """
+    from diffmrc.core.casci import cs_casci_blocked
+
+    h1, e1 = _h2o_cas22_ints()
+    E_d, ci_d = cs_casci_blocked(h1, e1, ncore=4, nact=2, nele_act=2,
+                                 eig_solver='eigh_safe')
+    E_m, ci_m = cs_casci_blocked(h1, e1, ncore=4, nact=2, nele_act=2,
+                                 eig_solver='davidson')
+    assert float(E_m) == pytest.approx(float(E_d), abs=1e-9)
+    overlap = abs(float(np.asarray(ci_d) @ np.asarray(ci_m)))
+    assert overlap == pytest.approx(1.0, abs=1e-9)
+    # The vector must still live in one S_z block alone.
+    from diffmrc.core.nevpt2.impl import cas_dets_for2
+
+    dets = cas_dets_for2(4, 2, 2)
+    nz = np.where(np.abs(np.asarray(ci_m)) > 1e-8)[0]
+    blocks = {_spin_block(dets[i], 4, 2) for i in nz}
+    assert len(blocks) == 1
+
+
+def test_the_matrix_free_solver_matches_the_dense_gradient():
+    """First derivative through both CI routes against a central difference.
+
+    ``h1e`` is the only differentiated argument; its tangent is restricted
+    to the symmetric subspace because the Hamiltonian always symmetrizes
+    the one-electron part.
+    """
+    from diffmrc.core.casci import cs_casci_blocked
+
+    h1, e1 = _h2o_cas22_ints()
+    rng = np.random.default_rng(31)
+    D = jnp.asarray(0.5 * (rng.normal(size=h1.shape)
+                           + rng.normal(size=h1.shape).T))
+    D = 0.5 * (D + D.T)
+
+    def energy(h, solver):
+        return cs_casci_blocked(h, e1, ncore=4, nact=2, nele_act=2,
+                                eig_solver=solver)[0]
+
+    step = 1e-6
+    for solver in ('eigh_safe', 'davidson'):
+        ad = float(jnp.sum(jax.grad(lambda h: energy(h, solver))(h1) * D))
+        fd = (float(energy(h1 + step * D, solver))
+              - float(energy(h1 - step * D, solver))) / (2.0 * step)
+        assert abs(ad - fd) < 1e-8 * max(1.0, abs(fd)), solver
+
+    g_d = jax.grad(lambda h: energy(h, 'eigh_safe'))(h1)
+    g_m = jax.grad(lambda h: energy(h, 'davidson'))(h1)
+    assert float(jnp.max(jnp.abs(g_d - g_m))) < 1e-9
+
+
+def test_the_matrix_free_solver_gradient_survives_jit():
+    """``grad(jit(E))`` must equal the eager gradient.
+
+    This is the path that exposed a lowering failure in the matrix-free
+    chain: ``string_tables`` built its constant tables with ``jnp.asarray``
+    inside the trace, the operator closures captured them, and lowering a
+    ``custom_vjp`` that closes over a ``DynamicJaxprTracer`` constant
+    failed with "No constant handler for type: DynamicJaxprTracer".
+    Building the tables under ``jax.ensure_compile_time_eval`` keeps them
+    concrete. The test pins both the value and the gradient.
+    """
+    from diffmrc.core.casci import cs_casci_blocked
+
+    h1, e1 = _h2o_cas22_ints()
+
+    def E(h):
+        return cs_casci_blocked(h, e1, ncore=4, nact=2, nele_act=2,
+                                eig_solver='davidson')[0]
+
+    g_eager = jax.grad(E)(h1)
+    g_jit = jax.grad(jax.jit(E))(h1)
+    assert np.isfinite(np.asarray(g_jit)).all()
+    assert float(jnp.max(jnp.abs(g_eager - g_jit))) < 1e-10
+    assert float(jax.jit(E)(h1)) == pytest.approx(float(E(h1)), abs=1e-12)

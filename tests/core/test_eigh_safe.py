@@ -47,7 +47,10 @@ def test_the_safe_reverse_pass_agrees_with_the_plain_one_without_degeneracy():
     would require the hard 1/diff, whose unbounded second derivative is
     the bug this function exists to avoid.
     """
-    from diffmrc.core.nevpt2.impl import eigh_safe
+    # The kernel module is core.eigh; nevpt2.impl re-exports this function,
+    # but importing through it pulls in the pyscfad-dependent casci chain
+    # and made the regression unrunnable on machines without pyscfad.
+    from diffmrc.core.eigh import eigh_safe
 
     rng = np.random.default_rng(0)
     B = rng.normal(size=(5, 5))
@@ -58,7 +61,7 @@ def test_the_safe_reverse_pass_agrees_with_the_plain_one_without_degeneracy():
 
 
 def test_the_safe_reverse_pass_survives_an_exact_degeneracy():
-    from diffmrc.core.nevpt2.impl import eigh_safe
+    from diffmrc.core.eigh import eigh_safe
 
     # A block-diagonal duplication has an exactly doubled spectrum. The
     # plain reverse pass was measured to return all-NaN here (t216); this
@@ -104,3 +107,102 @@ def test_cluster_ift_differentiates_to_the_frozen_cluster_formula():
         (float(loss(th0.at[k].add(d))) - float(loss(th0.at[k].add(-d))))
         / (2 * d) for k in range(3)])
     assert np.abs(g - fd).max() < 1e-6
+
+
+# ---------------------------------------------------------------------------
+# Container compatibility of the custom JVP rule (jax 0.10.2 and later).
+#
+# ``jnp.linalg.eigh`` returns ``EighResult`` (a named tuple) from jax 0.10.2
+# on. A custom JVP rule has to return its tangent in the same pytree
+# container as the primal; a plain ``(dw, du)`` tangent raises a TypeError
+# under ``grad(jit(f))`` while both ``eager`` and ``jit(grad(f))`` keep
+# working, so the regression has to exercise the mixed trace explicitly.
+# ---------------------------------------------------------------------------
+
+
+def _mixed_loss(fn, n):
+    """A scalar functional of both outputs of ``fn`` (container-agnostic)."""
+    wgt = jnp.asarray(np.arange(1.0, n + 1.0))
+    idxw = jnp.asarray(np.arange(0.0, n))
+
+    def loss(a):
+        out = fn(a)
+        w, u = out
+        return jnp.sum(w * wgt) + jnp.sum(u * idxw[:, None] * wgt[None, :])
+
+    return loss
+
+
+def _well_separated():
+    rng = np.random.default_rng(11)
+    B = rng.normal(size=(5, 5))
+    return jnp.asarray(B + B.T + np.diag([0.0, 2.0, 5.0, 9.0, 14.0]))
+
+
+def _bit_exact_pair():
+    rng = np.random.default_rng(12)
+    B2 = rng.normal(size=(3, 3))
+    B2 = B2 + B2.T
+    A2 = np.zeros((6, 6))
+    A2[:3, :3] = B2
+    A2[3:, 3:] = B2
+    return jnp.asarray(A2)
+
+
+def test_the_primal_keeps_the_container_of_jnp_linalg_eigh():
+    """The custom JVP must not change the public return type.
+
+    jax 0.10.2+ returns ``EighResult``, whose fields ``eigenvalues`` and
+    ``eigenvectors`` callers may access directly; returning a plain tuple
+    would silently break that contract.
+    """
+    from diffmrc.core.eigh import eigh_safe
+
+    A = _well_separated()
+    plain = jnp.linalg.eigh(A)
+    safe = eigh_safe(A)
+    assert type(safe) is type(plain)
+    assert type(jax.jit(eigh_safe)(A)) is type(jax.jit(jnp.linalg.eigh)(A))
+    assert np.allclose(np.asarray(safe[0]), np.asarray(plain[0]))
+
+
+def test_grad_through_jit_agrees_with_the_eager_gradient():
+    """``grad(jit(f))`` is the path that exposed the container mismatch."""
+    from diffmrc.core.eigh import eigh_safe
+
+    A = _well_separated()
+    loss = _mixed_loss(eigh_safe, 5)
+    g_eager = np.asarray(jax.grad(loss)(A))
+    g_jit_grad = np.asarray(jax.jit(jax.grad(loss))(A))
+    g_grad_jit = np.asarray(jax.grad(lambda a: jax.jit(loss)(a))(A))
+    assert np.isfinite(g_grad_jit).all()
+    assert np.abs(g_grad_jit - g_eager).max() < 1e-12
+    assert np.abs(g_jit_grad - g_eager).max() < 1e-12
+
+
+def test_grad_through_jit_survives_an_exact_degeneracy():
+    from diffmrc.core.eigh import eigh_safe, eigh_mask
+
+    A = _bit_exact_pair()
+    for fn in (eigh_safe, eigh_mask):
+        loss = _mixed_loss(fn, 6)
+        g = np.asarray(jax.grad(lambda a: jax.jit(loss)(a))(A))
+        assert np.isfinite(g).all()
+
+
+def test_grad_through_jit_matches_finite_differences():
+    """The fixed rule must keep the derivative, not merely stay finite."""
+    from diffmrc.core.eigh import eigh_safe
+
+    A = _well_separated()
+    loss = _mixed_loss(eigh_safe, 5)
+    # Direction restricted to the symmetric subspace: eigh sees the
+    # symmetric part, and the Lorentzian rule symmetrizes the tangent.
+    rng = np.random.default_rng(13)
+    D = rng.normal(size=(5, 5))
+    D = jnp.asarray(0.5 * (D + D.T))
+    ad = float(jnp.sum(jax.grad(lambda a: jax.jit(loss)(a))(A) * D))
+    step = 1e-6
+    fd = (float(jax.jit(loss)(A + step * D))
+          - float(jax.jit(loss)(A - step * D))) / (2.0 * step)
+    assert abs(ad - fd) < 1e-6 * max(1.0, abs(fd))

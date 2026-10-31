@@ -31,7 +31,9 @@ import numpy as np
 import jax
 
 __all__ = ['StationaryPoint', 'StopReason', 'CurvatureReport',
-           'refine_stationary_point', 'curvature_report']
+           'StationaryCandidate', 'SelectionResult',
+           'refine_stationary_point', 'curvature_report',
+           'select_stationary_point']
 
 # The energy test is a guard against divergence, not a measure of
 # progress, so it allows a step that leaves the energy unchanged to
@@ -186,6 +188,148 @@ def curvature_report(H, negative_tol=1e-8):
         condition_number=float(scale / max(abs(smallest), 1e-30)),
         n_near_zero=int((np.abs(w) < negative_tol).sum()),
     )
+
+
+@dataclass
+class StationaryCandidate:
+    """One refined stationary point entering a multistart selection.
+
+    ``curvature`` is optional: without it the point can be stationary but
+    cannot be certified as a minimum. ``label`` names the starting point
+    and is the primary tie-break; two candidates with equal energy and
+    gradient are ordered by it, then by the canonical form of ``theta``, so
+    the selection does not depend on the order in which the runs finished.
+    """
+
+    theta: object
+    energy: float
+    grad_norm: float
+    curvature: object = None
+    label: str = ''
+
+    @property
+    def is_minimum(self):
+        return self.curvature is not None and self.curvature.is_minimum
+
+
+@dataclass
+class SelectionResult:
+    """The outcome of :func:`select_stationary_point`.
+
+    ``status`` is one of
+
+    ``'no_stationary'``
+        No candidate reached the gradient target; ``chosen`` is None.
+    ``'minimum'`` / ``'minimum_degenerate'``
+        The chosen point is a certified minimum (no negative curvature). The
+        second form says another certified minimum lies within
+        ``energy_tol`` of it, so the energy alone does not identify one
+        point.
+    ``'saddle_only'``
+        Curvature reports exist and every stationary candidate has a
+        negative direction. ``chosen`` is the lowest such point, reported
+        for diagnosis, and ``is_minimum`` is False.
+    ``'curvature_unverified'``
+        No candidate carries a curvature report; the lowest stationary
+        point is returned but cannot be certified.
+    """
+
+    chosen: object
+    status: str
+    n_candidates: int
+    n_stationary: int
+    n_minima: int
+    energy_spread: float = None
+    second_energy: float = None
+    reason: str = ''
+
+    @property
+    def is_minimum(self):
+        return self.chosen is not None and self.chosen.is_minimum
+
+
+def _canonical_theta(theta):
+    """Order-independent tie-break key for a parameter vector."""
+    arr = np.asarray(theta, dtype=float).reshape(-1)
+    return tuple(np.round(arr, 12).tolist())
+
+
+def select_stationary_point(candidates, target=1e-11, energy_tol=1e-6):
+    """Deterministically select one stationary point among refined runs.
+
+    The CASSCF energy is non-convex in the orbital parameters, so different
+    starts can reach different stationary points and a bare "lowest run"
+    rule is not stable. This function makes the choice explicit and
+    reproducible:
+
+    1. Keep only candidates whose gradient reached ``target``.
+    2. Prefer certified minima (``curvature.is_minimum``). If none is
+       certified, report the state honestly instead of calling a saddle a
+       minimum.
+    3. Among the pool, order by ``(energy, grad_norm, label, theta)``.
+       Every component is a deterministic function of the run, so the
+       selection does not depend on completion order.
+    4. Mark the result degenerate when a second certified minimum lies
+       within ``energy_tol`` (relative to ``max(1, |E|)``); ``second_energy``
+       is the next distinct energy among *all* stationary candidates (a
+       lower saddle is useful context) for the caller to report.
+
+    This is a selection rule, not a search strategy: generating the
+    starting points and running the refinements remain the caller's job.
+    """
+    candidates = list(candidates)
+    n_candidates = len(candidates)
+    stationary = [c for c in candidates if float(c.grad_norm) < float(target)]
+    if not stationary:
+        return SelectionResult(
+            chosen=None, status='no_stationary', n_candidates=n_candidates,
+            n_stationary=0, n_minima=0,
+            reason='no candidate reached the gradient target')
+
+    minima = [c for c in stationary if c.is_minimum]
+    if minima:
+        pool = minima
+        base = 'minimum'
+    elif any(c.curvature is not None for c in stationary):
+        pool = stationary
+        base = 'saddle_only'
+    else:
+        pool = stationary
+        base = 'curvature_unverified'
+
+    def key(c):
+        return (float(c.energy), float(c.grad_norm), str(c.label),
+                _canonical_theta(c.theta))
+
+    pool = sorted(pool, key=key)
+    chosen = pool[0]
+    tol_abs = float(energy_tol) * max(1.0, abs(float(chosen.energy)))
+    family = [c for c in pool
+              if abs(float(c.energy) - float(chosen.energy)) <= tol_abs]
+    # The next distinct energy is reported over *all* stationary candidates,
+    # not only the minima pool: a lower saddle is relevant context for the
+    # caller even though it is not eligible for selection.
+    higher = [float(c.energy) for c in stationary
+              if abs(float(c.energy) - float(chosen.energy)) > tol_abs]
+    second = min(higher) if higher else None
+    energies = [float(c.energy) for c in stationary]
+    spread = max(energies) - min(energies)
+    status = base + ('_degenerate' if len(family) > 1 else '')
+    reason = (
+        'selected the lowest %s among %d stationary candidates; '
+        '%d carry curvature reports and %d are minima'
+        % ('minimum' if base == 'minimum' else 'stationary point',
+           len(stationary),
+           sum(1 for c in stationary if c.curvature is not None),
+           len(minima)))
+    if len(family) > 1:
+        reason += ('; %d minima lie within energy_tol, so the energy does '
+                   'not identify one point' % len(family))
+    return SelectionResult(chosen=chosen, status=status,
+                           n_candidates=n_candidates,
+                           n_stationary=len(stationary), n_minima=len(minima),
+                           energy_spread=float(spread),
+                           second_energy=second, reason=reason)
 
 
 def _cg_solve(matvec, b, tol=_CG_TOL, maxiter=_CG_MAXITER):
