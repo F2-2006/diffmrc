@@ -45,15 +45,18 @@ manual/         Tutorial and Manual (LaTeX sources and built PDFs)
   (OMP_NUM_THREADS=1; the Wave 12 frozen reference gives 0.989). Remaining
   class-space residuals are documented in the Open problems section.
 - `core.caspt2_three_center` (0.3.1): three-center contracted CASPT2 using the
-  same `cross - direct` VM convention as the materialized path; the two paths
-  agree to machine precision on H2O/CO.
+  same `cross - direct` VM convention as the materialized path. The release
+  test compares the two paths on deterministic exact factor tensors and
+  reproduces the materialized result to machine precision; a H2O/CO
+  cross-check script is not included in the release tree.
 - Validation drivers (0.3.1): N2/6-31G CAS(6,6) CASPT2, ECP core-Hamiltonian
   gradient test, and an H2O/cc-pVDZ NEVPT2 gradient basis-set check.
 - `driver.nevpt2_zvector`: relaxed NEVPT2 nuclear gradients. The near-zero
   `Si` channels are evaluated in exact algebraic form, displaced orbital
   references are aligned blockwise, and the response term is supplied by the
-  CASSCF Z-vector. Validated against finite differences on
-  H2O/6-31G and LiH/6-31G.
+  CASSCF Z-vector. Validated against finite differences on H2O/6-31G; the
+  LiH/6-31G anchor is covered by the algebraic and chain-level tests rather
+  than by a finite-difference driver in the release tree.
 - `core.caspt2`: a coupled full-Fock contraction that retains the inter-class
   coupling of the zeroth-order Hamiltonian, next to the differentiable
   diagonal-Fock path. The relative weight of the `VM` component is corrected

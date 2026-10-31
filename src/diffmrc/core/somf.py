@@ -27,7 +27,11 @@ and the two-electron kernel
 
     g_K(r_i, r_j) = -(alpha^2/2) l_{ij,K} r_{ij}^{-3},
 
-where ``l_{ij} = (r_i - r_j) x p_i``.  ``P`` is the spin-summed charge
+where ``l_{ij} = (r_i - r_j) x p_i``.  These expressions define the
+physical operators; the arrays returned by this module factor out
+``alpha^2/2`` and ``i`` and follow the raw ``int1e_pnucxp`` convention,
+so the caller restores ``i * alpha^2/2`` in the SI assembly (see the
+PREFACTOR note below).  ``P`` is the spin-summed charge
 density matrix of the reference state, ``P_{pq} = <0|E_q^p|0>``, so that
 ``trace(P S) = N_elec`` in a non-orthogonal AO basis.
 

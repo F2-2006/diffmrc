@@ -123,5 +123,7 @@
 ## 0.1.0 (2026-10-11)
 
 - Initial public release: differentiable CASCI, CASSCF, state averaging,
-  strongly contracted NEVPT2, matrix-free iterative CI, and DMRG candidate
-  space; analytic first and second derivatives for CASSCF and NEVPT2.
+  strongly contracted NEVPT2, matrix-free iterative CI, and a DMRG
+  candidate-space hook (`core.mps.pin_degenerate_columns`); analytic first and
+  second derivatives for CASSCF and NEVPT2. The DMRG solver itself is not part
+  of this release.

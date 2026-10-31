@@ -428,8 +428,9 @@ def orbital_zvector(H_tt, source, rcond=None, symmetrize=True):
     Hessian carries one soft mode (eigenvalue 3.8e-6, kappa 2.3e7) whose
     response is not part of the gradient source, so pass 1e-7 rather than
     the looser default when reproducing the relaxed-gradient numbers.
-    ``info`` records the residual of the kept subspace, the eigenvalues
-    and the projection of the source on the discarded modes.
+    ``info`` records the eigenvalues, the condition number, the relative
+    cutoff, the absolute and relative residual of the retained subspace,
+    and the norms of the source and of the solution.
     """
     H = np.asarray(H_tt, dtype=float)
     s = np.asarray(source, dtype=float)
