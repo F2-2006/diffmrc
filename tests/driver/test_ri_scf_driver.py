@@ -294,10 +294,87 @@ def test_ecp_gradient_matches_finite_difference():
     assert np.abs(g_imp - fd).max() < 1e-5
 
 
-def test_explicit_gradient_refuses_open_shell():
-    mol = _mol(OH, spin=1)
-    ref = _reference(mol)
+def test_rohf_explicit_gradient_matches_implicit():
+    """ROHF OH/6-31G: the explicit route equals implicit differentiation.
+
+    The stretched geometry is the meaningful case: at equilibrium the
+    gradient is close to zero and an absolute tolerance would not
+    distinguish a wrong response term from a small one.
+    """
+    mol = _mol('O 0 0 0; H 0 0 2.30', spin=1)
     mf = drv.rijonx_scf(mol)
-    with pytest.raises(NotImplementedError):
-        drv.rijonx_scf_gradient(mf)
-    assert ref is not None
+    g_exp = drv.rijonx_scf_gradient(mf)
+    g_imp = np.asarray(mf.energy_grad().coords, dtype=float)
+    assert np.abs(g_exp - g_imp).max() < 1e-6, (
+        f'explicit vs implicit {np.abs(g_exp - g_imp).max():.3e} Eh/Bohr')
+    assert np.abs(g_exp[:, :2]).max() < 1e-12
+
+
+def test_rohf_explicit_gradient_matches_finite_difference():
+    """ROHF OH/6-31G: explicit gradient equals central differences of E_SCF."""
+    from pyscfad import gto
+    mol = _mol('O 0 0 0; H 0 0 2.30', spin=1)
+    mf = drv.rijonx_scf(mol)
+    g_exp = drv.rijonx_scf_gradient(mf)
+
+    step = 2.0e-3
+    coords = np.asarray(mol.atom_coords(), dtype=float)
+    fd = np.zeros_like(g_exp)
+    for atom in range(mol.natm):
+        for axis in range(3):
+            values = []
+            for sign in (1.0, -1.0):
+                shifted = coords.copy()
+                shifted[atom, axis] += sign * step
+                m = gto.Mole()
+                m.atom = [(mol.atom_pure_symbol(i), shifted[i])
+                          for i in range(mol.natm)]
+                m.basis = '6-31g'
+                m.spin = 1
+                m.unit = 'Bohr'
+                m.verbose = 0
+                m.build()
+                values.append(drv.rijonx_scf(m).e_tot)
+            fd[atom, axis] = (values[0] - values[1]) / (2.0 * step)
+    assert np.abs(g_exp - fd).max() < 1e-5, (
+        f'ROHF gradient vs FD {np.abs(g_exp - fd).max():.3e} Eh/Bohr')
+
+
+def test_of_rohf_gradient_matches_implicit():
+    """A second ROHF system (OF doublet) confirms the layout is not OH-specific."""
+    mol = _mol('O 0 0 0; F 0 0 2.60', spin=1)
+    mf = drv.rijonx_scf(mol)
+    g_exp = drv.rijonx_scf_gradient(mf)
+    g_imp = np.asarray(mf.energy_grad().coords, dtype=float)
+    assert np.abs(g_exp - g_imp).max() < 1e-6, (
+        f'explicit vs implicit {np.abs(g_exp - g_imp).max():.3e} Eh/Bohr')
+
+
+def test_uhf_energy_and_explicit_gradient():
+    """UHF OH: the energy follows UHF within the fit; the gradient follows
+    implicit differentiation."""
+    from pyscfad.scf import uhf
+
+    mol = _mol(OH, spin=1)
+    ref = uhf.UHF(mol)
+    ref.verbose = 0
+    ref.kernel()
+    assert ref.converged
+    mf = drv.rijonx_scf(mol, uhf=True)
+    assert isinstance(mf, drv.RIJONX_UHF)
+    assert abs(mf.e_tot - ref.e_tot) < 1e-4
+    g_exp = drv.rijonx_scf_gradient(mf)
+    g_imp = np.asarray(mf.energy_grad().coords, dtype=float)
+    assert np.abs(g_exp - g_imp).max() < 1e-5, (
+        f'UHF explicit vs implicit {np.abs(g_exp - g_imp).max():.3e} Eh/Bohr')
+
+
+def test_uhf_mixed_spin_density_is_mapped_spin_by_spin():
+    """The RI-J map applies to each UHF spin density, not their average."""
+    mol = _mol(OH, spin=1)
+    mf = drv.rijonx_scf(mol, uhf=True)
+    dm = np.asarray(mf.make_rdm1())
+    vj, _ = mf.get_jk(mol, dm, with_k=False)
+    j_ref = ri_scf.ri_j_fock(mol.to_pyscf(), dm[0] + dm[1])
+    assert np.asarray(vj).shape == dm.shape
+    assert np.abs(np.asarray(vj)[0] + np.asarray(vj)[1] - j_ref).max() < 1e-10

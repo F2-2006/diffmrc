@@ -79,6 +79,7 @@ __all__ = [
     'exact_k_fock',
     'exact_k_energy',
     'exact_k_gradient',
+    'exact_k_gradient_spin',
     'core_hamiltonian_energy',
     'core_hamiltonian_gradient',
     'nuclear_repulsion_gradient',
@@ -207,8 +208,8 @@ def ri_j_energy(mol, C, aux=None, occ=None, factors=None,
                                     rcond=rcond)
 
 
-def ri_j_gradient(mol, C, aux=None, occ=None, factors=None,
-                  rcond=dri.DEFAULT_RCOND, atoms=None):
+def ri_j_gradient(mol, C=None, aux=None, occ=None, factors=None,
+                  rcond=dri.DEFAULT_RCOND, atoms=None, density=None):
     """Fixed-coefficient nuclear gradient of the RI-J energy.
 
     The derivative of
@@ -222,13 +223,28 @@ def ri_j_gradient(mol, C, aux=None, occ=None, factors=None,
                 + sum_{Q P} m_Q dS^{-1/2}_{Q P} z_P,
         m_Q     = sum_{mu nu} D_{mu nu} B_{mu nu Q}.
 
+    The density is built from ``C`` and ``occ`` unless ``density`` is
+    given.  The ``density`` route serves spin-separated references, whose
+    two coefficient matrices cannot be folded into one ``C``; the energy
+    only sees the total density, so one call covers both spins.
+
     Returns
     -------
     ndarray, (natm, 3)
         Gradient in Eh / Bohr.  ``atoms`` selects a subset of rows; the
         returned array then has ``len(atoms)`` rows in that order.
     """
-    dm = density_from_coeffs(C, occ)
+    if density is not None:
+        if C is not None:
+            raise ValueError('pass either C or density, not both')
+        dm = _sym(np.asarray(density, dtype=float))
+        if dm.ndim != 2:
+            raise ValueError(
+                f'density must be square, got shape {dm.shape}')
+    else:
+        if C is None:
+            raise ValueError('one of C or density is required')
+        dm = density_from_coeffs(C, occ)
     if factors is not None and aux is None:
         raise ValueError(
             'pass the auxiliary molecule used to build factors; otherwise '
@@ -312,6 +328,11 @@ def exact_k_gradient(mol, C, occ=None, ip1=None, ip2=None,
                'exact_k_gradient (two derivative tensors plus contraction)')
         ip1 = mol.intor('int2e_ip1', aosym='s1')
         ip2 = mol.intor('int2e_ip2', aosym='s1')
+    return _exact_k_gradient_density(mol, dm, ip1, ip2)
+
+
+def _exact_k_gradient_density(mol, dm, ip1, ip2):
+    """Single-density contraction behind :func:`exact_k_gradient`."""
     g4 = np.einsum('mn,ls->mnls', dm, dm)
     grad = np.zeros((mol.natm, 3))
     ip1_b = ip1.transpose(0, 2, 1, 3, 4)     # ip1[b, a, c, d] as (a,b,c,d)
@@ -327,6 +348,60 @@ def exact_k_gradient(mol, C, occ=None, ip1=None, ip2=None,
     return grad
 
 
+def exact_k_gradient_spin(mol, C=None, occ_alpha=None, occ_beta=None,
+                          density_alpha=None, density_beta=None,
+                          ip1=None, ip2=None,
+                          max_bytes=DEFAULT_MAX_BYTES):
+    """Fixed-coefficient gradient of the open-shell exact exchange.
+
+    The spin-resolved exchange energy of an unrestricted or restricted
+    open-shell determinant is
+
+        E_x = -1/2 sum_sigma Tr(D_sigma K[D_sigma]),
+
+    with each spin density carrying the electron count once (the
+    closed-shell convention, ``-1/4 Tr(D K[D])`` with a total density,
+    is recovered when ``D_alpha = D_beta = D/2``).  The skeleton
+    gradient is therefore twice the sum of the two single-density
+    :func:`exact_k_gradient` contractions.  The dense derivative
+    tensors ``ip1``/``ip2`` are built once and shared; without that
+    sharing the two-spin route would allocate them twice.
+
+    Supply either one coefficient matrix with the two occupation
+    vectors (a restricted open-shell reference shares ``C`` between the
+    spins) or the two spin densities (an unrestricted reference has one
+    coefficient matrix per spin).  The derivative tensors cost
+    ``2 * 3 * nao**4`` doubles and bound this routine to validation
+    scale, as in :func:`exact_k_gradient`.
+    """
+    nao = int(mol.nao_nr())
+    if (density_alpha is None) != (density_beta is None):
+        raise ValueError('pass both spin densities or neither')
+    if density_alpha is not None:
+        if C is not None:
+            raise ValueError('pass either C or spin densities, not both')
+        da = _sym(np.asarray(density_alpha, dtype=float))
+        db = _sym(np.asarray(density_beta, dtype=float))
+        for label, d in (('alpha', da), ('beta', db)):
+            if d.shape != (nao, nao):
+                raise ValueError(
+                    f'{label} density shape {d.shape} disagrees with '
+                    f'nao={nao}')
+    else:
+        if C is None:
+            raise ValueError('one of C or the spin densities is required')
+        da = density_from_coeffs(C, occ_alpha)
+        db = density_from_coeffs(C, occ_beta)
+    if ip1 is None or ip2 is None:
+        _guard(10.0 * 8.0 * nao ** 4, max_bytes,
+               'exact_k_gradient_spin (two derivative tensors plus '
+               'contractions)')
+        ip1 = mol.intor('int2e_ip1', aosym='s1')
+        ip2 = mol.intor('int2e_ip2', aosym='s1')
+    return 2.0 * (_exact_k_gradient_density(mol, da, ip1, ip2)
+                  + _exact_k_gradient_density(mol, db, ip1, ip2))
+
+
 # ---------------------------------------------------------------------------
 # Core Hamiltonian and nuclear repulsion
 # ---------------------------------------------------------------------------
@@ -339,7 +414,7 @@ def core_hamiltonian_energy(mol, C, occ=None):
     return float(np.sum(dm * h))
 
 
-def core_hamiltonian_gradient(mol, C, occ=None):
+def core_hamiltonian_gradient(mol, C=None, occ=None, density=None):
     """Fixed-coefficient nuclear gradient of ``Tr(D h)``.
 
     Follows pyscf's ``grad.rhf.hcore_generator`` construction: the
@@ -347,8 +422,21 @@ def core_hamiltonian_gradient(mol, C, occ=None):
     atom's first-index block plus its transpose, and the explicit
     nuclear-potential derivative is the ``int1e_iprinv`` term with the
     atom's charge (ECP corrections included when present).
+
+    ``density`` bypasses the ``C``/``occ`` construction, as in
+    :func:`ri_j_gradient`.
     """
-    dm = density_from_coeffs(C, occ)
+    if density is not None:
+        if C is not None:
+            raise ValueError('pass either C or density, not both')
+        dm = _sym(np.asarray(density, dtype=float))
+        if dm.ndim != 2:
+            raise ValueError(
+                f'density must be square, got shape {dm.shape}')
+    else:
+        if C is None:
+            raise ValueError('one of C or density is required')
+        dm = density_from_coeffs(C, occ)
     natm = int(mol.natm)
     charges = -np.asarray(mol.atom_charges(), dtype=float)
     slices = mol.aoslice_by_atom()

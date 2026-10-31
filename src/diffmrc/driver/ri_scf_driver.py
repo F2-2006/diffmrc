@@ -46,14 +46,17 @@ in the same way pyscf's ``grad.rhf`` does.
 
 OPEN SHELL AND ECP
 
-``RIJONX_RHF`` handles closed-shell densities.  ``RIJONX_ROHF`` reuses
-the same ``get_jk``; the pyscfad ROHF layer calls it with a
-``(2, nao, nao)`` density and the RI-J map is applied spin by spin.
-Only the closed-shell explicit gradient is implemented; open-shell
-gradients are available through ``mf.energy_grad()`` only and have not
-been checked against finite differences here.  ECP molecules work as
-long as the caller builds the molecule with an explicit ``ecp``
-argument; the auxiliary basis is built from the same atom list.
+``RIJONX_RHF`` handles closed-shell densities.  ``RIJONX_ROHF`` and
+``RIJONX_UHF`` reuse the same ``get_jk``; the pyscfad open-shell layer
+calls it with a ``(2, nao, nao)`` density and the RI-J map is applied
+spin by spin.  Both open-shell layouts have an explicit analytic
+gradient: the skeleton part sees the total density for the RI-J and
+core terms and the spin densities for exact exchange, and the response
+term is the energy-weighted density built from the RIJONX Fock.  The
+explicit routes are checked against ``mf.energy_grad()`` and central
+differences in the tests.  ECP molecules work as long as the caller
+builds the molecule with an explicit ``ecp`` argument; the auxiliary
+basis is built from the same atom list.
 
 MEMORY
 
@@ -82,15 +85,18 @@ try:  # pyscfad is optional at import time; the CLI must import without it
     from jax import numpy as jnp
     from pyscfad.scf import hf as _ad_hf
     from pyscfad.scf import rohf as _ad_rohf
+    from pyscfad.scf import uhf as _ad_uhf
 except ImportError:  # pragma: no cover - exercised only without pyscfad
     jax = None
     jnp = None
     _ad_hf = None
     _ad_rohf = None
+    _ad_uhf = None
 
 __all__ = [
     'RIJONX_RHF',
     'RIJONX_ROHF',
+    'RIJONX_UHF',
     'rijonx_scf',
     'rijonx_scf_gradient',
 ]
@@ -266,23 +272,36 @@ if _ad_hf is not None:
             _ad_rohf.ROHF.__init__(self, mol)
             self._init_rijonx(auxbasis, rcond)
 
+    class RIJONX_UHF(_RIJONXMixin, _ad_uhf.UHF):
+        """Unrestricted Hartree-Fock with the RIJONX Coulomb route."""
+
+        def __init__(self, mol, auxbasis=None, rcond=dri.DEFAULT_RCOND):
+            _ad_uhf.UHF.__init__(self, mol)
+            self._init_rijonx(auxbasis, rcond)
+
 else:  # pragma: no cover - exercised only without pyscfad
 
     RIJONX_RHF = None
     RIJONX_ROHF = None
+    RIJONX_UHF = None
 
 
-def rijonx_scf(mol, auxbasis=None, rcond=dri.DEFAULT_RCOND, **kernel_kwargs):
+def rijonx_scf(mol, auxbasis=None, rcond=dri.DEFAULT_RCOND, uhf=False,
+               **kernel_kwargs):
     """Run a converged RIJONX SCF and return the mean-field object.
 
     The class is chosen from ``mol.spin`` (``RIJONX_ROHF`` for a
-    non-zero spin).  A non-converged run raises instead of returning a
-    reference every downstream number would rest on.
+    non-zero spin, or ``RIJONX_UHF`` when ``uhf`` is true).  A
+    non-converged run raises instead of returning a reference every
+    downstream number would rest on.
     """
     if _ad_hf is None:
         raise ImportError('pyscfad is not installed')
     spin = int(getattr(mol, 'spin', 0))
-    cls = RIJONX_ROHF if spin != 0 else RIJONX_RHF
+    if spin == 0:
+        cls = RIJONX_RHF
+    else:
+        cls = RIJONX_UHF if uhf else RIJONX_ROHF
     mf = cls(mol, auxbasis=auxbasis, rcond=rcond)
     mf.kernel(**kernel_kwargs)
     if not getattr(mf, 'converged', True):
@@ -292,8 +311,117 @@ def rijonx_scf(mol, auxbasis=None, rcond=dri.DEFAULT_RCOND, **kernel_kwargs):
     return mf
 
 
+def _spin_occupations(mf):
+    """Spin layout of a converged reference, with integer occupations.
+
+    A restricted open-shell reference carries one coefficient matrix
+    and one occupation vector (2, 1, 0); an unrestricted reference
+    carries one matrix and one 0/1 occupation vector per spin.  The
+    density returned by ``make_rdm1`` disambiguates the two layouts
+    before the coefficient shape is inspected, because a closed-shell
+    RHF object also passes the coefficient test.
+    """
+    c = np.asarray(mf.mo_coeff)
+    occ = np.asarray(mf.mo_occ)
+    dm = np.asarray(mf.make_rdm1())
+    if dm.ndim != 3 or dm.shape[0] != 2:
+        raise NotImplementedError(
+            f'expected a spin-stacked density (2, nao, nao), got {dm.shape}')
+    if c.ndim == 2 and occ.ndim == 1:
+        c_a = c_b = c
+        occ_a = np.asarray(occ > 0.0, dtype=float)
+        occ_b = np.asarray(occ == 2.0, dtype=float)
+        restricted = True
+    elif c.ndim == 3 and occ.ndim == 2:
+        c_a, c_b = c[0], c[1]
+        occ_a = np.asarray(occ[0] > 0.0, dtype=float)
+        occ_b = np.asarray(occ[1] > 0.0, dtype=float)
+        restricted = False
+    else:
+        raise NotImplementedError(
+            'unrecognized spin layout: mo_coeff ndim '
+            f'{c.ndim}, mo_occ ndim {occ.ndim}')
+    for label, o in (('alpha', occ_a), ('beta', occ_b)):
+        if np.any((o != 0.0) & (o != 1.0)):
+            raise NotImplementedError(
+                f'fractional {label} occupations are not supported')
+    return c_a, c_b, occ_a, occ_b, dm, restricted
+
+
+def _rijonx_open_shell_gradient(mf, auxbasis=None, rcond=None):
+    """Explicit gradient of a converged ROHF or UHF RIJONX energy.
+
+    The skeleton part is assembled from the spin-summed energy
+
+        E = E_nuc + Tr(D_tot h) + 1/2 Tr(D_tot J_RI[D_tot])
+            - 1/2 sum_sigma Tr(D_sigma K[D_sigma]),
+
+    so the RI-J term and the core Hamiltonian see the total density
+    while the exact exchange sees each spin density separately.  The
+    orbital-response completion is the overlap term
+
+        -2 sum_{mu in atom} W_{mu nu} dS_{mu nu}/dR,
+
+    with the energy-weighted density W that pyscf's ROHF/UHF gradient
+    modules use: ``P_a f_a P_a + P_b f_b P_b`` for ROHF and the
+    occupation-weighted orbital-energy densities for UHF.  The Fock
+    matrices come from ``mf.get_veff``, i.e. from the same RI-J plus
+    exact-K assembly the SCF converged on, so the response is taken on
+    the RIJONX energy surface rather than on the exact-Coulomb one.
+    """
+    mol = mf.mol
+    pmol = _pyscf_view(mol)
+    c_a, c_b, occ_a, occ_b, dm, restricted = _spin_occupations(mf)
+    nao = int(pmol.nao_nr())
+    if dm.shape[1:] != (nao, nao):
+        raise ValueError(
+            f'spin density shape {dm.shape} disagrees with nao={nao}')
+    d_tot = dm[0] + dm[1]
+    aux = auxbasis if auxbasis is not None else getattr(
+        mf, 'auxbasis', ri_scf.RI_SCF_DEFAULT_AUX)
+    rcond = dri.DEFAULT_RCOND if rcond is None else float(rcond)
+
+    grad = ri_scf.ri_j_gradient(pmol, density=d_tot, aux=aux, rcond=rcond)
+    grad += ri_scf.exact_k_gradient_spin(
+        pmol, density_alpha=dm[0], density_beta=dm[1])
+    grad += ri_scf.core_hamiltonian_gradient(pmol, density=d_tot)
+    grad += ri_scf.nuclear_repulsion_gradient(pmol)
+
+    h = pmol.intor('int1e_kin') + pmol.intor('int1e_nuc')
+    if pmol.has_ecp():
+        h = h + pmol.intor('ECPscalar')
+    vhf = np.asarray(mf.get_veff(dm=jnp.asarray(dm)))
+    if vhf.shape != (2, nao, nao):
+        raise RuntimeError(
+            f'expected a spin-stacked RIJONX potential, got {vhf.shape}')
+    if restricted:
+        p_a = c_a[:, occ_a > 0] @ c_a[:, occ_a > 0].T
+        p_b = c_b[:, occ_b > 0] @ c_b[:, occ_b > 0].T
+        f_a = h + vhf[0]
+        f_b = h + vhf[1]
+        dm1e = p_a @ f_a @ p_a + p_b @ f_b @ p_b
+    else:
+        e_mo = np.asarray(mf.mo_energy)
+        if e_mo.ndim != 2:
+            raise NotImplementedError(
+                'unrestricted gradients need spin-resolved orbital energies')
+        ca_o = c_a[:, occ_a > 0]
+        cb_o = c_b[:, occ_b > 0]
+        dm1e = ((ca_o * e_mo[0][occ_a > 0]) @ ca_o.T
+                + (cb_o * e_mo[1][occ_b > 0]) @ cb_o.T)
+
+    # pyscf.grad.rhf.get_ovlp returns -int1e_ipovlp; keep the same sign.
+    s1 = -pmol.intor('int1e_ipovlp', comp=3)
+    slices = pmol.aoslice_by_atom()
+    for atom in range(int(pmol.natm)):
+        p0, p1 = int(slices[atom][2]), int(slices[atom][3])
+        grad[atom] -= 2.0 * np.einsum('xij,ij->x', s1[:, p0:p1],
+                                      dm1e[p0:p1])
+    return grad
+
+
 def rijonx_scf_gradient(mf, auxbasis=None, rcond=None):
-    """Full nuclear gradient of the converged closed-shell RIJONX energy.
+    """Full nuclear gradient of the converged RIJONX energy.
 
     The fixed-coefficient (skeleton) part comes from
     :func:`diffmrc.driver.ri_scf.rijonx_gradient`: the RI-J derivative
@@ -301,26 +429,32 @@ def rijonx_scf_gradient(mf, auxbasis=None, rcond=None):
     the dense four-center ``int2e_ip1``/``ip2`` contraction.  The
     orbital-response part is the overlap-derivative term
 
-        -2 sum_{mu in atom} W_{mu nu} dS_{mu nu}/dR,   W = 2 C_occ eps C_occ^T,
+        -2 sum_{mu in atom} W_{mu nu} dS_{mu nu}/dR,
 
-    which is the same completion pyscf's ``grad.rhf`` applies for a
-    converged RHF density.  Without it the skeleton gradient differs
-    from the SCF gradient by O(1) Eh/Bohr even at convergence.
+    with ``W = 2 C_occ eps C_occ^T`` for a closed-shell RHF reference
+    and the spin-resolved energy-weighted density for an open-shell
+    reference (see :func:`_rijonx_open_shell_gradient`).  Without it the
+    skeleton gradient differs from the SCF gradient by O(1) Eh/Bohr
+    even at convergence.
+
+    Both the ROHF and the UHF layouts are accepted; RHF keeps its own
+    branch so the closed-shell path is bit-for-bit unchanged.
 
     Returns
     -------
     ndarray, (natm, 3)
-        Eh / Bohr.  Closed-shell occupations only; the exchange
-        derivative is validation scale (dense ``nao**4`` tensors).
+        Eh / Bohr.  The exchange derivative is validation scale (dense
+        ``nao**4`` tensors).
     """
     mol = mf.mol
     pmol = _pyscf_view(mol)
     c = np.asarray(mf.mo_coeff)
     occ = np.asarray(mf.mo_occ)
-    if occ.ndim != 1:
-        raise NotImplementedError(
-            'only closed-shell (single occupation vector) gradients are '
-            'implemented; use mf.energy_grad() for open-shell systems')
+    closed = bool(occ.ndim == 1
+                  and np.all((occ == 0.0) | (occ == 2.0)))
+    if not closed:
+        return _rijonx_open_shell_gradient(mf, auxbasis=auxbasis,
+                                           rcond=rcond)
     if np.any((occ != 0.0) & (occ != 2.0)):
         raise NotImplementedError(
             'fractional or single occupations are not supported')

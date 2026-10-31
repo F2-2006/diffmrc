@@ -1,5 +1,46 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- `driver.ri_scf_driver`: explicit analytic RIJONX nuclear gradients for ROHF
+  and UHF references, and the `RIJONX_UHF` mean-field class. The skeleton
+  gradient uses the total density for RI-J and the core Hamiltonian and the
+  spin densities for exact exchange; the response term is the spin-resolved
+  energy-weighted density built from the RIJONX Fock. Validated against
+  implicit differentiation and central differences on OH and OF, and against
+  implicit differentiation on an ECP IO doublet.
+- `driver.ri_scf.exact_k_gradient_spin`: spin-summed exact-exchange skeleton
+  gradient with the open-shell `-1/2 sum_sigma Tr(D_sigma K[D_sigma])`
+  convention. `ri_j_gradient` and `core_hamiltonian_gradient` accept a density
+  directly, which a spin-separated reference needs.
+- `core.hessian.implicit_hessian_columnwise`: one tangent per column; identical
+  to the vectorized route (5e-15 on H2O/6-31G, 3e-15 on CO/6-31G) at lower peak
+  memory.
+- `core.hessian.implicit_hessian_hvp`: matrix-free relaxed Hessian with an LSMR
+  response solve; never forms `H_tt`, `M` or `H_RR`. Matches the dense route to
+  6e-12 (H2O) and 8e-12 (CO); `H_tt` products are jitted, and the default
+  iteration cap is `8 n_par`.
+- `core.hessian.make_theta_energy_fn`: fixed-geometry theta-only energy, which
+  keeps the SCF out of the `H_tt` graph.
+- `experiments/hessian_cost_benchmark.py`: wall time, peak RSS, accuracy and
+  LSMR diagnostics for the three Hessian routes.
+
+### Changed
+
+- `make_joint_energy_fn` accepts an `scf` constructor.
+- `rijonx_scf` accepts `uhf=True`; the open-shell class remains ROHF by
+  default.
+
+### Known limitations
+
+- The matrix-free route needs the LSMR iteration cap to reach convergence on
+  the tested stationary points; the unrolled route with three Newton steps
+  exceeds 20 GiB on H2O/6-31G CAS(2,2).
+- The exact-exchange RIJONX gradient remains validation scale (dense
+  `int2e_ip1`/`ip2` tensors). RI-JK and RIJCOSX are not implemented.
+
 ## 0.3.2 (2026-10-25)
 
 ### Changed
