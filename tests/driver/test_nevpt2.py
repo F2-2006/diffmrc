@@ -459,3 +459,40 @@ def test_the_theta_array_argument_form_matches_the_closure():
     a = float(th_fn(theta))
     b = float(th_fn.component_args(theta, *th_fn.arrays))
     assert b == pytest.approx(a, abs=1e-12)
+
+
+def test_the_joint_function_accepts_the_alignment_hook():
+    """The optional blockwise alignment must be the identity at its own
+    reference geometry.
+
+    The hook exists so that a frozen-theta derivative and a response
+    operator built from neighbouring geometries live in the same orbital
+    gauge.  At the geometry the reference was taken from, C^T S C_ref is
+    the unit matrix and the Newton polar iteration leaves it unchanged,
+    so the energy and the nuclear gradient must agree with the unaligned
+    builder to round-off.
+    """
+    from pyscfad import scf
+
+    from diffmrc.driver.nevpt2 import make_nevpt2_joint_fn
+
+    mol = _h2()
+    nmo = mol.nao_nr()
+    ncore, nact, nele = 0, 2, 2
+    pairs = _pairs(ncore, nact, nmo)
+    builder = lambda m: scf.RHF(m)  # noqa: E731
+    mf = builder(mol)
+    mf.kernel()
+    C_ref = jnp.asarray(np.asarray(mf.mo_coeff))
+    bounds = [(0, ncore), (ncore, ncore + nact), (ncore + nact, nmo)]
+    theta = jnp.zeros(len(pairs))
+    f_plain = make_nevpt2_joint_fn(ncore, nact, nele, nmo, pairs, builder,
+                                   e2_scale=0.0)
+    f_aligned = make_nevpt2_joint_fn(ncore, nact, nele, nmo, pairs, builder,
+                                     e2_scale=0.0, align_ref=C_ref,
+                                     align_bounds=bounds)
+    assert float(f_aligned(mol, theta)) == pytest.approx(
+        float(f_plain(mol, theta)), abs=1e-12)
+    g_plain = np.asarray(jax.grad(lambda m: f_plain(m, theta))(mol).coords)
+    g_aligned = np.asarray(jax.grad(lambda m: f_aligned(m, theta))(mol).coords)
+    assert np.abs(g_plain - g_aligned).max() < 1e-10

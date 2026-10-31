@@ -64,6 +64,24 @@ def test_three_center_matches_materialized_classes():
     assert sum(bd_3c.values()) == pytest.approx(e_3c, abs=1e-10)
 
 
+def test_three_center_class_projection_matches_materialized():
+    """The class-projection options are shared with the materialized path.
+
+    A four-orbital active space makes the plain-product bases and the
+    V0_ia whole-class solve non-trivial; the two W assemblies (three-
+    center and dense) must still produce the same class table.
+    """
+    h1, u, eri, eps, dets, ci = _three_center_case(
+        seed=17, ncore=2, nact=4, nele=4, nmo=8, naux=12)
+    kw = dict(ncore=2, nact=4, nele=4, eps=eps,
+              class_diagonal='block', v0_ia='class')
+    e_3c, bd_3c = caspt2_contracted_e2_three_center(h1, u, ci, dets, **kw)
+    e_mat, bd_mat = caspt2_contracted_e2(h1, eri, ci, dets, **kw)
+    assert e_3c == pytest.approx(e_mat, abs=1e-9)
+    for name in bd_mat:
+        assert bd_3c[name] == pytest.approx(bd_mat[name], abs=1e-9), name
+
+
 def test_three_center_coupling_matches_dense_terms():
     """The term scatter reproduces ``sum_D K[D] g(D)`` built from the
     Slater-Condon kernel and the dense four-center tensor."""

@@ -336,7 +336,8 @@ def _components_from(C0_, h_, e_, enuc, th_, *, ncore, nact, nele, nmo,
 
 def make_nevpt2_joint_fn(ncore, nact, nele, nmo, pairs, scf_builder,
                          e2_scale=1.0, ci_solver='plain',
-                         eig_solver='default'):
+                         eig_solver='default', align_ref=None,
+                         align_bounds=None):
     """Build ``E(mol, theta) = E_casscf + e2_scale * E2_nevpt2``.
 
     Parameters
@@ -361,6 +362,14 @@ def make_nevpt2_joint_fn(ncore, nact, nele, nmo, pairs, scf_builder,
     e2_scale : float
         Multiplier on the correlation energy; 0 gives the CASSCF
         function exactly, which is the validation anchor.
+    align_ref, align_bounds : optional
+        When both are given, the SCF coefficient matrix is first mapped
+        by the differentiable blockwise Procrustes alignment of
+        ``driver.nevpt2_zvector.align_reference_blocks``.  The alignment
+        puts the theta coordinate in the same gauge at every geometry,
+        which is required whenever a frozen-theta derivative is combined
+        with a response operator built from neighbouring geometries.
+        With either argument left at None the behaviour is unchanged.
 
     Returns
     -------
@@ -379,9 +388,17 @@ def make_nevpt2_joint_fn(ncore, nact, nele, nmo, pairs, scf_builder,
         """CASSCF energy and NEVPT2 correction, both differentiable."""
         mf_ = scf_builder(m_)
         mf_.kernel()
+        C = mf_.mo_coeff
+        if align_ref is not None and align_bounds is not None:
+            # Deferred import: the alignment helper lives with the
+            # Z-vector prototype, and a module-level import would couple
+            # the two driver modules at load time for no benefit.
+            from .nevpt2_zvector import align_reference_blocks
+            C = align_reference_blocks(C, m_.intor('int1e_ovlp'),
+                                       align_ref, align_bounds)
         # get_hcore carries the ECP and the X2C rotation; the raw
         # int1e_kin + int1e_nuc sum would silently drop both.
-        return _components_from(mf_.mo_coeff, mf_.get_hcore(),
+        return _components_from(C, mf_.get_hcore(),
                                 m_.intor('int2e', aosym='s1'),
                                 m_.energy_nuc(), th_, want_e2=want_e2, **kw)
 
