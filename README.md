@@ -315,7 +315,14 @@ The entries below are open problems, not permanent exclusions. Each states the
 current status and, where known, the direction of work.
 
 *Active-space size.* Full diagonalization in the CI step limits the active-space
-size. A differentiable iterative eigensolver is the route to larger spaces.
+size. `cs_casci_blocked` now takes `eig_solver='davidson'`, which applies the
+matrix-free operator of `core.ci_matvec` through the Davidson kernel and uses
+the implicit-function reverse of `core.iterative_ci`; the determinant space is
+then limited by working memory rather than by the $O(\mathrm{dim}^2)$ block
+matrix. The first-order derivative of this route is validated against finite
+differences through a rotated-MO chain. A second-order derivative for the
+matrix-free route and a benchmark above CAS(8,8) remain open. (Branch
+`wave14/eigensolver`, commit `99d0cfb`.)
 
 *Degenerate pairs at a stationary point.* The cluster tolerance of the
 eigensolver must sit inside the measured gap between the floating-point noise
@@ -324,59 +331,157 @@ that splits symmetry-degenerate pairs at a rotated stationary point (1e-8 to
 (1.9e-2 and above). A tolerance below the noise scale exposes both the first
 and the second derivative to a bare inverse gap; one above the physical gaps
 clusters distinct states. The window measured here spans 1e-5 to 1e-2, and the
-rule has no admissible value when a physical gap falls inside the noise band —
-the current fallback is the decomposition-free Lanczos kernel. A tolerance rule
-that removes this ambiguity remains open.
+rule has no admissible value when a physical gap falls inside the noise band.
+`core.eigh.cluster_tolerance` and `lowest_pair_auto` now derive the tolerance
+from the spectrum: a ratio test separates the noise floor from the smallest
+physical gap, the tolerance is their geometric mean, and a spectrum without the
+required separation returns the decomposition-free Lanczos kernel explicitly.
+On the recorded CO spectra the rule returns 1.26e-3 for the 1-RDM block and
+7.55e-4 for the Fock virtual block, and 4.69e-4 when the measured noise scale
+is supplied. The rule is a decision helper, not a differentiable function, and
+an a priori guarantee that the two scales separate remains open. (Branch
+`wave14/eigensolver`, commit `99d0cfb`.)
 
 *Stationary-point selection.* The CASSCF energy is non-convex in the orbital
 parameters; different starting points can reach different stationary points,
 and the selection is not stable even at fixed settings. Current practice is to
 report a stationarity certificate and the stationary-point spread alongside any
-multireference number; a deterministic selection rule remains open.
+multireference number. `core.stationary.select_stationary_point` makes the
+selection deterministic: it keeps the candidates that reached the gradient
+target, prefers certified minima, orders by energy, gradient norm, label and
+the canonical form of the parameters, and reports `minimum_degenerate`,
+`saddle_only` or `curvature_unverified` rather than calling a saddle a minimum.
+Generating the starting points and running the refinements remain the caller's
+job; a search strategy that guarantees the global minimum remains open. (Branch
+`wave14/eigensolver`, commit `99d0cfb`.)
 
 *Perturbation-layer convergence.* NEVPT2 depends on the orbitals more
 sensitively than the CASSCF energy does, so energy-based convergence criteria
-are insufficient when the target quantity is the correction. Current practice
-is to use the stability of the correction between independent runs together
-with an orbital-gradient threshold; a convergence criterion tied to the
-correction itself remains open.
+are insufficient when the target quantity is the correction. Measured on
+H2O/6-31G CAS(2,2): between optimizations converged to 1e-4 and 1e-6 the
+CASSCF energy moves by 1.3e-9 Eh while the correction moves by 1.1e-5 Eh
+(ratio about 8300); the correction stabilizes to 1.9e-10 once the orbital
+gradient reaches 5e-7, the practical floor of the L-BFGS-B optimizer. Same
+system, independent starting points: the zero start lands on a theta-space
+saddle (Hessian minimum eigenvalue -1.6e-2) and a 21.2 mEh higher stationary
+point, whose correction differs by 18.7 mEh. The current practice is therefore
+a branch certificate: three or more independent starts that agree in energy to
+1e-8 with a positive-definite theta Hessian, followed on the selected branch
+by an orbital-gradient threshold together with a bound on the change of the
+correction between two independently converged orbital sets. The first-order
+bound `|H^-1 s| |g|` is recorded as a diagnostic only: on the saddle it has the
+wrong sign. A criterion that removes the branch dependence remains open.
+(Branch `wave14/caspt2-nevpt2`, commit `ea26401`.)
 
-*Second-derivative cost.* The implicit route requires the orbital Hessian in
-memory and does not exploit sparsity; the unrolled route scales with the number
-of iterations. Neither is competitive with analytic second derivatives for
-single-reference methods. Sparse or analytic second derivatives are the
-direction of work.
+*Second-derivative cost.* The vectorized implicit route requires the orbital
+Hessian in memory, and its cost is set by the tangent broadcast rather than by
+the matrix itself; the unrolled route scales with the number of iterations.
+Blocked and matrix-free implicit routes are now available. The blocked route
+takes one tangent per column and reproduces the vectorized Hessian to
+$5\times10^{-15}$ on H2O/6-31G and $3\times10^{-15}$ on CO/6-31G while using
+32% and 35% less peak memory; the matrix-free route solves the response
+equation with LSMR, never forms $H_{\theta\theta}$, $M$ or $H_{RR}$, and
+reproduces the same Hessian to $6\times10^{-12}$ and $8\times10^{-12}$ while
+using 34% and 40% less memory. The matrix-free route is 1.6 times slower than
+the vectorized one, and its LSMR solve has to run past the previous iteration
+cap to converge (the cap is now $8n_\mathrm{par}$). The unrolled route with
+three Newton steps matches the implicit route to $6\times10^{-14}$ on
+LiH/STO-3G ($n_\mathrm{par}=11$, 3.05 GiB) but exceeds 20 GiB on H2O/6-31G
+CAS(2,2) ($n_\mathrm{par}=50$) and did not produce a Hessian. Analytic second
+derivatives for the single-reference RIJONX surface, and a matrix-free solver
+that deflates the near-null orbital direction without an iteration cap, remain
+open. (Branch `wave14/ri-hessian`, commit `5024db7`.)
 
 *Relaxed NEVPT2 gradient scope.* The relaxed-path nuclear gradient is validated
-on two closed-shell, frozen-core systems (H2O/6-31G and LiH/6-31G). Open-shell,
-ECP, f-block and large-basis systems are not yet covered. The exact near-zero
-treatment applies to the `Si` class only; the other four contraction classes
-retain the release value mask.
+on two closed-shell, frozen-core systems (H2O/6-31G and LiH/6-31G) and on two
+scalar-relativistic ECP systems (HI/def2-SVP with ncore=12 and HI/LANL2DZ with
+ncore=3; the ECP core-Hamiltonian derivative test now runs in the suite). For
+the open-shell doublet OH/6-31G CAS(3,2) the CASSCF stationary point coincides
+with the ROHF orbitals at every geometry, so the response term vanishes
+identically and only the frozen gradient is testable; a non-trivial open-shell
+response (OH CAS(5,4)) remains blocked by a 19.4% discrepancy in the frozen e2
+nuclear derivative. f-block and large-basis relaxed gradients are blocked
+upstream by the dense `nctr * nao^4` integral-derivative allocation. The exact
+near-zero treatment applies to the `Si` class only; the other four contraction
+classes retain the release value mask, and no validation system with a masked
+channel outside `Si` has been found. (Branch `wave14/caspt2-nevpt2`, commit
+`ea26401`.)
 
 *CASPT2 residual.* The coupled full-Fock path is a NumPy value-layer
 implementation. The differentiable path is the diagonal-Fock approximation
-(CASPT2-D level); its residual against the reference is documented in the
-manual and in the tests. The `V1_ija` class and the default-path `(u,u)`
-active-row approximation still differ from the reference for active spaces
-larger than CAS(2,2); the N2/6-31G CAS(6,6) default-path total is 0.983
-against ORCA CASPT2-D for the release reference (OMP_NUM_THREADS=1); the
-Wave 12 frozen reference gives 0.989. The spread across reference sets
-(0.980–0.989) comes from the active degenerate-pair gauge; the five classes
-without active-pair rows are stable to 1e-7 across reference sets. The
-coupled path totals 1.023. Closing the class-space residual and extending
-the coupled path to the differentiable layer remain open.
+(CASPT2-D level). The default path's `(u,u)` active-row truncation is exact
+only for a two-orbital active space: the plain-product class projection
+reproduces it to 4e-16 on the CAS(2,2) anchors, while on N2 removing it without
+projection doubles the `Vm2_ab` and `V2_ij` classes. The
+`class_diagonal='block', v0_ia='class'` option replaces the truncation and the
+per-block `V0_ia` solve with exact class projections; on N2/6-31G CAS(6,6) it
+moves `Vm2_ab` to 1.0000 of ORCA CASPT2-D and `V0_ia` to 0.9970, and the total
+to 1.0232 of the diagonal reference and 1.0023 of the full-FIC column. The
+release default-path total is 0.983 against ORCA CASPT2-D (OMP_NUM_THREADS=1);
+the Wave 12 frozen reference gives 0.989, and the spread across reference sets
+(0.980–0.989) comes from the active degenerate-pair gauge, while the five
+classes without active-pair rows are stable to 1e-7 across reference sets. The
+default total's
+apparent agreement is a cancellation between `V1_ija` (+55%), `V2_ij` (-77%),
+`V0_ia` (+10%) and `Vm2_ab` (+12%). The diagonal-to-full coupling ratio of the
+two paths, 0.9795831, matches the ORCA CASPT2-D/full-FIC ratio 0.9795829 to
+2e-7 relative: the coupling is right and the remaining offset is a class-space
+factor. `V1_ija` is 1.553 in every basis because the diagonal approximation of
+that class is gauge dependent (random gauges inside the degenerate overlap
+blocks span 0.88 to 1.29 of the reference) while its exact class-block value is
+gauge invariant at 1.553; ORCA prints 192 functions for the class against the
+768 of the plain-product basis, so the residual is a class-space definition
+difference. Closing it requires the reference contraction rule; extending the
+coupled path to the differentiable layer remains open. (Branch
+`wave14/caspt2-nevpt2`, commits `ea26401` and `339e480`.)
 
-*ECP SOMF.* The valence-level ECP SOMF operator is a prototype. There is no
-unique ECP SOMF definition, and the valence-only construction can double count
-core spin-orbit contributions. A unique definition and a double-counting
-correction remain open; it is not a production absolute-SOC method.
+*ECP SOMF.* The valence-level ECP SOMF operator is a prototype, and no unique
+ECP SOMF definition exists: the split between the ECP spin-orbit operator and
+the explicit valence mean field is a fitting freedom that the ECP data alone do
+not fix. `core.somf_ecp` now exposes the decomposition family (ECPso-only, full
+valence, one-center, on-site-subtracted, point-charge and a double-counting
+upper view) in one convention, and `experiments/somf_ecp/compare_variants.py`
+implements a free-atom subtraction that removes the mean field the ECP already
+contains. On the YbF model window the free-atom-subtracted and full-valence
+values differ by 10%, and the Ge+ 2P calibration leaves an 11.6% absolute
+offset traced to the small basis and the ECP fit. A unique definition and a
+double-counting correction remain open; it is not a production absolute-SOC
+method, so report the variant bracket and use the free-atom subtraction only
+with its atomic-reference caveat. (Branch `wave14/relativistic`, commits
+`dc2b836` and `193e546`.)
 
-*Two-component X2C.* The differentiable X2C-CASSCF chain is scalar (spin-free).
-Complex two-component CI, Kramers-restricted response, and ECP support remain
-open.
+*SOMF derivatives and RI.* `core.somf_jax` provides a differentiable
+explicit-kernel path for the two-electron SOMF operator, including the SI
+assembly and a degeneracy-safe eigenvalue derivative; it is validated against
+finite differences on OH and OF. `core.somf_ri` provides a value-layer
+RI-SOMF(1X) prototype in which RI applies to the Coulomb term only and the
+exchange is one-center exact; on OH/OF/6-31G the RI error is
+0.0007/0.0010 cm^-1 against the four-center route, and RI-SOMF(1X) is within
+0.5 cm^-1 of the four-center SOMF. The RI factors have no derivative layer, so
+a differentiable RI-SOMF gradient remains open. (Branches `wave13/somf-diff` at
+`989e173` and `wave13/ri-somf` at `1a66c0f`.)
 
-*RI SCF.* The RIJONX driver keeps exact exchange dense, and analytic SCF
-gradients for open-shell references remain open.
+*Two-component X2C.* The X2C-CASSCF chain is scalar (spin-free).
+`core.spinor_ci` adds a minimal complex determinant CI with frozen-core folding,
+a JAX value path and a Kramers-safe eigenvalue derivative; it reproduces pyscf
+FCI in the non-relativistic spin-orbital limit and the Kramers theorem on a
+synthetic time-reversal-invariant Hamiltonian. The physical X2C path remains
+open: the pyscf `int2e_spinor` array does not obey the chemist pair symmetry
+(measured violation 0.62 on H2O/6-31G), and the CI Hamiltonian built from it
+with the determinant-energy ordering does not commute with many-body time
+reversal on OH/6-31G. Kramers-restricted response, complex orbital rotations
+and ECP support remain unimplemented. (Branch `wave14/relativistic`, commits
+`dc2b836` and `193e546`.)
+
+*RI SCF.* The RIJONX driver keeps exact exchange dense: the RI-J factors
+remove the Coulomb four-center work, not the exchange four-center work.
+Explicit analytic gradients now cover RHF, ROHF and UHF references (total
+density for RI-J and the core Hamiltonian, spin densities for exact exchange,
+spin-resolved energy-weighted density for the orbital response), checked
+against implicit differentiation and central differences on OH, OF and an ECP
+IO doublet. RI-JK and RIJCOSX remain out of scope, and the exact-exchange
+gradient is validation scale because it still forms the dense derivative
+tensors. (Branch `wave14/ri-hessian`, commit `5024db7`.)
 
 ## Reproducing the paper
 
