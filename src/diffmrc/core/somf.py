@@ -92,12 +92,19 @@ The operator also differs between wavefunction methods (CASSCF vs MRCI
 densities), exactly as the ORCA manual states; the caller decides which
 ``P`` is physical for the target states.
 
-NOT IMPLEMENTED
+NOT IMPLEMENTED HERE
 
-* RI-SOMF: the kernel is not a function of ``r_ij`` alone, so the usual
-  Coulomb-metric RI factorization of ``core.ri`` does not apply directly.
-  Four-center integrals are the only route implemented here.
-* ``SOCMaxCenter`` / AMFI one-center truncation of the exchange.
+* RI-SOMF and the ORCA 6.1 section 5.26 one-center presets live in
+  ``core.somf_ri``.  The raw kernel does not admit a Coulomb-metric RI of
+  its own: its "metric" ``(P|g_K|Q)`` is antisymmetric and has a zero
+  diagonal.  libcint's definition of ``int2e_p1vxp1``,
+
+      g_K = eps_{KLM} (d_L phi_i d_M phi_j | 1/r12 | phi_k phi_l),
+
+  is an ordinary Coulomb integral of the differentiated bra pair, so the
+  Coulomb metric does apply to that form; see ``core.somf_ri``.
+* ``SOCMaxCenter`` / AMFI one-center truncation of the exchange and the
+  Coulomb term: ``core.somf_ri``.
 * JAX differentiability: the value layer is numpy.  Making ``P`` and the
   integral tensors differentiable inputs is a separate step.
 """
