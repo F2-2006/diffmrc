@@ -48,11 +48,32 @@ This is a gauge choice, not a rotation: the orbitals and every energy
 computed from them are unchanged.  Only the meaning of a rotation
 parameter measured from the returned columns changes, and it changes to
 a convention that no longer depends on the thread count.
-"""
-from jax import lax
-from jax import numpy as jnp
 
-__all__ = ['canonical_mo_phases']
+NUMPY SIBLING
+
+``core.x2c_casscf_df`` is a NumPy/SciPy layer that does not import JAX.
+It needs the same convention for its reference columns, so the JAX
+import is deferred to the calls that need it and
+:func:`canonical_mo_phases_np` provides the identical rule for NumPy
+arrays.  A test pins the two implementations to the same output.
+
+SCOPE
+
+The convention fixes the sign of each eigenvector.  It does not choose
+a basis inside an exactly degenerate subspace: there the eigensolver may
+return an arbitrary orthogonal mixture, and the thread count changes
+that mixture.  Measured on this stack (2026-11-02, 101): N2/6-31G and
+HI/def2-SVP keep their SCF energy to 3e-13 Ha between OMP_NUM_THREADS =
+1 and 4, while the active pi columns differ by a rotation of about 90
+degrees (N2 columns 5-8, HI columns 12-13).  A fixed theta is therefore
+thread-independent only when the degenerate blocks are not mixed.  The
+H2O/6-31G reference, where the difference is a column sign, is such a
+case.  Resolving the residual needs a basis rule inside degenerate
+blocks, which is a different problem from the phase gauge.
+"""
+import numpy as np
+
+__all__ = ['canonical_mo_phases', 'canonical_mo_phases_np']
 
 # Relative half-width of the band around the column maximum that is
 # treated as tied.  The SCF coefficients carry roundoff at 1e-14 relative,
@@ -60,6 +81,32 @@ __all__ = ['canonical_mo_phases']
 # physically distinct amplitudes works; 1e-6 leaves six orders of margin
 # on both sides.
 BAND_REL = 1e-6
+
+
+def _check_two_dimensional(C):
+    if C.ndim != 2:
+        raise ValueError(
+            f'canonical_mo_phases needs a 2-D (nao, nmo) array, '
+            f'got shape {C.shape}')
+
+
+def canonical_mo_phases_np(C, band=BAND_REL):
+    """NumPy sibling of :func:`canonical_mo_phases`.
+
+    Same convention and the same tie-break; used by the NumPy-only X2C
+    layer.  ``C`` is a real ``(nao, nmo)`` array.
+    """
+    C = np.asarray(C)
+    _check_two_dimensional(C)
+    if C.shape[1] == 0:
+        return C
+    mag = np.abs(C)
+    mx = mag.max(axis=0)
+    tied = mag >= mx[None, :] * (1.0 - band)
+    row = np.argmax(tied.astype(np.int32), axis=0)
+    pivot = C[row, np.arange(C.shape[1])]
+    sign = np.where(pivot < 0.0, -1.0, 1.0)
+    return C * sign[None, :]
 
 
 def canonical_mo_phases(C, band=BAND_REL):
@@ -85,11 +132,11 @@ def canonical_mo_phases(C, band=BAND_REL):
     ValueError
         If ``C`` is not two-dimensional.
     """
+    from jax import lax
+    from jax import numpy as jnp
+
     C = jnp.asarray(C)
-    if C.ndim != 2:
-        raise ValueError(
-            f'canonical_mo_phases needs a 2-D (nao, nmo) array, '
-            f'got shape {C.shape}')
+    _check_two_dimensional(C)
     if C.shape[1] == 0:
         return C
     mag = jnp.abs(C)

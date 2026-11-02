@@ -47,6 +47,12 @@ Conventions that matter
   exact symmetry.
 * ``M`` is deliberately left unsymmetrized. Symmetry is a property of
   the assembled ``H_total``, not of ``M``.
+* The SCF columns are phase-canonicalized before the rotation
+  (``core.gauge.canonical_mo_phases``).  ``theta`` is measured from
+  those columns; without the convention a frozen theta would describe a
+  different physical rotation at every geometry whose eigensolver chose
+  a different column sign, and the frozen and mixed terms would be
+  assembled in different charts.
 * The ``.coords`` attribute of a differentiated Mole is nested
   differently depending on whether the outermost operation is ``grad``
   or ``jacfwd``/``hessian`` of a ``grad``. Taking the wrong level is a
@@ -58,6 +64,7 @@ import numpy as np
 import jax
 
 from .adint import int2e_s1
+from .gauge import canonical_mo_phases
 from .orblib import orbital_pairs  # noqa: F401  (re-exported for callers)
 from .rotation import block_rotation
 
@@ -147,7 +154,11 @@ def make_joint_energy_fn(ncore, nact, nele, nmo, pairs, pscf,
     def E_joint(m_, th_):
         mf_ = scf_of(m_)
         mf_.kernel()
-        C_ = mf_.mo_coeff
+        # theta is measured from the SCF columns.  Canonicalize them
+        # before the rotation so that a frozen theta describes the same
+        # physical rotation at every displaced geometry, whatever sign
+        # the eigensolver returned there.
+        C_ = canonical_mo_phases(mf_.mo_coeff)
         h_ = m_.intor('int1e_kin') + m_.intor('int1e_nuc')
         e_ = int2e_s1(m_)
         C2 = C_ @ block_rotation(th_, nmo, pairs)
@@ -197,7 +208,10 @@ def make_theta_energy_fn(mol, ncore, nact, nele, nmo, pairs, pscf,
     scf_of = pscf.RHF if scf is None else scf
     mf_ = scf_of(mol)
     mf_.kernel()
-    C_ = mf_.mo_coeff
+    # Same convention as `make_joint_energy_fn`: the theta chart is
+    # measured from the canonical columns, not from the eigensolver's
+    # arbitrary sign.
+    C_ = canonical_mo_phases(mf_.mo_coeff)
     h_ = mol.intor('int1e_kin') + mol.intor('int1e_nuc')
     e_ = mol.intor('int2e', aosym='s1')
     en_ = mol.energy_nuc()

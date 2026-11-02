@@ -336,3 +336,32 @@ def test_sa_state_gradient_satisfies_sum_rule(water, pyscf_sa):
     d_a = i0['direct']
     d_b = _envelope_fd(res, 0)
     assert np.abs(d_a - d_b).max() < 1e-5
+
+
+def test_a_supplied_reference_is_put_in_a_fixed_phase_chart():
+    """theta is measured from the SCF columns, whose eigenvector sign is
+    arbitrary.  A caller-supplied mean field with flipped columns must
+    therefore give the same state-averaged result; `df_x2c_casscf`
+    canonicalizes the reference before building the chart."""
+    from types import SimpleNamespace
+
+    mol = _mol()
+    factors = xc.spatial_df_factors(mol, auxbasis=AUX)
+    rhf = xc.df_x2c_rhf(mol, factors=factors)
+    C = np.asarray(rhf.mo_coeff)
+    C_flip = C.copy()
+    C_flip[:, ::3] *= -1.0
+
+    def run(Cx):
+        return xc.df_x2c_casscf(
+            mol, NCORE, NACT, NELE, auxbasis=AUX,
+            rhf=SimpleNamespace(mo_coeff=Cx), g_conv=1e-6, max_cycle=400)
+
+    a = run(C)
+    b = run(C_flip)
+    assert float(b.e_sa) == pytest.approx(float(a.e_sa), abs=1e-12)
+    assert np.abs(np.asarray(b.state_energies)
+                  - np.asarray(a.state_energies)).max() < 1e-12
+    assert np.abs(np.asarray(b.theta) - np.asarray(a.theta)).max() < 1e-10
+    assert np.abs(np.asarray(b.mo_coeff)
+                  - np.asarray(a.mo_coeff)).max() < 1e-10

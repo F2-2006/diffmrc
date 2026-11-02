@@ -481,14 +481,25 @@ def _mo_block(mol, C0, space, enuc=None, include_cv=True):
     only. The integrals are the same; only the pair list changes, so
     callers on the same molecule should derive this block from the full
     one instead of recomputing the integrals.
+
+    The reference columns are brought to the deterministic phase
+    convention of :func:`diffmrc.core.gauge.canonical_mo_phases` before
+    ``space.mo_order`` and before any rotation.  ``theta`` is measured
+    from these columns, so without the convention a fixed theta would
+    describe a different physical rotation whenever the SCF eigensolver
+    returned a different column sign (it does, with the thread count).
+    The convention is applied to the caller's ``C0`` as well, so a
+    reference supplied directly is covered.
     """
     import jax
     jax.config.update('jax_enable_x64', True)
     from jax import numpy as jnp
 
+    from ..core.gauge import canonical_mo_phases
     from ..core.orblib import orbital_pairs
 
     C0 = jnp.asarray(np.asarray(C0, dtype=float))
+    C0 = canonical_mo_phases(C0)
     nmo = C0.shape[1]
     h1e = _core_hamiltonian(mol)
     eri = mol.intor('int2e', aosym='s1')
@@ -669,19 +680,23 @@ def _mcpdft_chain(mol, C0, space, grid, grid_level, eval_xc, enuc,
     Everything independent of the rotation parameters is computed here,
     once -- the integrals, the frozen grid, the determinant list. The
     returned closure evaluates ``(E_total, E_ot, E_mcwfn, E_cas)`` at
-    one parameter vector.
+    one parameter vector.  The reference columns are phase-canonicalized
+    before the rotation for the same reason as in :func:`_mo_block`: the
+    parameters are measured from those columns.
     """
     import jax
     jax.config.update('jax_enable_x64', True)
     from jax import numpy as jnp
 
     from ..core.casci import cs_casci_blocked
+    from ..core.gauge import canonical_mo_phases
     from ..core.mcpdft import eot_energy, pi_active, w_sigma
     from ..core.nevpt2.impl import cas_dets_for2
     from ..core.orblib import orbital_pairs
     from ..core.rotation import block_rotation
 
     C0 = jnp.asarray(np.asarray(C0, dtype=float))
+    C0 = canonical_mo_phases(C0)
     nmo = C0.shape[1]
     C0o = C0[:, space.mo_order]
     ncore, ncas = int(space.ncore), int(space.ncas)
@@ -909,15 +924,18 @@ def search_point(E_theta, npar, tries=1, seed=0, stage_one=None, **kwargs):
 
 
 def _warn_if_thread_count_breaks_reproducibility():
-    """Warn when the BLAS thread count makes NEVPT2 values irreproducible.
+    """Warn that a fixed-theta value can depend on the thread count.
 
-    Measured on H2O/6-31G CAS(2,2): with ``OMP_NUM_THREADS > 1`` two
-    identical runs gave ``e2`` = -0.12328 and -0.12830 (5e-3 Ha apart),
-    while five runs at ``1`` were bit-identical and changing the CI solver
-    did not remove the difference. The threefold-degenerate CI block leaves
-    the vectors inside the degenerate subspace to rounding. This is a
-    reproducibility requirement, not only a memory policy, so a run that
-    sets the variable higher is told which numbers it cannot compare.
+    The SCF eigen-decomposition is threaded, and its output can depend on
+    the thread count in two ways. Column signs are now canonicalized
+    (``core.gauge``) in the NEVPT2, kernel, Hessian and X2C theta paths,
+    which removed the measured sign-gauge dependence (H2O/6-31G CAS(2,2)
+    at one fixed theta: 4.6e-2 Ha before, 8.5e-14 Ha after). An exactly
+    degenerate subspace can still come back in a different orthonormal
+    basis: measured at one fixed theta, N2/6-31G differs by 3.5e-2 Ha and
+    HI/def2-SVP by 1.5e-1 Ha between one and four threads, with the SCF
+    energies agreeing to 3e-14. A run that compares numbers across runs
+    should keep one thread.
     """
     import os
     import warnings
@@ -932,11 +950,12 @@ def _warn_if_thread_count_breaks_reproducibility():
     if threads <= 1:
         return
     warnings.warn(
-        f'OMP_NUM_THREADS={threads}: NEVPT2 values are not reproducible '
-        f'with more than one thread on this stack. Measured on H2O/6-31G '
-        f'CAS(2,2): two identical runs gave e2 = -0.12328 and -0.12830, '
-        f'while OMP_NUM_THREADS=1 was bit-identical five times. Set it to 1 '
-        f'for any number that will be compared or quoted.',
+        f'OMP_NUM_THREADS={threads}: a fixed-theta value can depend on the '
+        f'thread count. Column signs are canonicalized, but an exactly '
+        f'degenerate subspace may return a different orthonormal basis '
+        f'(measured at one fixed theta: N2/6-31G 3.5e-2 Ha, HI/def2-SVP '
+        f'1.5e-1 Ha between one and four threads). Set it to 1 for any '
+        f'number that will be compared or quoted.',
         RuntimeWarning, stacklevel=3)
 
 

@@ -128,6 +128,7 @@ from pyscf import df
 from pyscf.x2c import sfx2c1e
 from pyscf.x2c.sfx2c1e_grad import hcore_grad_generator
 
+from .gauge import canonical_mo_phases_np
 from .orblib import orbital_pairs
 from .ri import (MetricEig, inv_sqrt_metric_jvp, make_auxmol, metric_eig,
                  ri_metric_deriv, ri_three_center_deriv)
@@ -703,7 +704,18 @@ def _mo_integrals(c, h, factors, ncore, nact):
 
 def _state_data(theta, c_ref, h, factors, ncore, nact, nele, pairs,
                 nroots, weights, target, e_nuc=0.0):
-    """All state-resolved quantities at one orbital parameter point."""
+    """All state-resolved quantities at one orbital parameter point.
+
+    ``theta`` is measured from ``c_ref``, so the reference passed here
+    must already be in a fixed chart.  :func:`df_x2c_casscf` puts the
+    SCF columns into the deterministic phase convention of
+    ``core.gauge``; callers evaluating a displaced geometry must align
+    their reference onto that same matrix (:func:`_align_orbitals`) and
+    must not canonicalize the aligned columns a second time -- the
+    displaced SCF has its own canonical signs, and re-applying the
+    convention after the alignment would rotate the chart away from the
+    one ``theta`` was optimized in.
+    """
     from .rotation import block_rotation
     nmo = h.shape[0]
     c = c_ref @ block_rotation(np.asarray(theta), nmo, pairs)
@@ -940,7 +952,10 @@ def df_x2c_casscf(mol, ncore, nact, nele, auxmol=None, auxbasis=None,
     s = mol.intor('int1e_ovlp')
     if rhf is None:
         rhf = df_x2c_rhf(mol, factors=factors)
-    c_ref = rhf.mo_coeff
+    # Stored in the result and used as the chart of `theta`; keep it in
+    # the same convention `_state_data` applies, so `result.c_ref` really
+    # is the reference the parameters are measured from.
+    c_ref = canonical_mo_phases_np(rhf.mo_coeff)
     nmo = h.shape[0]
     pairs = orbital_pairs(ncore, nact, nmo)
     if weights is None:

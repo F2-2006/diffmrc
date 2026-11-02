@@ -295,3 +295,65 @@ def test_hvp_matches_the_dense_assembly_and_is_symmetric():
     hv = hvp.hvp(v)
     assert abs(float(u @ hv) - float(v @ hu)) < 1e-5 * max(
         1.0, float(np.abs(u @ hv)))
+
+
+class _FixedField:
+    """A mean field that returns one fixed coefficient matrix."""
+
+    def __init__(self, C):
+        self.mo_coeff = jnp.asarray(C)
+
+    def kernel(self):
+        return None
+
+
+def test_the_theta_chart_is_invariant_to_reference_column_signs():
+    """A frozen theta must describe the same physical rotation whatever
+    sign the eigensolver returned for the reference columns.  The joint
+    and the theta-only factories both canonicalize the columns before
+    the rotation; without it the two flipped references give different
+    energies and gradients at the same theta."""
+    pytest.importorskip('pyscfad')
+    from pyscfad import gto
+
+    from diffmrc.core.hessian import (make_joint_energy_fn,
+                                      make_theta_energy_fn)
+    from diffmrc.core.orblib import orbital_pairs
+
+    mol = gto.Mole()
+    mol.atom = 'O 0 0 0; H 0 0.757 0.587; H 0 -0.757 0.587'
+    mol.basis = '6-31g'
+    mol.verbose = 0
+    mol.build()
+    nmo = mol.nao_nr()
+    ncore, nact, nele = 4, 2, 2
+    pairs = orbital_pairs(ncore, nact, nmo)
+    npar = len(pairs)
+    rng = np.random.default_rng(31)
+    C, _ = np.linalg.qr(rng.normal(size=(nmo, nmo)))
+    C_flip = C.copy()
+    C_flip[:, ::3] *= -1.0
+    theta = jnp.asarray(0.01 * np.arange(npar))
+
+    def theta_fn(Cx):
+        return make_theta_energy_fn(
+            mol, ncore, nact, nele, nmo, pairs, None,
+            scf=lambda m: _FixedField(Cx))
+
+    a = theta_fn(C)
+    b = theta_fn(C_flip)
+    assert float(a(theta)) == pytest.approx(float(b(theta)), abs=1e-12)
+    assert np.abs(np.asarray(jax.grad(a)(theta))
+                  - np.asarray(jax.grad(b)(theta))).max() < 1e-12
+
+    def joint_fn(Cx):
+        return make_joint_energy_fn(ncore, nact, nele, nmo, pairs, None,
+                                    scf=lambda m: _FixedField(Cx))
+
+    ja = joint_fn(C)
+    jb = joint_fn(C_flip)
+    assert float(ja(mol, theta)) == pytest.approx(
+        float(jb(mol, theta)), abs=1e-12)
+    ga = np.asarray(jax.grad(lambda t: ja(mol, t))(theta))
+    gb = np.asarray(jax.grad(lambda t: jb(mol, t))(theta))
+    assert np.abs(ga - gb).max() < 1e-12

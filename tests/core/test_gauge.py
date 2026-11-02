@@ -6,7 +6,8 @@ jax = pytest.importorskip("jax")
 jax.config.update("jax_enable_x64", True)
 import jax.numpy as jnp  # noqa: E402
 
-from diffmrc.core.gauge import canonical_mo_phases  # noqa: E402
+from diffmrc.core.gauge import (canonical_mo_phases,  # noqa: E402
+                                canonical_mo_phases_np)
 
 
 def _random_coefficients(seed=3, nao=12, nmo=8):
@@ -56,3 +57,24 @@ def test_a_tie_inside_the_band_does_not_flip_the_sign():
 def test_it_rejects_a_one_dimensional_array():
     with pytest.raises(ValueError):
         canonical_mo_phases(jnp.zeros(5))
+
+
+def test_the_numpy_sibling_matches_the_jax_function():
+    """The X2C layer uses the NumPy rule; the two must not drift apart."""
+    C = _random_coefficients(seed=5)
+    flips = np.ones(C.shape[1])
+    flips[1::3] = -1.0
+    flipped = C * flips
+    a = np.asarray(canonical_mo_phases(jnp.asarray(flipped)))
+    b = canonical_mo_phases_np(flipped)
+    assert np.array_equal(a, b)
+
+
+def test_the_numpy_sibling_handles_an_empty_column_set():
+    C = canonical_mo_phases_np(np.zeros((4, 0)))
+    assert C.shape == (4, 0)
+
+
+def test_the_numpy_sibling_rejects_a_one_dimensional_array():
+    with pytest.raises(ValueError):
+        canonical_mo_phases_np(np.zeros(5))

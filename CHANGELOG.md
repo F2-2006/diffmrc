@@ -256,10 +256,15 @@
   matrices differed by column signs only (off-diagonal overlap 1.5e-12).
   The NEVPT2 driver now canonicalizes the MO phases (`core.gauge`);
   optimized values are unchanged and fixed-`theta` values are
-  thread-independent. The kernel, Hessian and X2C `theta` paths still
-  consume the SCF columns without this canonicalization and remain
-  exposed to the same gauge; `OMP_NUM_THREADS=1` remains the safe
-  setting for those paths.
+  thread-independent. The same convention is applied at the kernel,
+  Hessian, X2C and frozen-gradient rotation bases; the five runtime
+  anchors are bit-identical before and after. A different freedom
+  remains: an exactly degenerate subspace can return a different
+  orthonormal basis (measured at one fixed `theta`, N2/6-31G differs by
+  3.5e-2 Ha and HI/def2-SVP by 1.5e-1 Ha between one and four threads,
+  with the SCF energies agreeing to 3e-14). A column-sign rule does not
+  fix that, so `OMP_NUM_THREADS=1` remains the safe setting for numbers
+  compared across runs.
 - The matrix-free route needs the LSMR iteration cap to reach convergence on
   the tested stationary points; the unrolled route with three Newton steps
   exceeds 20 GiB on H2O/6-31G CAS(2,2).

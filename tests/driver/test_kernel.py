@@ -152,6 +152,33 @@ def test_energy_function_feeds_the_kernel_the_transformed_integrals():
     assert float(E_theta(np.zeros(npar))) == pytest.approx(direct, abs=1e-12)
 
 
+def test_the_rotation_chart_is_invariant_to_reference_column_signs():
+    """theta is measured from the reference columns, so their arbitrary
+    eigenvector sign must not change the energy surface.  Without the
+    phase convention in `_mo_block` this fails: the same numeric theta
+    describes a different physical rotation after a column flip."""
+    pytest.importorskip('pyscfad')
+    import jax
+    import jax.numpy as jnp
+
+    from diffmrc.driver.kernel import energy_function
+
+    mol = _FakeMol()
+    space = ActiveSpace(core=[], active=[0, 1], virtual=[2], n_elec=2)
+    C0 = np.eye(3)
+    C_flip = C0.copy()
+    C_flip[:, 1] *= -1.0
+    E_plain, npar = energy_function(mol, C0, space)
+    E_flip, npar_flip = energy_function(mol, C_flip, space)
+    assert npar == npar_flip
+    theta = jnp.asarray(0.3 * np.arange(npar))
+    assert float(E_plain(theta)) == pytest.approx(
+        float(E_flip(theta)), abs=1e-12)
+    g_plain = np.asarray(jax.grad(E_plain)(theta))
+    g_flip = np.asarray(jax.grad(E_flip)(theta))
+    assert np.abs(g_plain - g_flip).max() < 1e-12
+
+
 def test_the_search_reaches_a_lower_energy_than_the_reference():
     """The variational bound: the optimized point cannot sit above the
     CASCI it started from."""
@@ -379,17 +406,18 @@ def test_the_core_hamiltonian_leaves_a_molecule_without_ecp_alone():
 
 
 def test_a_thread_count_above_one_is_flagged(monkeypatch):
-    """NEVPT2 values are not reproducible above one thread.
+    """A fixed-theta value can depend on the thread count.
 
-    Measured on H2O/6-31G CAS(2,2): two identical runs at
-    OMP_NUM_THREADS > 1 gave e2 values 5e-3 Ha apart.
+    Column signs are canonicalized, but an exactly degenerate subspace
+    can return a different orthonormal basis (N2 and HI at one fixed
+    theta); the warning names the measured sizes.
     """
     from diffmrc.driver.kernel import (
         _warn_if_thread_count_breaks_reproducibility,
     )
 
     monkeypatch.setenv('OMP_NUM_THREADS', '4')
-    with pytest.warns(RuntimeWarning, match='not reproducible'):
+    with pytest.warns(RuntimeWarning, match='fixed-theta'):
         _warn_if_thread_count_breaks_reproducibility()
 
 

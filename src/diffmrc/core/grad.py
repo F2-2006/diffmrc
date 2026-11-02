@@ -56,17 +56,25 @@ USAGE
 
     from grad import (make_energy_fn, make_grad_fn, solve_theta_star,
                       nuclear_gradient)
+    from gauge import canonical_mo_phases
 
+    C_rhf = canonical_mo_phases(C_rhf)   # the chart both sides use
     E_cas = make_energy_fn(ncore, nact, nele)
     th_star, gnorm = solve_theta_star(mol, C_rhf, E_theta, npar, optimize_theta)
     g = nuclear_gradient(mol, make_grad_fn(nmo, pairs, th_star, E_cas, pscf))
     # g has shape (natm, 3), in Eh/bohr
+
+``make_grad_fn`` canonicalizes the displaced RHF columns itself.  The
+reference used to build ``E_theta`` and to obtain ``th_star`` must be
+the same canonical matrix; otherwise the frozen parameters and the
+displaced reference live in two charts.
 """
 import numpy as np
 import jax
 from jax import numpy as jnp
 
 from .adint import int2e_s1
+from .gauge import canonical_mo_phases
 from .rotation import block_rotation
 from .nevpt2.m4 import cas_ci_vector
 
@@ -119,7 +127,10 @@ def make_grad_fn(nmo, pairs, th_star, E_cas_of, pscf):
 
     def E_geo(m_):
         mf_ = pscf.RHF(m_); mf_.kernel()
-        C_ = mf_.mo_coeff                          # geometry-dependent
+        # theta is measured from the RHF columns; fix their phase before
+        # the rotation so a frozen theta is the same physical rotation
+        # at every displaced geometry.
+        C_ = canonical_mo_phases(mf_.mo_coeff)     # geometry-dependent
         h_ = m_.intor("int1e_kin") + m_.intor("int1e_nuc")
         e_ = int2e_s1(m_)
         return E_cas_of(C_ @ block_rotation(TH_SG, nmo, pairs), h_, e_,
