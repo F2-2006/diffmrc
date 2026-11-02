@@ -34,7 +34,7 @@ The two-electron array follows ``mol.intor('int2e_spinor')`` and the
 density-fitting factor convention of :mod:`diffmrc.core.x2c_df`:
 
     J_ij = sum_kl E[i,j,k,l] D[l,k],
-    K_ij = sum_kl E[i,k,j,l] D[k,l].
+    K_ij = sum_kl E[i,k,l,j] D[k,l].
 
 The second-quantized Hamiltonian whose expectation reproduces the pyscf
 GHF energy with this array is
@@ -42,13 +42,24 @@ GHF energy with this array is
     H = sum_pq h_pq a^dag_p a_q
         + 1/2 sum_pqrs E[p,q,r,s] a^dag_p a^dag_r a_s a_q.
 
-That ordering was pinned numerically on arrays that satisfy the
-real-orbital relation ``E[i,j,i,j] = E[i,j,j,i]`` for every determinant
-tested, where the brute-force action of this operator reproduces
-``1/2 tr(D J) - 1/2 tr(D K)`` of pyscf to machine precision (H2O/6-31G
-spinor basis, same-spin and mixed determinants).  The physical pyscf
-spinor array does not satisfy that relation; see FROZEN-CORE CONVENTION
-below.
+This is the exact second-quantized Coulomb operator in the chemist
+convention ``E[p,q,r,s] = (pq|rs)`` and it needs no adjustment for a
+complex ERI: its determinant expectation is
+``1/2 sum_ij (E[i,i,j,j] - E[i,j,j,i])``, which is what
+``1/2 tr(D J) - 1/2 tr(D K)`` evaluates to with the ``K`` above.  The
+ordering is pinned in the tests on a random array that carries only the
+two identities a complex chemist integral obeys, and against
+``pyscf.x2c.x2c.get_jk`` (the exact, non-density-fitted J/K) on the
+physical H2O/6-31G and OH/6-31G spinor bases for every determinant size
+tested, where the single-determinant energy agrees to 1e-12 Eh.
+
+The two orderings ``E[i,j,i,j]`` and ``E[i,j,j,i]`` coincide only on the
+real-orbital array, where ``(ij|ij) = (ij|ji)``.  A complex spinor array
+does not satisfy ``E[i,j,i,j] = E[i,j,j,i]`` (H2O/6-31G: 4.7 maximum
+violation) and the two orderings then differ.  Comparing a determinant
+energy built from ``E[i,j,i,j]`` against pyscf is therefore the error
+that produced the earlier "frozen-core convention" defect report; see
+the note at the end of SCOPE AND LIMITS.
 
 With a frozen core the active-space Hamiltonian is
 
@@ -62,7 +73,9 @@ With a frozen core the active-space Hamiltonian is
 where i, j run over the core spinors and p, q, r, s over the active
 spinors.  These are the only formulas in the module that are not a direct
 transcription of the operator; they are pinned in the tests against a
-full-space construction that keeps the core in the determinant list.
+full-space construction that keeps the core in the determinant list, and
+they are invariant under a unitary rotation of the core spinors, which
+the full-space projection satisfies identically.
 
 PYSCF SPINOR ERI CONVENTION
 
@@ -94,18 +107,21 @@ conjugate of ``T``; it is a convention error, not a failed transform.
 
 SCOPE AND LIMITS
 
-* FROZEN-CORE CONVENTION (OPEN).  The determinant-energy identity that
-  pins the two-body ordering above holds for the array used in
-  ``tests/core/test_spinor_ci.py::test_single_determinant_matches_ghf``
-  because that fixture imposes the real-orbital relation
-  ``E[i,j,i,j] = E[i,j,j,i]``.  The physical pyscf spinor array does not
-  obey it, and on H2O/6-31G the frozen-core CI built here then differs
-  from the projection of the full determinant-space operator by 0.66 in
-  matrix elements and 0.56 Eh in the lowest eigenvalue.  The Kramers
-  basis construction of :mod:`diffmrc.core.kramers` is independent of
-  this issue and its symmetry checks remain valid, but the frozen-core
-  *energies* of the two-component path must not be used until the
-  reduction is re-derived for the physical array.
+* FROZEN-CORE CONVENTION (CLOSED).  An earlier revision of this module
+  folded the core with an exchange contraction averaged over the two
+  index orderings ``E[p,i,i,q]`` and ``E[p,i,q,i]``.  That average is
+  correct for a real ERI and wrong for a complex one: on H2O/6-31G it
+  changed the reduced matrix by 0.66 in matrix elements and the lowest
+  eigenvalue by 0.56 Eh against the projection of the full
+  determinant-space operator, and it broke the invariance of the reduced
+  matrix under a unitary rotation of the core spinors.  The current
+  ``core_fock`` uses the physical exchange ``E[p,i,i,q]``, which
+  reproduces the full-space projection to 1e-13 and is core-rotation
+  invariant.  The root cause of the defect report was not the
+  ``_build_matrix`` ordering -- that ordering is the exact Coulomb
+  operator and always was -- but a determinant-energy check written
+  against ``E[i,j,i,j]``, which is not the pyscf exchange ordering for a
+  complex array.
 * The CI is a value layer plus an eigenvalue-only JAX path.  It is not a
   full Kramers-restricted CASSCF: there is no complex unitary orbital
   rotation, no orbital Z-vector, and no state-specific response.
@@ -185,9 +201,11 @@ def core_fock(h1, eri, ncore_so):
     Returns
     -------
     f : ndarray, (nact, nact), complex
-        Active-space Fock matrix.
+        Active-space Fock matrix,
+        ``h_pq + sum_i (E[p,q,i,i] - E[p,i,i,q])``.
     ecore : float
-        Core energy (real part of the core determinant energy).
+        Core energy (real part of the core determinant energy),
+        ``sum_i h_ii + 1/2 sum_ij (E[i,i,j,j] - E[i,j,j,i])``.
     """
     h1 = np.asarray(h1)
     eri = np.asarray(eri)
@@ -201,12 +219,11 @@ def core_fock(h1, eri, ncore_so):
     f = h_aa.copy()
     ecore = 0.0 + 0.0j
     for i in range(ncore_so):
-        # The exchange contraction has two orderings in the two-electron
-        # operator; for a complex ERI they differ and the one-body
-        # operator that reproduces the single-excitation matrix element
-        # carries their average.
-        f += (eri[act, act, i, i]
-              - 0.5 * (eri[act, i, i, act] + eri[act, i, act, i]))
+        # Coulomb (pq|ii) minus exchange (pi|iq).  The exchange term is a
+        # single index ordering, not a symmetrised average: the average
+        # coincides with it only for a real ERI and breaks both the
+        # full-space projection and core-rotation invariance otherwise.
+        f += eri[act, act, i, i] - eri[act, i, i, act]
         ecore += h1[i, i]
         for j in range(ncore_so):
             ecore += 0.5 * (eri[i, i, j, j] - eri[i, j, j, i])
@@ -493,8 +510,7 @@ def spinor_ci_matrix_jax(h1, eri, ncore_so, nact, nele_act, structure=None):
     f = h_aa
     ecore = jnp.array(0.0, dtype=h1.dtype)
     for i in range(ncore_so):
-        f = (f + eri[act, act, i, i]
-             - 0.5 * (eri[act, i, i, act] + eri[act, i, act, i]))
+        f = f + eri[act, act, i, i] - eri[act, i, i, act]
         ecore = ecore + h1[i, i]
         for j in range(ncore_so):
             ecore = ecore + 0.5 * (eri[i, i, j, j] - eri[i, j, j, i])

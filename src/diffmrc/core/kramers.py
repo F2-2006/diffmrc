@@ -60,7 +60,7 @@ The two-electron array is the pyscf complex-spinor array in the ordering of
 :mod:`diffmrc.core.spinor_ci`::
 
     J_ij = sum_kl E[i,j,k,l] D[l,k],
-    K_ij = sum_kl E[i,k,j,l] D[k,l].
+    K_ij = sum_kl E[i,k,l,j] D[k,l].
 
 The MO ERI is the four-index transform with the bra index conjugated::
 
@@ -443,13 +443,13 @@ def x2c_spinor_ci(mol, ncore_pairs, nact_pairs, auxbasis=None, adapt=True,
 
     Notes
     -----
-    The validated outputs of this entry are the basis and symmetry
-    checks.  The frozen-core *energies* inherit the open convention
-    defect of :mod:`diffmrc.core.spinor_ci`: its reduction is pinned on
-    arrays that satisfy ``E[i,j,i,j] = E[i,j,j,i]``, which the physical
-    pyscf spinor array does not.  Do not report these energies as
-    frozen-core X2C CI energies until that reduction is re-derived; the
-    T-closure and Kramers checks do not depend on it.
+    The frozen-core reduction of :mod:`diffmrc.core.spinor_ci` reproduces
+    the projection of the full determinant-space operator on the physical
+    complex spinor array to 1e-13 and is invariant under a unitary
+    rotation of the core spinors, so ``energies`` are usable frozen-core
+    X2C CI energies.  What is *not* available for these Hamiltonians is an
+    independent two-component FCI reference; see the scope note of
+    :mod:`diffmrc.core.kramers`.
     """
     if hf is None:
         hf = x2c_df.df_x2c_hf(mol, auxbasis=auxbasis)

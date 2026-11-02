@@ -10,15 +10,15 @@
   Kramers-paired; on OH/6-31G the unadapted core breaks time-reversal
   invariance to 5.06 and opens a pseudo Kramers gap of 0.0495 Eh, while the
   adapted basis gives `T H* T† - H` of 6.1e-13 (H2O) and 3.7e-13 (OH) with
-  a Kramers gap of 9.9e-14. The module also documents an open defect it
-  exposed: `spinor_ci`'s two-body operator ordering assumes the real-orbital
-  relation `E[i,j,i,j] = E[i,j,j,i]`, which physical complex ERI does not
-  satisfy, so its determinant energies differ from the pyscf GHF formula by
-  up to 0.59 Eh and the frozen-core reduction is not invariant under core
-  rotations. Until that ordering and the reduction are fixed, `x2c_spinor_ci`
-  is a symmetry-layer diagnostic entry and its frozen-core energies must not
-  be quoted. The non-relativistic FCI comparison (4.3e-11/4.9e-11) validates
-  determinant algebra and the ERI convention, not relativistic FCI.
+  a Kramers gap of 9.9e-14. `_build_matrix` is the physical Coulomb operator;
+  the frozen-core reduction was not: its exchange contraction averaged the
+  two index orders, which is only valid for real orbitals. Using the single
+  physical order `E[p,i,i,q]` makes the reduced matrix agree with the
+  full-space projection to 2.0e-13 and restores core-rotation invariance
+  from 0.17 Eh to 8.5e-14; the frozen-core energies become -85.222187844
+  (H2O/6-31G) and -77.679324114 Eh (OH/6-31G). The non-relativistic FCI
+  comparison (4.3e-11/4.9e-11) validates determinant algebra and the ERI
+  convention, not relativistic FCI.
 - `driver.scf_response`: canonical closed-shell RHF reference response for
   the excited-state property chain. PySCF's CPHF returns the occupied
   response in the `-S1/2` gauge, which keeps the density derivative exact
