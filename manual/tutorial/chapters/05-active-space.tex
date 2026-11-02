@@ -169,6 +169,20 @@ $8.8\times10^{-14}$ and the space passes the robust level.  The retry
 is automatic only for a space the fallback proposed; an active space
 given by hand is used as given.
 
+A manual list bypasses the degenerate-partner rule, and a window that
+splits an exactly degenerate shell is not caught by the curvature
+alone.  The hydrogen halides with a frontier pair are the measured
+case: the highest core orbital and the lowest active orbital are the
+two components of a degenerate $\pi$ shell (core--active gap of order
+$10^{-15}$~Ha), the energy is invariant to rotation inside that pair,
+and the orbital Hessian acquires a zero direction whose sign is set by
+rounding.  In the tested HCl/def2-SVP case one route reported zero
+negative eigenvalues and the single-stage route two, at the same
+space.  The gradient guard is then the only criterion that separates
+such a window from a certified minimum.  Include both components of a
+degenerate shell when a window is specified by hand; the automatic
+fallback already does.
+
 The curvature route is a separate matter.  At an exactly symmetric
 stationary point --- reached by a manually specified N$_2$/6-31G
 CAS(4,4) and by the automatically selected N quartet CAS(3,3) --- the

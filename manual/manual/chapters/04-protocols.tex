@@ -147,7 +147,11 @@ minimum: on H$_2$O/6-31G it is a saddle with two negative curvature
 directions, and only the full-space refinement reaches the minimum.
 H$_2$O and N$_2$ therefore keep the single-stage route and are
 bit-identical.  The gate is an engineering rule supported by three
-systems, not a theorem.
+systems, not a theorem.  The route is a convergence aid, not a memory
+measure: measured on HBr/def2-SVP with 376 rotation parameters, the
+two-stage graph exceeded a 20~GB cap, while HI with 262 parameters
+completed without reaching it.  A two-stage run at that size needs a
+larger memory budget or the single-stage route.
 
 \section{The e2\_scale switch}
 
