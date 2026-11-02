@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.3.5 (2026-11-03)
 
 ### Added
 
@@ -30,6 +30,35 @@
   and 2.4e-10 at theta=0 (4.1e-7 and 8.5e-8 at theta*). Open-shell
   references are refused: PySCF 2.13 has no ROHF CPHF, and a UHF
   substitute breaks symmetry.
+- `analysis.ci.spin_free_*`: Pittner's spin-free orbital entropy, pair
+  entropy and mutual information (arXiv:2502.04800): the three-weight and
+  nine-pattern forms, built from the same occupation triple and requiring
+  no additional density matrix. For a spin-adapted state the
+  manifold-averaged reading satisfies
+  `S_manifold = S_spin_free + (N - 2 p2) ln 2`; the identity is checked
+  numerically and on N/6-31G, CH2/6-31G and CeO. The two quantities
+  measure different objects: the spin-free form removes the spin
+  degeneracy of singly occupied orbitals, the manifold average keeps it.
+
+### Changed
+
+- `driver`: CO/6-31G's final [6,7] space leaves the partner pi* in the
+  virtual block (active-virtual gap 4.2e-16 Ha); the boundary check now
+  flags it and a dedicated test records the second measured boundary case
+  next to HF's core-active one. CO is already refused by curvature.
+
+### Fixed
+
+- `core.spinor_ci`: the frozen-core exchange contraction now keeps the
+  single physical order `E[p,i,i,q]`. The previous average of
+  `E[p,i,i,q]` and `E[p,i,q,i]` is valid only for real orbitals; the
+  reduced matrix now agrees with the full-space projection to 2.0e-13 and
+  core-rotation invariance returns from 0.17-0.20 Eh to 1e-13. Frozen-core
+  energies are -85.222187844 (H2O/6-31G) and -77.679324114 Eh (OH/6-31G).
+  The test fixture imposes only the two physical ERI identities.
+
+Full regression at this tag: 1,017 items collected, 1,012 passed,
+5 skipped, 0 failed (core 335, driver 260, analysis/policy/report/cli 417).
 
 ## 0.3.4 (2026-11-02)
 
@@ -51,15 +80,6 @@
   CeO's two solutions,
   0.112 Eh apart with identical occupations, become bit-repeatable
   across runs. The flag is set per call; existing callers are unchanged.
-- `analysis.ci.spin_free_*`: Pittner's spin-free orbital entropy, pair
-  entropy and mutual information (arXiv:2502.04800): the three-weight and
-  nine-pattern forms, built from the same occupation triple and requiring
-  no additional density matrix. For a spin-adapted state the
-  manifold-averaged reading satisfies
-  `S_manifold = S_spin_free + (N - 2 p2) ln 2`; the identity is checked
-  numerically and on N/6-31G, CH2/6-31G and CeO. The two quantities
-  measure different objects: the spin-free form removes the spin
-  degeneracy of singly occupied orbitals, the manifold average keeps it.
 
 ### Changed
 
