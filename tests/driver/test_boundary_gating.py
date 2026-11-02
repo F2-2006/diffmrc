@@ -153,6 +153,23 @@ def test_threshold_is_1e_minus_8_hartree():
     assert BOUNDARY_DEGENERACY_TOL == 1e-8
 
 
+def test_co_final_active_virtual_gap_is_exact_degeneracy():
+    """The measured CO/6-31G final [6, 7]: gap 4.2e-16 Ha on the virtual side.
+
+    The missing pi* partner is outside the space, so this is a true
+    positive on the active-virtual boundary. CO is already refused by
+    curvature in the same run.
+    """
+    energies = np.array([-4.0, -3.0, -2.0, -1.0, -0.7, -0.5,
+                         0.05, 0.1, 0.1 + 4.2e-16, 0.6])
+    space = _space([0, 1, 2, 3, 4, 5], [6, 7], [8, 9])
+
+    report = _boundary_degeneracy(space, energies)
+
+    assert report['split'] is True
+    assert 'active-virtual gap between orbitals 7 and 8' in report['evidence'][0]
+
+
 def test_a_wide_gap_produces_no_boundary_evidence():
     energies = np.array([-2.0, -1.0, -0.5, 0.1, 0.2, 0.5, 0.6])
     space = _space([0, 1, 2], [3, 4], [5, 6])

@@ -55,8 +55,10 @@ FLAT_DIRECTION_TOL = 1e-6
 # N2/6-31G has a core-active gap of 8.1e-3 Ha and must not be flagged.
 # HF/6-31G's final [4,5] space is exactly degenerate (2.8e-15 Ha) and is
 # flagged; that is the same split pi shell as HCl and HI, and HF is
-# already refused by its gradient. The check is report-only until it has
-# been validated as a self-check on its own.
+# already refused by its gradient. CO/6-31G's final [6,7] leaves the
+# partner pi* in the virtual block (active-virtual gap 4e-16 Ha) and is
+# flagged on that side; it is already refused by curvature. The check is
+# report-only until it has been validated as a self-check on its own.
 BOUNDARY_DEGENERACY_TOL = 1e-8
 
 
