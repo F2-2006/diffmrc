@@ -67,6 +67,7 @@ from .occupation import select_valence, split_by_occupation
 __all__ = ['SHELL_RULES', 'Candidate', 'SelectionPlan',
            'candidate_from_elements', 'plan_from_elements',
            'dominant_shell', 'molecular_end_candidate',
+           'candidate_from_occupations',
            'DipoleChoice', 'dipole_rule', 'NoonDecision', 'noon_selection']
 
 # The shells the molecular-end rule inspects, in the order they are
@@ -652,3 +653,98 @@ def noon_selection(internal, external, threshold=0.05):
         f'closest call: {closest[0]} with margin {closest[1]:+.4f}',
     ]
     return NoonDecision(classification, margins, closest, evidence)
+
+
+def candidate_from_occupations(occ, mo_energy=None, frac_tol=0.02,
+                               deg_tol=1e-4):
+    """A starting space from the reference occupations alone.
+
+    WHY THIS EXISTS
+
+    The element rules cover the lanthanide families they were written
+    for and refuse everything else; a benchmark of six systems found the
+    release selecting only one of them (CeO), because the other five are
+    ordinary main-group molecules with no element plan. Refusing is the
+    right behaviour for a rule that was not written for the system, but
+    the occupation criterion the lanthanide path already uses does apply
+    to a main-group reference, and it is the smallest defensible
+    fallback.
+
+    The rule is deliberately minimal. Every orbital whose reference
+    occupation lies inside ``(frac_tol, 2 - frac_tol)`` enters, because a
+    fractional occupation is the one direct signal of static correlation
+    the reference carries. A closed-shell reference has no such orbital;
+    it contributes the frontier pair (highest occupied and lowest
+    virtual), which is the pair an excitation calculation needs. A
+    degenerate partner of any selected orbital enters with it: taking one
+    component of a degenerate pair describes a symmetry-broken state, and
+    the resulting CASSCF is not comparable with a symmetry-adapted one.
+
+    This is a starting space, not a certified one. It says only what the
+    occupations can say; the robust level's entanglement verification is
+    what decides whether the space holds.
+
+    Parameters
+    ----------
+    occ : array_like
+        Reference occupation numbers.
+    mo_energy : array_like, optional
+        Reference orbital energies. Without them no degenerate partner
+        is added, because degeneracy cannot be read off occupations.
+    frac_tol : float
+        Occupation below which an orbital counts as empty and above
+        ``2 - frac_tol`` as doubly occupied.
+    deg_tol : float
+        Energy difference, in Hartree, below which two orbitals count as
+        degenerate.
+
+    Returns
+    -------
+    Candidate or None
+        None when the reference has neither a fractional occupation nor
+        a frontier pair (a one-orbital system, for instance).
+    """
+    occ = np.asarray(occ, dtype=float)
+    if occ.ndim != 1:
+        raise ValueError(
+            f'occ must be one-dimensional, got shape {occ.shape}')
+    n = occ.size
+    active = [i for i in range(n) if frac_tol < occ[i] < 2.0 - frac_tol]
+
+    evidence = []
+    if active:
+        evidence.append(
+            f'{len(active)} orbitals carry a fractional occupation inside '
+            f'({frac_tol:g}, {2 - frac_tol:g})')
+    else:
+        occupied = [i for i in range(n) if occ[i] > 0.5]
+        virtual = [i for i in range(n) if occ[i] <= 0.5]
+        if not occupied or not virtual:
+            return None
+        active = [occupied[-1], virtual[0]]
+        evidence.append(
+            'closed-shell reference: no fractional occupation, so the '
+            'frontier pair (highest occupied and lowest virtual) is the '
+            'starting space')
+
+    if mo_energy is not None:
+        e = np.asarray(mo_energy, dtype=float).reshape(-1)
+        if e.size != n:
+            raise ValueError(
+                f'mo_energy has {e.size} entries for {n} orbitals')
+        base = list(active)
+        added = []
+        for i in base:
+            for j in range(n):
+                if j not in active and abs(e[j] - e[i]) <= deg_tol:
+                    active.append(j)
+                    added.append(j)
+        if added:
+            evidence.append(
+                f'{len(added)} degenerate partner(s) added at '
+                f'deg_tol = {deg_tol:g} Ha')
+
+    evidence.append('no element rule covers this composition; the '
+                    'occupation criterion alone proposed this space')
+    return Candidate(active=sorted({int(i) for i in active}),
+                     evidence=evidence)

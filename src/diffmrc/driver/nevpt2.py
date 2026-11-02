@@ -46,6 +46,7 @@ import numpy as np
 # the same mistake would hide any future kernel use from a static audit
 # (tests/core/test_kernel_binding.py enforces the rule). Heavy optional
 # dependencies keep the deferred style -- see ``run.py`` for why.
+from ..core.adint import int2e_s1
 from ..core.eigh import eigh_cluster_ift, eigh_safe
 
 __all__ = ['make_nevpt2_joint_fn', 'make_nevpt2_theta_fn',
@@ -399,7 +400,7 @@ def make_nevpt2_joint_fn(ncore, nact, nele, nmo, pairs, scf_builder,
         # get_hcore carries the ECP and the X2C rotation; the raw
         # int1e_kin + int1e_nuc sum would silently drop both.
         return _components_from(C, mf_.get_hcore(),
-                                m_.intor('int2e', aosym='s1'),
+                                int2e_s1(m_),
                                 m_.energy_nuc(), th_, want_e2=want_e2, **kw)
 
     def E_joint(m_, th_):
@@ -623,7 +624,7 @@ def make_nevpt2_sa_fn(ncore, nact, nele, nmo, pairs, scf_builder, nroots,
         # int1e_kin + int1e_nuc sum would silently drop both.
         C0_ = jnp.asarray(mf_.mo_coeff)
         h_ = mf_.get_hcore()
-        e_ = m_.intor('int2e', aosym='s1')
+        e_ = int2e_s1(m_)
         enuc = m_.energy_nuc()
 
         return _sa_components_from(
@@ -1118,7 +1119,13 @@ def sa_mcpdft_table(mol, scf_builder, *, ncore, nact, nele, nroots,
     cis = np.asarray(out['cis'])
     Cact = jnp.asarray(C_can[:, ncore:ncore + nact])
     Ccore = jnp.asarray(C_can[:, :ncore])
-    h1e = jnp.asarray(mol.intor('int1e_kin') + mol.intor('int1e_nuc'))
+    # The ECP scalar term belongs in the core Hamiltonian; the raw
+    # kinetic-plus-nuclear sum drops it (the same defect the kernel path
+    # had; see driver.kernel._core_hamiltonian).
+    _h = mol.intor('int1e_kin') + mol.intor('int1e_nuc')
+    if hasattr(mol, 'has_ecp') and mol.has_ecp():
+        _h = _h + mol.intor('ECPscalar')
+    h1e = jnp.asarray(_h)
     eri = jnp.asarray(mol.intor('int2e', aosym='s1'))
     enuc = float(mol.energy_nuc())
     ao = jnp.asarray(grid.ao)

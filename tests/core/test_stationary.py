@@ -399,3 +399,23 @@ def test_selection_integrates_with_the_refiner():
     assert result.chosen.energy == pytest.approx(-0.5, abs=1e-8)
     assert result.status == 'minimum'
     assert result.energy_spread == pytest.approx(0.5, rel=1e-7)
+
+
+def test_curvature_from_gradient_recovers_a_quadratic():
+    """The symmetric difference of an analytic gradient is the Hessian."""
+    from diffmrc.core.stationary import curvature_from_gradient
+
+    A = np.array([[2.0, 0.5], [0.5, 3.0]])
+
+    def grad(x):
+        return A @ x
+
+    H = curvature_from_gradient(grad, np.zeros(2), step=1e-5)
+    assert np.allclose(H, A, atol=1e-8)
+
+
+def test_curvature_from_gradient_refuses_above_the_cap():
+    from diffmrc.core.stationary import curvature_from_gradient
+
+    with pytest.raises(ValueError, match='cap'):
+        curvature_from_gradient(lambda x: x, np.zeros(4), max_parameters=3)

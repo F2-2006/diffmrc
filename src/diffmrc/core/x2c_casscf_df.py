@@ -159,6 +159,17 @@ __all__ = [
 #: Default relative cutoff for the auxiliary metric truncation.
 DEFAULT_RCOND = 1e-12
 
+#: Newton polish defaults.  The polish runs after the quasi-Newton stage and
+#: is skipped above ``DEFAULT_POLISH_MAX_PAIRS`` parameters, where the
+#: central-difference Hessian (two gradient evaluations per parameter) would
+#: dominate the cost.
+DEFAULT_POLISH_MAX_ITER = 8
+DEFAULT_POLISH_TOL = 1e-9
+DEFAULT_POLISH_FD_STEP = 1e-5
+DEFAULT_POLISH_MAX_PAIRS = 256
+DEFAULT_POLISH_RCOND = 1e-10
+DEFAULT_POLISH_MAX_STEP = 0.3
+
 
 # ---------------------------------------------------------------------------
 # Scalar X2C one-electron Hamiltonian and its nuclear derivatives
@@ -736,6 +747,105 @@ def _objective(theta, c_ref, h, factors, ncore, nact, nele, pairs,
     return float(data['e_sa']), data['g_sa']
 
 
+def _orbital_hessian(grad_of, theta, step):
+    """Central-difference Jacobian of the analytic orbital gradient.
+
+    The orbital gradient is exact for the sequential Givens parametrization
+    (:func:`orbital_gradient_theta`), so a difference of gradients is a
+    second-order-accurate Hessian at the cost of two gradient evaluations
+    per parameter.
+    """
+    hess = _fd_gradient_matrix(grad_of, theta, step)
+    return 0.5 * (hess + hess.T)
+
+
+def _newton_polish(eval_point, theta0, g_tol, max_iter, fd_step, rcond,
+                   max_step):
+    """Damped Newton refinement of an orbital stationary point.
+
+    The quasi-Newton stage stops on the projected-gradient tolerance of
+    L-BFGS-B, which on the validation systems leaves ``||g||`` at a few
+    1e-6 even when the energy is converged to 1e-10.  That residual is not
+    a floor of the objective: the CI is re-diagonalized at every parameter
+    point, so the energy is a smooth function of ``theta`` whose analytic
+    gradient is exact.  The residual only reflects the first-order
+    optimizer's stopping rule, and one or two Newton steps remove it.
+
+    Each step solves ``H dx = -g`` with the pseudoinverse obtained from the
+    eigendecomposition of ``H``; eigenvalues below ``rcond * max|lambda|``
+    are dropped, which is the projection onto the smooth (resolved)
+    directions and keeps the step finite along flat orbital rotations.  The
+    step norm is capped at ``max_step`` and the step length is halved until
+    both acceptance tests hold:
+
+      * the gradient norm decreases, and
+      * the energy does not increase by more than ``1e-12 * max(1, |E|)``.
+
+    The energy floor is a double-precision tolerance, not a physics
+    threshold: near the solution the quadratic energy decrease
+    (``g^T H^{-1} g / 2``) falls below the resolution of the energy sum,
+    while the gradient decrease remains measurable.
+
+    Returns ``(theta, energy, gradient, history)``.
+    """
+    theta = np.array(theta0, dtype=float)
+    energy, grad = eval_point(theta)
+    gnorm = float(np.linalg.norm(grad))
+    history = []
+    if gnorm <= g_tol:
+        return theta, energy, grad, history
+    e_tol = 1e-12 * max(1.0, abs(energy))
+    hess = _orbital_hessian(lambda x: eval_point(x)[1], theta, fd_step)
+    for it in range(int(max_iter)):
+        w, u = np.linalg.eigh(hess)
+        cut = rcond * max(float(np.abs(w).max()), 1e-30)
+        keep = np.abs(w) > cut
+        if not keep.any():
+            history.append(dict(iteration=it + 1, step=0.0, accepted=False,
+                                gnorm=gnorm, energy=energy,
+                                note='no resolved curvature'))
+            break
+        dx = -u[:, keep] @ ((u[:, keep].T @ grad) / w[keep])
+        dx_norm = float(np.linalg.norm(dx))
+        if dx_norm == 0.0:
+            history.append(dict(iteration=it + 1, step=0.0, accepted=False,
+                                gnorm=gnorm, energy=energy,
+                                note='zero step in the resolved subspace'))
+            break
+        dx *= min(1.0, max_step / dx_norm)
+        trial = 1.0
+        accepted = False
+        for _ in range(40):
+            cand = theta + trial * dx
+            e_new, g_new = eval_point(cand)
+            g_new_norm = float(np.linalg.norm(g_new))
+            if g_new_norm < gnorm and e_new <= energy + e_tol:
+                accepted = True
+                break
+            trial *= 0.5
+        if not accepted:
+            history.append(dict(iteration=it + 1, step=0.0, accepted=False,
+                                gnorm=gnorm, energy=energy,
+                                note='no step decreased gradient and energy'))
+            break
+        history.append(dict(iteration=it + 1, step=float(trial),
+                            accepted=True, gnorm=g_new_norm,
+                            energy=float(e_new),
+                            de=float(e_new - energy),
+                            dx=float(trial * np.linalg.norm(dx))))
+        theta, energy, grad, gnorm = cand, e_new, g_new, g_new_norm
+        if gnorm <= g_tol:
+            break
+        # A damped step or a slowly decreasing gradient means that the
+        # quadratic model has drifted; refresh it.  A full step in the
+        # quadratic region is reused, which keeps the cost at one Hessian in
+        # the common case.
+        if trial < 1.0 or it % 3 == 2:
+            hess = _orbital_hessian(lambda x: eval_point(x)[1], theta,
+                                    fd_step)
+    return theta, energy, grad, history
+
+
 @dataclass
 class DFX2CCASSCFResult:
     """Converged (or best) DF-X2C CASSCF result at one geometry."""
@@ -762,13 +872,27 @@ class DFX2CCASSCFResult:
     gnorm: float
     n_iter: int
     auxbasis: str
+    polish_iter: int = 0
+    polish_gnorm: float = float('nan')
+    polish_history: list = field(default_factory=list)
 
 
 def df_x2c_casscf(mol, ncore, nact, nele, auxmol=None, auxbasis=None,
                   nroots=1, weights=None, target=0, max_cycle=300,
-                  g_conv=1e-6, rcond=DEFAULT_RCOND, theta0=None,
-                  rhf=None, verbose=False):
+                  g_conv=1e-5, rcond=DEFAULT_RCOND, theta0=None,
+                  rhf=None, verbose=False, polish=True,
+                  polish_max_iter=DEFAULT_POLISH_MAX_ITER,
+                  polish_tol=DEFAULT_POLISH_TOL,
+                  polish_fd_step=DEFAULT_POLISH_FD_STEP,
+                  polish_max_pairs=DEFAULT_POLISH_MAX_PAIRS):
     """Spin-free DF-X2C CASSCF (single-state or equal/weighted average).
+
+    The quasi-Newton stage (L-BFGS-B with the analytic orbital gradient) is
+    followed by a damped Newton polish from the iterate with the smallest
+    gradient norm.  L-BFGS-B stops on the projected-gradient tolerance, which
+    leaves ``||g||`` at a few 1e-6 on the validation systems; the residual is
+    removed by one or two Newton steps on a central-difference Hessian of the
+    analytic gradient (see :func:`_newton_polish`).
 
     Parameters
     ----------
@@ -792,6 +916,19 @@ def df_x2c_casscf(mol, ncore, nact, nele, auxmol=None, auxbasis=None,
         Warm start for the orbital rotation parameters.
     rhf : DFX2CRHFResult, optional
         Pre-computed reference SCF; built here when omitted.
+    polish : bool
+        Run the Newton polish after the quasi-Newton stage.  It is skipped
+        when the gradient is already below ``polish_tol`` and when the
+        parameter count exceeds ``polish_max_pairs``.
+    polish_max_iter : int
+        Maximum number of Newton steps.
+    polish_tol : float
+        Gradient-norm target of the polish stage.
+    polish_fd_step : float
+        Central-difference step of the Hessian construction.
+    polish_max_pairs : int
+        Parameter-count limit above which the polish is skipped; the
+        Hessian costs two gradient evaluations per parameter.
 
     Returns
     -------
@@ -814,13 +951,34 @@ def df_x2c_casscf(mol, ncore, nact, nele, auxmol=None, auxbasis=None,
     x0 = (np.zeros(len(pairs)) if theta0 is None
           else np.asarray(theta0, dtype=float))
 
+    # L-BFGS-B stops on the projected-gradient tolerance, which leaves
+    # ||g|| at a few 1e-6 on this fixture (measured 2.14e-6 with
+    # g_conv=1e-6), and a tighter target makes it iterate past the
+    # stationary point until it drifts onto another branch: measured on
+    # H2O/6-31G with the DF-X2C CASSCF, the correct point was reached at
+    # iteration 286 (7e-10 Ha from pyscf) and the run ended at a different
+    # branch with a gradient norm of 0.0267.  The best iterate by gradient
+    # norm is kept alongside the optimizer's answer; the Newton polish
+    # below starts from it.
+    best = {'gnorm': np.inf, 'x': None}
+
+    def record(x, grad):
+        gnorm_x = float(np.linalg.norm(grad))
+        if gnorm_x < best['gnorm']:
+            best['gnorm'] = gnorm_x
+            best['x'] = np.array(x, dtype=float)
+
     def fun(x):
-        return _objective(x, c_ref, h, factors, ncore, nact, nele, pairs,
-                          nroots, weights, target, e_nuc)[0]
+        value, grad = _objective(x, c_ref, h, factors, ncore, nact, nele,
+                                 pairs, nroots, weights, target, e_nuc)
+        record(x, grad)
+        return value
 
     def jac(x):
-        return _objective(x, c_ref, h, factors, ncore, nact, nele, pairs,
-                          nroots, weights, target, e_nuc)[1]
+        value, grad = _objective(x, c_ref, h, factors, ncore, nact, nele,
+                                 pairs, nroots, weights, target, e_nuc)
+        record(x, grad)
+        return grad
 
     res = scipy.optimize.minimize(
         fun, x0, jac=jac, method='L-BFGS-B',
@@ -831,6 +989,29 @@ def df_x2c_casscf(mol, ncore, nact, nele, auxmol=None, auxbasis=None,
                        nroots, weights, target, e_nuc)
     gnorm = float(np.linalg.norm(data['g_sa'] if nroots > 1
                                  else data['g_states'][target]))
+    if best['x'] is not None and best['gnorm'] < gnorm:
+        theta = best['x']
+        data = _state_data(theta, c_ref, h, factors, ncore, nact, nele,
+                           pairs, nroots, weights, target, e_nuc)
+        gnorm = float(np.linalg.norm(data['g_sa'] if nroots > 1
+                                     else data['g_states'][target]))
+    polish_history = []
+    polish_iter = 0
+    if (polish and len(pairs) <= int(polish_max_pairs)
+            and gnorm > float(polish_tol)):
+        def eval_point(x):
+            return _objective(x, c_ref, h, factors, ncore, nact, nele,
+                              pairs, nroots, weights, target, e_nuc)
+
+        theta, _, _, polish_history = _newton_polish(
+            eval_point, theta, float(polish_tol), int(polish_max_iter),
+            float(polish_fd_step), DEFAULT_POLISH_RCOND,
+            DEFAULT_POLISH_MAX_STEP)
+        polish_iter = sum(1 for step in polish_history if step['accepted'])
+        data = _state_data(theta, c_ref, h, factors, ncore, nact, nele,
+                           pairs, nroots, weights, target, e_nuc)
+        gnorm = float(np.linalg.norm(data['g_sa'] if nroots > 1
+                                     else data['g_states'][target]))
     fock = data['fock'][target]
     mo_energy = np.diag(fock)
     return DFX2CCASSCFResult(
@@ -840,12 +1021,14 @@ def df_x2c_casscf(mol, ncore, nact, nele, auxmol=None, auxbasis=None,
         weights=weights, target=target, pairs=pairs, theta=theta,
         ci_vectors=data['ci_vectors'], state_energies=data['e_states'],
         e_tot=float(data['e_states'][target]), e_sa=float(data['e_sa']),
-        # The stationary-point residual along flat (low-curvature) orbital
-        # directions sits at 1e-6 to 1e-5 even when the energy is converged
-        # to 1e-12; the energy and the nuclear gradient are insensitive to
-        # it through the envelope theorem.
+        # The reported gradient norm is the one after the Newton polish;
+        # without the polish the L-BFGS-B stopping rule leaves 1e-6 to 1e-5
+        # along the flat orbital directions even when the energy is
+        # converged to 1e-12.
         converged=bool(gnorm < 1e-5), gnorm=gnorm,
-        n_iter=int(getattr(res, 'nit', -1)), auxbasis=factors.auxbasis)
+        n_iter=int(getattr(res, 'nit', -1)), auxbasis=factors.auxbasis,
+        polish_iter=int(polish_iter), polish_gnorm=float(gnorm),
+        polish_history=list(polish_history))
 
 
 def df_x2c_casscf_gradient(mol, result=None, state=None, auxmol=None,

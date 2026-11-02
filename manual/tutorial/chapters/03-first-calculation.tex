@@ -99,6 +99,35 @@ every such run:
     property of the chart, not a failure of the code.
 \end{itemize}
 
+\subsection{A pseudopotential reference}
+
+The script above builds an all-electron molecule.  A heavy element is
+usually described by an effective core potential (ECP), and the
+reference constructor takes it as \texttt{ecp}.  The example is
+hydrogen iodide with the def2-SVP basis, as a complete run:
+
+\begin{lstlisting}[language=Python]
+from diffmrc.driver.kernel import scf_reference
+
+mol, mf = scf_reference(
+    'I 0 0 0; H 0 0 1.6', charge=0, spin=0,
+    basis='def2-svp', ecp={'I': 'def2-svp'})
+print(mol.nelectron, mol.nao_nr(), mf.e_tot)
+# 26 31 -297.2315508861
+\end{lstlisting}
+
+The mapping form is the one to use.  The def2 sets carry an ECP above
+krypton only, so \texttt{\{'I': 'def2-svp'\}} leaves hydrogen
+all-electron; a bare \texttt{'def2-svp'} would address hydrogen as
+well.  Without \texttt{ecp} the iodine atom is built all-electron
+against a valence basis, and the reference fails because
+$N_{\mathrm{occ}} > N_{\mathrm{mo}}$.
+
+The ECP scalar term enters the one-electron Hamiltonian on every path,
+the nuclear gradient included.  Measured on ThO, omitting it moved the
+matrix trace by $150.7$~Ha and the energy by $71$~Ha; a molecule
+without an ECP is unchanged bit for bit.
+
 The next chapter moves from the ground state to several states at once
 --- the setting in which the state-averaged machinery and the
 per-state perturbation theory come in.

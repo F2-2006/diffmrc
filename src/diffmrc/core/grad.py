@@ -66,6 +66,7 @@ import numpy as np
 import jax
 from jax import numpy as jnp
 
+from .adint import int2e_s1
 from .rotation import block_rotation
 from .nevpt2.m4 import cas_ci_vector
 
@@ -120,7 +121,7 @@ def make_grad_fn(nmo, pairs, th_star, E_cas_of, pscf):
         mf_ = pscf.RHF(m_); mf_.kernel()
         C_ = mf_.mo_coeff                          # geometry-dependent
         h_ = m_.intor("int1e_kin") + m_.intor("int1e_nuc")
-        e_ = m_.intor("int2e", aosym="s1")
+        e_ = int2e_s1(m_)
         return E_cas_of(C_ @ block_rotation(TH_SG, nmo, pairs), h_, e_,
                         m_.energy_nuc())
 

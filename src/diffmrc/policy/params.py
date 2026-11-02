@@ -39,6 +39,13 @@ class Param:
     lo: float = None
     hi: float = None
     choices: tuple = ()
+    freeform: bool = False
+    """True for a value whose admissible set cannot be enumerated.
+
+    ``ecp`` is the case: a pseudopotential name, or a mapping from element
+    to name, chosen from the basis library rather than from a list this
+    module could carry. Such a parameter is checked at the point of use,
+    not by range or by membership here."""
 
 
 @dataclass
@@ -80,17 +87,28 @@ _PARAM_LIST = [
     Param('refine_target', 1e-11,
           'gradient norm the Newton refinement aims for',
           'core', unit='dimensionless', lo=0.0, hi=1e-6),
-    Param('optimizer_grad_tol', 1e-6,
+    Param('optimizer_grad_tol', 1e-4,
           'orbital gradient target for the L-BFGS-B stage of the orbital '
           'point; its measured floor is 1.5e-5, so tighter targets report '
-          'false non-convergence. The Newton refinement continues from '
-          'where this stage stops',
+          'false non-convergence and keep the first stage iterating in a '
+          'flat valley. Measured on HI/def2-SVP CAS(2,2): a 1e-6 target ran '
+          'past 55 minutes, while stopping the first stage at 1e-4 and '
+          'letting the Newton refinement finish reaches 4.3e-8 in 128 s. '
+          'The refinement continues from where this stage stops',
           'driver', unit='dimensionless', lo=0.0, hi=1e-2),
     Param('basis', '6-31g',
           'basis set for the end-to-end path; the released list is what '
           'this package was validated on, and extending it is a one-line '
           'change once the new basis has a reference number',
           'driver', choices=('sto-3g', '6-31g', 'cc-pvdz', 'ano')),
+    Param('ecp', None,
+          'pseudopotential definition passed to Mole.ecp, as a name or as '
+          'a mapping keyed by element. A mapping is the safe form: the '
+          'def2 sets carry an ECP above Kr only, so an iodine/hydrogen '
+          'molecule needs {"I": "def2-svp"}. Without it, a heavy element '
+          'is built as the all-electron atom and the basis is far too '
+          'small for the electron count',
+          'driver', freeform=True),
     Param('method', 'casci',
           'reported energy: the CASCI/CASSCF value, or the on-top tPBE '
           'evaluation at the CASSCF-converged orbitals -- the one-step '
@@ -173,6 +191,8 @@ def validate(values):
         p = PARAMS.get(key)
         if p is None:
             problems.append(f'{key}: unknown parameter')
+            continue
+        if p.freeform:
             continue
         if p.choices:
             if value not in p.choices:

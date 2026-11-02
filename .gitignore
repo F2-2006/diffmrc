@@ -41,3 +41,6 @@ htmlcov/
 
 # generated LaTeX tables (rebuildable via code/t332)
 manual/manual/generated/
+
+# Local agent worktrees
+.claude/

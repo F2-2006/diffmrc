@@ -473,3 +473,61 @@ def refine_stationary_point(E_theta, theta0, max_iter=80, target=1e-11,
     return StationaryPoint(theta=theta, energy=energy, grad_norm=gnorm,
                            n_accepted=n_accepted, stop_reason=reason,
                            target=float(target))
+
+
+def curvature_from_gradient(grad_fn, theta, step=1e-5, max_parameters=None):
+    """Hessian from symmetric differences of an analytic gradient.
+
+    WHY THIS EXISTS
+
+    The analytic second derivative of the blocked eigensolver is
+    undefined at an exact degeneracy: on N/6-31G CAS(3,3) quartet and on
+    N2/6-31G with a degenerate frontier pair, the orbital Hessian at the
+    symmetric stationary point is entirely NaN while the energy and the
+    analytic gradient there are finite. The energy itself is smooth, so
+    its curvature exists; what fails is one numerical route to it.
+
+    This function takes the other route. The gradient is analytic and
+    finite, and a symmetric difference of it is the standard second
+    derivative of a smooth function, accurate to O(step**2). It is the
+    same practice the NEVPT2 frequencies use.
+
+    Parameters
+    ----------
+    grad_fn : callable
+        Analytic gradient, ``theta -> grad``.
+    theta : array_like
+        Point at which the curvature is wanted.
+    step : float
+        Symmetric-difference step, in the units of ``theta``.
+    max_parameters : int, optional
+        Refuse above this dimension. The cost is ``2 n`` gradient
+        evaluations, and for an f-block rotation space that is not a
+        diagnostic anyone will wait for.
+
+    Returns
+    -------
+    ndarray
+        Symmetrized Hessian of shape ``(n, n)``.
+
+    Raises
+    ------
+    ValueError
+        If ``max_parameters`` is given and the dimension exceeds it.
+    """
+    theta = np.asarray(theta, dtype=float).reshape(-1)
+    n = theta.size
+    if max_parameters is not None and n > int(max_parameters):
+        raise ValueError(
+            f'the gradient-difference Hessian costs 2 x {n} gradient '
+            f'evaluations, above the cap of {int(max_parameters)} '
+            f'parameters; the analytic route must be repaired for a space '
+            f'this large')
+    H = np.empty((n, n), dtype=float)
+    for j in range(n):
+        shift = np.zeros(n)
+        shift[j] = step
+        plus = np.asarray(grad_fn(theta + shift), dtype=float).reshape(-1)
+        minus = np.asarray(grad_fn(theta - shift), dtype=float).reshape(-1)
+        H[:, j] = (plus - minus) / (2.0 * step)
+    return 0.5 * (H + H.T)

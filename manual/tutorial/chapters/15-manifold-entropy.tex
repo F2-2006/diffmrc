@@ -1,0 +1,147 @@
+\section{Reading the active-space verification}
+\label{sec:manifold-tutorial}
+
+At the robust level the driver verifies the selected active space by
+the entanglement entropy of the converged wavefunction and refuses the
+run when the space is single-reference.  This chapter shows what the
+verification prints, how to read it, and how to inspect the entropy of
+a spin multiplet directly.  The manual chapter
+\emph{Manifold-merged entanglement entropy} carries the derivation; this
+chapter is about using it.
+
+\subsection{A closed-shell case is refused, and that is the point}
+
+The water molecule with a CAS(2,2) over the two frontier orbitals is
+weakly correlated at its equilibrium geometry.  Run it at the robust
+level:
+\begin{lstlisting}[language=Python]
+from diffmrc.driver.kernel import compute_ground_state
+
+out = compute_ground_state(
+    'O 0 0 0; H 0 0.757 0.587; H 0 -0.757 0.587',
+    charge=0, spin=0, active_space='4,5',
+    params={'basis': '6-31g'}, level='robust')
+
+data = out['algorithm_data']
+print(data['active_space_verified'])
+print(data['active_space_entropy']['s1'])
+print(data['active_space_entropy']['verdict'])
+\end{lstlisting}
+The output is
+\begin{lstlisting}
+False
+[0.004787230889527457, 0.004787230889527577]
+single_reference
+\end{lstlisting}
+The largest entropy, $4.79\times10^{-3}$, lies far below the $0.14$
+multireference criterion, so no active space is justified for this
+system.  The robust level reports the run as unverified and refuses it.
+This is not a failure of the calculation: the CASSCF energy is the same
+as at the fast level, $E=-75.98495118733113$~Ha, to the last digit.  It
+is the verification saying that the question the level promises to
+answer does not have a positive answer here.
+
+Use the fast level for such systems, or pass an active space
+explicitly and read the energy without the verification.
+
+\subsection{Why the verification needs the manifold}
+
+A high-spin open shell is the case the verification exists for, and it
+is also the case where a naive read of the entropy misleads.  Consider
+the nitrogen atom in its $^{4}S$ ground state, three electrons in the
+three $2p$ orbitals:
+\begin{lstlisting}[language=Python]
+import numpy as np
+from diffmrc.core.nevpt2.impl import cas_dets_for2
+from diffmrc.core.orblib import orbital_pairs
+from diffmrc.driver.kernel import (casci_vectors_at,
+                                   partition_from_occupations,
+                                   scf_reference)
+from diffmrc.analysis.ci import manifold_entropy_from_ci
+
+mol, mf = scf_reference('N 0 0 0', 0, 3, '6-31g')
+occ = np.asarray(mf.mo_occ)
+C = np.asarray(mf.mo_coeff)
+space = partition_from_occupations(occ, [2, 3, 4])
+
+pairs = orbital_pairs(space.ncore, space.ncas, mol.nao_nr(),
+                      include_cv=True)
+vectors = casci_vectors_at(mol, C, space, np.zeros(len(pairs)),
+                           nroots=4)          # 2S + 1
+
+dets = cas_dets_for2(space.ncore, space.ncas, space.n_elec)
+for k in range(vectors.shape[1]):
+    s1 = manifold_entropy_from_ci(vectors[:, k], dets,
+                                  ncore=space.ncore, nact=space.ncas)
+    print(f'root {k}: {s1}')
+
+merged = manifold_entropy_from_ci(vectors, dets,
+                                  ncore=space.ncore, nact=space.ncas)
+print(f'merged: {merged}')
+\end{lstlisting}
+The output is
+\begin{lstlisting}
+root 0: [0.660849 0.660849 0.660849]
+root 1: [0.636514 0.636514 0.636514]
+root 2: [2.235612e-25 1.548999e-24 5.149988e-25]
+root 3: [0.168823 0.168823 0.168823]
+merged: [0.693147 0.693147 0.693147]
+\end{lstlisting}
+Read one root at a time and the answer ranges from zero to $0.66$,
+with nothing to choose between them.  Root 2 is the $M_S=+3/2$
+determinant: all three $2p$ orbitals carry one $\alpha$ electron, so
+each is in a definite Fock state and its four-state entropy is zero.
+The other roots are the remaining projections of the same quartet.
+
+The merged value is $\ln 2 = 0.693147$ for all three orbitals: one
+electron of unknown spin per orbital, which is the physical content of
+the degenerate open shell.  The gate uses this merged value, so the
+space is certified as multireference.
+
+\subsection{What the report contains}
+
+\texttt{active\_space\_entropy} is a dictionary with five entries:
+
+\begin{center}
+\begin{tabular}{ll}
+\toprule
+key & meaning \\
+\midrule
+\texttt{s1} & merged single-orbital entropy of the active orbitals \\
+\texttt{nroots} & number of components merged, $2S+1$ \\
+\texttt{verdict} & the comparison against the selected space \\
+\texttt{plateau\_heights} & detected plateaus of the merged spectrum \\
+\texttt{evidence} & human-readable sentences behind the verdict \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+The verdict is \texttt{agrees}, \texttt{candidate\_too\_small},
+\texttt{candidate\_too\_large}, \texttt{no\_plateau},
+\texttt{single\_reference}, or \texttt{failed}.  Only
+\texttt{single\_reference} vetoes the run; the size comparisons are
+recorded because the element rules deliberately add ligand orbitals
+whose entropy lies below the line.
+
+\subsection{Two limits to keep in mind}
+
+The spectrum covers the selected space only.  An orbital that the
+selection left out contributes zero by construction, so the gate
+cannot see a truncated frontier; that remains the job of the selection
+rules.
+
+The merge assumes that the lowest $2S+1$ roots are the components of the
+target manifold, which holds when they are degenerate.  Print the root
+energies when the assumption is in doubt.
+
+Finally, the end-to-end driver on the nitrogen quartet takes a
+different route to the curvature.  The converged point sits within
+$2\times10^{-7}$ of the symmetric $\theta=0$, where the exact
+degeneracy of the quartet makes every entry of the analytic orbital
+Hessian non-finite.  The energy and the analytic gradient are finite
+there, so the driver takes the curvature from a symmetric difference of
+the gradient at a step of $10^{-5}$ (capped at 300 rotation parameters;
+a larger space is refused rather than approximated) and records
+\texttt{curvature\_method = 'gradient-difference'} in the result.  The
+listing above calls \texttt{casci\_vectors\_at} directly and is
+unaffected by any of this.

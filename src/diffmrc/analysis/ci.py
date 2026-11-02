@@ -22,6 +22,7 @@ import numpy as np
 from .entropy import single_orbital_entropy
 
 __all__ = ['occupation_masks', 'occupations_from_ci', 'entropy_from_ci',
+           'manifold_occupations', 'manifold_entropy_from_ci',
            'pair_scatter', 'pair_density', 'two_orbital_entropy',
            'mutual_information', 'dets_and_vector_from_fci']
 
@@ -82,6 +83,106 @@ def entropy_from_ci(c_ci, dets, ncore=0, nact=2):
     """
     n_a, n_b, p2 = occupations_from_ci(c_ci, dets, ncore=ncore, nact=nact)
     return single_orbital_entropy(n_a, n_b, p2)
+
+
+def _manifold_weights(weights, nroots):
+    """Validate and normalize ensemble weights for ``nroots`` states."""
+    if weights is None:
+        return np.full(nroots, 1.0 / nroots)
+    wv = np.asarray(weights, dtype=float).reshape(-1)
+    if wv.size > nroots:
+        raise ValueError(
+            f'{wv.size} weights for {nroots} states; the mixture cannot '
+            f'weight a state it does not hold')
+    if wv.size < nroots:
+        wv = np.concatenate([wv, np.zeros(nroots - wv.size)])
+    if np.any(wv < 0.0):
+        raise ValueError('mixture weights must be non-negative')
+    total = float(np.sum(wv))
+    if total <= 0.0:
+        raise ValueError('mixture weights sum to zero')
+    return wv / total
+
+
+def manifold_occupations(ci_vectors, dets, ncore=0, nact=2, weights=None):
+    """``(n_alpha, n_beta, p2)`` of a mixture of CI vectors.
+
+    WHY THIS EXISTS
+
+    The four-state entropy of one orbital is defined for one state. A
+    spin multiplet is a manifold of degenerate components related by spin
+    projection, and the ``M_S = +S`` component of a high-spin determinant
+    is itself a single determinant: each open shell carries one electron
+    of one spin, so that orbital's four weights are ``[0, 1, 0, 0]`` and
+    its entropy is zero -- even though every one of those shells is
+    degenerate and has to enter the active space. Reading the entropy
+    after merging the manifold restores the spin-isotropic occupations
+    the criterion is meant to measure.
+
+    The mixture is assembled on the occupation triple rather than on a
+    density matrix: the four weights are linear in ``(n_a, n_b, p2)``, so
+    the weighted mean of the triples is exactly the triple of the mixed
+    one-orbital reduced density matrix. No density matrix is built, and
+    the cost stays at one matmul per root.
+
+    Parameters
+    ----------
+    ci_vectors : array_like, shape ``(ndet,)`` or ``(ndet, nroots)``
+        One CI vector per state. Each column is normalized before use: a
+        state vector carries no scale of its own, and the ensemble
+        weights carry the mixture.
+    dets : sequence of int
+        Determinant bitmaps in the order the CI vector was produced
+        (``core.nevpt2.impl.cas_dets_for2``).
+    ncore, nact : int
+        Frozen core and active orbitals.
+    weights : array_like, shape ``(nroots,)``, optional
+        Ensemble weights; equal weights by default. A shorter vector is
+        padded with zeros.
+
+    Returns
+    -------
+    (n_a, n_b, p2) : ndarray, shape ``(nact,)`` each
+    """
+    c = np.asarray(ci_vectors, dtype=float)
+    if c.ndim == 1:
+        c = c[:, None]
+    if c.ndim != 2:
+        raise ValueError(
+            f'ci_vectors must be one vector or a matrix of them, got '
+            f'shape {c.shape}')
+    nroots = c.shape[1]
+    if nroots < 1:
+        raise ValueError('ci_vectors carries no vector')
+    mask_a, mask_b, mask_2 = occupation_masks(dets, ncore=ncore, nact=nact)
+    if c.shape[0] != mask_a.shape[0]:
+        raise ValueError(
+            f'ci_vectors has {c.shape[0]} coefficients for '
+            f'{mask_a.shape[0]} determinants')
+    norm2 = np.sum(c * c, axis=0)
+    if np.any(norm2 <= 0.0):
+        raise ValueError(
+            'a CI vector has zero norm; a state contributes through its '
+            'direction and its weight, not through an empty column')
+    w_mix = (c * c / norm2) @ _manifold_weights(weights, nroots)
+    return (w_mix @ mask_a.astype(float),
+            w_mix @ mask_b.astype(float),
+            w_mix @ mask_2.astype(float))
+
+
+def manifold_entropy_from_ci(ci_vectors, dets, ncore=0, nact=2,
+                             weights=None):
+    """Single-orbital entropies of a manifold of CI vectors.
+
+    The entropy of the mixture whose occupations
+    :func:`manifold_occupations` returns; see that function for why the
+    manifold is merged before the entropy is read. The differentiable
+    sibling is ``driver.entropy.manifold_entropy_from_ci_masks``, and a
+    test binds the two routes on the same vectors.
+    """
+    return single_orbital_entropy(
+        *manifold_occupations(ci_vectors, dets, ncore=ncore, nact=nact,
+                              weights=weights))
 
 
 def pair_scatter(dets, i, j, ncore=0, nact=2):

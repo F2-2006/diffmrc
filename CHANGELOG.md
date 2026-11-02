@@ -4,6 +4,41 @@
 
 ### Added
 
+- `core.adint`: a memory-bounded integral-derivative backend for the nuclear
+  gradient chains. `use_vjp_integrals(True)` switches the four-centre
+  integrals to the `pyscfad` `custom_vjp` kernel, whose backward contracts the
+  `nao**4` cotangent in C instead of transposing a `custom_jvp` and
+  materialising `nctr * nao**4` doubles. `int2e_s1` requests the `s4` packing
+  the kernel requires and restores `s1` with two differentiable gathers;
+  `build_mole` leaves the basis exponents and contraction coefficients
+  untraced, which the backend requires. Measured peak RSS of the bare
+  integral derivative: 18 999 MB -> 7 797 MB at nao = 124, natm = 8, and
+  9 565 MB -> 4 151 MB at nao = 104, natm = 4; the gradient agrees with the
+  default backend to 1e-12 relative. The switch is off by default, so the
+  existing chains are unchanged. The two-centre integrals stay on
+  `custom_jvp`: the `custom_vjp` two-centre kernel segfaults on `ECPscalar`
+  (measured on HI/lanl2dz).
+  Actinide check: on ThO (`Th=stuttgart_rsc` ECP, `O=6-31G`, nao = 96,
+  CAS(8,8)) the stage ladder SCF -> MO transform -> CI goes from
+  oom-killed at the CI rung to 19 267 MB (SCF 8 606 -> 2 537 MB,
+  +MO transform 14 398 -> 6 125 MB). That rung's analytic gradient then
+  completes at 19 278.5 MB peak against a central difference of the same
+  energy: 1.22e-5 Eh/bohr absolute, 2.04e-7 relative. The canonicalize
+  and NEVPT2 rungs remain above 20 GB on both backends; their cost is the
+  perturbation layer, not the integral derivative (ThO/CAS(6,6) forward
+  alone: 8 709 MB, 1 152 s).
+- `driver.nevpt2_zvector`: the exact-Si correction now evaluates the Si
+  class once and applies `si_exact - si_masked` to the release total,
+  instead of rebuilding the six core classes twice and cancelling five of
+  them. The classes, `core.nevpt2.core.e2_core` and `_e2_core_exact_si`
+  are unchanged; the latter two are kept so the equivalence test can
+  rebuild the old value. H2O/6-31G: 0.936 -> 0.872 s per NEVPT2
+  evaluation (-6.8%), total agrees to 1.79e-16 relative; HI8/LANL2DZ:
+  0.942 -> 0.881 s (-6.5%), bit-identical. ThO/CAS(6,6) forward:
+  1641 -> 1152 s (-29.8%), peak unchanged at 8.7 GB. The residual cost of
+  the exact-Si path is `_core_blocks`, which rebuilds `dm1/dm2/dm3` and
+  `f3ca/f3ac` that `nevpt2_e2_full2` already formed (95% of the
+  overhead); removing it needs a change in `core/nevpt2/impl.py`.
 - `driver.ri_scf_driver`: explicit analytic RIJONX nuclear gradients for ROHF
   and UHF references, and the `RIJONX_UHF` mean-field class. The skeleton
   gradient uses the total density for RI-J and the core Hamiltonian and the
@@ -26,15 +61,144 @@
   keeps the SCF out of the `H_tt` graph.
 - `experiments/hessian_cost_benchmark.py`: wall time, peak RSS, accuracy and
   LSMR diagnostics for the three Hessian routes.
+- `analysis.ci.manifold_occupations` and
+  `analysis.ci.manifold_entropy_from_ci`: four-state entropy of a weighted
+  mixture of CI vectors, assembled on the occupation triple (the weights are
+  linear in `(n_a, n_b, p2)`, so no density matrix is built). The
+  differentiable siblings are `driver.entropy.manifold_entropy_from_ci_masks`
+  and `driver.entropy.manifold_single_orbital_entropy_from_ci`, bound to the
+  NumPy route at 1e-12.
+- `driver.kernel.casci_vectors_at`: CI vectors at one orbital rotation, on the
+  integral block and rotation shared with `energy_function`. Used by the
+  active-space verification and available for analysis of a converged point.
+- `policy.rules.candidate_from_occupations` and a fallback in
+  `driver.kernel.select_active_space`: a composition that no element rule
+  covers is no longer refused outright. Every orbital with a fractional
+  reference occupation enters the space; a closed-shell reference
+  contributes the frontier pair; degenerate partners enter with a selected
+  orbital. On the six-system benchmark this makes H2O (orbitals 4 and 5),
+  triplet CH2 (the two singly occupied orbitals) and O3 (the frontier pair,
+  CASSCF 0.114 Eh below RHF) runnable. N2 selects a degenerate frontier
+  pair; its analytic Hessian is not finite at the symmetric point, so the
+  curvature comes from a symmetric difference of the gradient and the run
+  completes with `curvature_method = 'gradient-difference'`.
+- `driver.kernel.compute_ground_state`: when the space came from the
+  occupation fallback and its orbital optimization stalls (gradient above
+  1e-3), the frontier pair is retried and kept if its point is better.
+  Measured on HI/def2-SVP, the three-orbital completed space did not
+  converge in hundreds of steps while the frontier pair reached 4.3e-8 in
+  128 s. The first attempt on a fallback space is also given a step
+  budget (60 L-BFGS-B steps, 20 refinement steps) so a stall is
+  established in minutes rather than after the default cap.
+- `driver.kernel.scf_reference` and the end-to-end path accept an `ecp`
+  parameter (a name, or a mapping keyed by element) and pass it to
+  `Mole.ecp`. Without it a heavy element is built as the all-electron atom
+  against a valence basis and the reference cannot be constructed
+  (`Nocc > Nmo`). Verified on HI/def2-SVP with `{'I': 'def2-svp'}`
+  at I = origin, H at 1.6 Bohr: 26 electrons, 31 orbitals; the reference
+  RHF is -297.2315508861 Eh and the end-to-end CASSCF with active
+  orbitals [12, 13] is -297.2377012677 Eh.
 
 ### Changed
 
+- `core.x2c_casscf_df.df_x2c_casscf` gains a Newton polish after the
+  L-BFGS-B stage: from the minimum-gradient iterate it builds the orbital
+  Hessian by central differences of the analytic gradient, applies a
+  pseudoinverse with a relative cutoff of 1e-10, caps a step at 0.3 rad,
+  and accepts a step only if the gradient strictly decreases and the
+  energy does not rise. On H2O/6-31G the final orbital gradient drops from
+  2.14e-6 to 4.31e-12 in two steps, the envelope finite-difference
+  relative error from 1.38e-4 to 1.57e-5, and the rotation invariant from
+  1.67e-6 to 5.58e-10, with the energy 1.10e-11 Ha from pyscf. No test
+  threshold was relaxed. The polish is skipped above 256 parameters,
+  where the central-difference Hessian would dominate; the stage runs
+  explicitly with `polish=False` to keep the previous behaviour.
+- `driver.orbitals` gains a two-stage orbital optimization for spaces whose
+  core-virtual rotation block dominates. When the core-virtual pair count
+  exceeds twice the core-active plus active-virtual count, the first stage
+  runs on the subset without core-virtual rotations and the second stage
+  refines the embedded point over the full set (`embed_theta` maps by pair
+  identity, `converge_orbital_point_two_stage`). Measured on HI/def2-SVP
+  CAS(2,2) (262 full / 58 subset parameters): final gradient 1.41e-9 in
+  378.5 s, against 420.5 s and 7.48e-10 for the single-stage full-space
+  route, with the two converged points 1.1e-13 Ha apart. H2O/6-31G and
+  N2/6-31G keep the single-stage route and are bit-identical. The gate is
+  required because the subset optimum is not always a minimum: on H2O it
+  is a saddle with two negative curvature directions, while the full-space
+  refinement reaches the correct minimum. The gate is an engineering rule
+  supported by three systems, not a theorem.
+- The first-stage orbital-gradient target defaults to 1e-4, down from 1e-6,
+  in `policy.params` and `driver.orbitals`. The measured floor of the
+  L-BFGS-B stage is 1.5e-5, so a 1e-6 target keeps the first stage
+  iterating in a flat valley: measured on HI/def2-SVP CAS(2,2), the run
+  passed 55 minutes without converging, while stopping the first stage at
+  1e-4 and letting the Newton refinement finish reached 4.3e-8 in 128 s.
 - `make_joint_energy_fn` accepts an `scf` constructor.
 - `rijonx_scf` accepts `uhf=True`; the open-shell class remains ROHF by
   default.
+- The robust level now performs the entanglement verification of the active
+  space instead of reporting it as unimplemented. The driver merges the lowest
+  `2S+1` roots before reading the entropy, so the `M_S = +S` component of a
+  high-spin determinant no longer reports zero for every open shell. A
+  single-reference verdict fails the check and refuses the run; size
+  mismatches are recorded but do not veto. On N/6-31G CAS(3,3) the merged
+  entropy is ln 2 = 0.693147 for all three 2p orbitals, against 2e-25 to 0.66
+  for the individual roots; H2O/6-31G CAS(2,2) and H2/STO-3G CAS(2,2) report
+  4.79e-3 and 6.79e-2 and are refused as single-reference.
+
+### Fixed
+
+- `driver.kernel` assembled the one-electron Hamiltonian as
+  `int1e_kin + int1e_nuc`, which drops the ECP scalar term on a
+  pseudopotential system. Measured on ThO, the matrix traces differ by
+  150.7 Ha and the energy by 71 Ha. `kernel._core_hamiltonian` now adds
+  `ECPscalar` when the molecule reports an ECP, and the same construction in
+  the on-top terms of `driver.nevpt2` is corrected. A molecule without an ECP
+  is unchanged: the H2O/6-31G energy is bit-identical before and after.
+  Verified on I/def2-SVP (ECP): the helper equals kinetic + nuclear + ECP
+  and differs from the raw sum, whose trace moves by 90.5 Ha.
+- A non-finite orbital Hessian no longer kills the run inside `eigvalsh`.
+  Measured on N/6-31G CAS(3,3) quartet (26 parameters) and N2/6-31G with
+  its degenerate frontier pair (101 parameters): every analytic Hessian
+  entry is NaN at the symmetric stationary point while the energy and the
+  analytic gradient are finite. The energy is smooth, so
+  `core.stationary.curvature_from_gradient` recovers the curvature from a
+  symmetric difference of the analytic gradient; on N2 the spectra at steps
+  1e-5, 1e-4 and 1e-3 agree (min 0.0648, max 66.96, no negative
+  eigenvalues). The route costs two gradient evaluations per parameter and
+  is capped at 300 parameters, above which the driver refuses with the
+  diagnosis. `algorithm_data['curvature_method']` records which route ran.
+  End to end, N2/6-31G CAS(4,4) (E = -108.97003525320882 Eh) and the N
+  quartet CAS(3,3) (E = -54.382051137489576 Eh) now complete with
+  `curvature_method = 'gradient-difference'` and zero negative
+  eigenvalues.
+- The Newton refinement no longer stops at a point whose analytic orbital
+  Hessian is not finite. `_trust_region_polish` probes one
+  Hessian-vector product with a vector of ones; a non-finite entry hands
+  the point to `_finite_difference_newton`, which rebuilds the Hessian
+  from symmetric differences of the analytic gradient (step 1e-5, dense
+  solve 82 kB at 101 parameters, 300-parameter cap) and keeps the
+  existing damping ladder and energy-decrease acceptance. Measured on
+  N2/6-31G CAS(4,4) with the automatic space {5,6,7,8}: the L-BFGS-B
+  stage stops at 7.325e-5, two refinement steps reach 8.81e-14, energy
+  -108.97003525321175 Eh, 302 s, and the robust level passes all four
+  checks; the same space was refused on the 1e-8 gradient before. The
+  probe costs one Hessian-vector product, so the finite-Hessian path is
+  unchanged: HI/def2-SVP [12,13] (-297.23770126765163 Eh, 1.409e-9),
+  H2O/6-31G [4,5] (-75.9849511873311 Eh, 1.891e-12, three negative
+  eigenvalues, refused) and CH2/6-31G triplet [3,4]
+  (-38.906546701973426 Eh, 3.387e-14) reproduce the previous run. No
+  threshold was relaxed.
 
 ### Known limitations
 
+- NEVPT2 values are not reproducible with `OMP_NUM_THREADS > 1`. On
+  H2O/6-31G CAS(2,2) two identical runs differed by 5e-3 Ha in `e2`
+  (-0.12328 and -0.12830), while five runs at `=1` were bit-identical and a
+  change of CI solver did not remove the difference. The threefold-degenerate
+  CI block leaves the vectors inside the degenerate subspace to rounding, so
+  `OMP_NUM_THREADS=1` is a reproducibility requirement and not only a memory
+  policy.
 - The matrix-free route needs the LSMR iteration cap to reach convergence on
   the tested stationary points; the unrolled route with three Newton steps
   exceeds 20 GiB on H2O/6-31G CAS(2,2).

@@ -4,9 +4,10 @@
 This chapter records the implementation choices that carry a performance
 or numerical-branch consequence: the ordering of the MO integral
 transform, the blocked CI solver, the automatic solver selection, the
-jit reference-array form, and one repeated contraction in the CI
-matrix--vector product.  Each choice is an engineering decision with a
-measured anchor; none changes the definition of the energy.  The
+jit reference-array form, one repeated contraction in the CI
+matrix--vector product, and the memory-bounded integral-derivative
+backend.  Each choice is an engineering decision with a measured
+anchor; none changes the definition of the energy.  The
 measurements were taken on one 64-core node with JAX in double
 precision on CPU, with the BLAS thread count fixed at one; wall clock
 is quoted as a relative quantity only, while compilation counts and
@@ -343,6 +344,90 @@ takes $10$--$30$~ms and the before/after distributions are
 indistinguishable.  This is a code-hygiene change, not a performance
 promise.
 
+\section{Memory-bounded integral derivatives}
+\label{sec:adint}
+
+The nuclear gradient of every energy in this package is a reverse-mode
+derivative through pyscfad's integral objects.  The upstream default
+represents the four-centre two-electron integrals as a
+\texttt{custom\_jvp}; its reverse transpose replays one basis tangent
+per Cartesian direction and materialises \texttt{nctr * nao}$^4$
+doubles, with \texttt{nctr}~$=3\,n_\mathrm{atm}$.  \texttt{core.adint}
+selects pyscfad's \texttt{custom\_vjp} kernel
+(\texttt{moleintor\_opt = True}) for the four-centre integrals; its
+backward kernel contracts the \texttt{nao}$^4$ cotangent in C and
+returns only an $(n_\mathrm{atm},3)$ array.  The working set is the
+cotangent itself, not a factor \texttt{nctr} times it.
+
+The switch is process-wide and off by default.  Set
+
+\begin{lstlisting}[language=bash]
+export DIFFMRC_VJP_INTEGRALS=1
+\end{lstlisting}
+
+before the process starts; \texttt{core.adint} reads the variable at
+import time, so a queued run selects the backend without an edit to
+its script.  The values \texttt{1}, \texttt{true}, \texttt{yes} and
+\texttt{on} (case-insensitive) enable it; anything else, and an unset
+variable, leave it off.  The same selection is available in code as
+\texttt{use\_vjp\_integrals(True)}.
+
+Turning the switch on installs a guard on
+\texttt{pyscfad.gto.Mole.build}: the basis exponents and the
+contraction coefficients are left untraced by default, because the
+vjp kernel cannot differentiate them and raises rather than dropping
+them silently.  A caller that passes \texttt{trace\_exp=True} or
+\texttt{trace\_ctr\_coeff=True} explicitly is refused with a message
+that names the argument.  New code should build the molecule with
+\texttt{adint.build\_mole}, which sets the two flags openly and leaves
+the nuclear coordinates as the only traced leaf.
+
+The tensor layout is the visible difference.  The vjp kernel knows
+only the \texttt{s4} packing, so \texttt{int2e\_s1} requests
+\texttt{s4} and restores \texttt{s1} with two differentiable gathers
+on the \texttt{(nao, nao)} pair index; no \texttt{nao}$^4$ integer
+index map is built.  Neither switch changes a value: with the switch
+off, \texttt{int2e\_s1} is exactly
+\texttt{mol.intor('int2e', aosym='s1')}, and the two backends agree on
+the ERI coordinate derivative to $10^{-15}$ relative in the unit tests
+and on the nuclear gradient to $10^{-12}$ relative.
+
+\subsection{Measured peak memory}
+
+\begin{center}
+\begin{tabular}{lrrr}
+\toprule
+Quantity & \texttt{nao} & default backend & vjp backend \\
+\midrule
+bare integral derivative, 8 atoms & 124 & $18\,999$~MB & $7\,797$~MB \\
+bare integral derivative, 4 atoms & 104 & $9\,565$~MB & $4\,151$~MB \\
+ThO CAS(8,8), SCF rung & 96 & $8\,606$~MB & $2\,537$~MB \\
+ThO CAS(8,8), SCF + MO transform & 96 & $14\,398$~MB & $6\,125$~MB \\
+ThO CAS(8,8), SCF + MO + CI rung & 96 & oom-killed & $19\,267$~MB \\
+ThO CAS(8,8), analytic gradient & 96 & --- & $19\,278.5$~MB \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+On ThO (\texttt{Th=stuttgart\_rsc} ECP, \texttt{O=6-31G},
+CAS(8,8)) the vjp backend moves the stage ladder from an
+out-of-memory kill at the CI rung to a completed ladder.  The
+analytic gradient at that rung finishes at $19\,278.5$~MB, against a
+central difference of the same energy: $1.22\times10^{-5}$~Eh/bohr
+absolute, $2.04\times10^{-7}$ relative.  The canonicalization and
+NEVPT2 rungs remain above 20~GB on both backends; their cost is the
+perturbation layer, not the integral derivative (ThO/CAS(6,6)
+forward alone: $8\,709$~MB, $1\,152$~s).
+
+The two-centre integrals stay on the \texttt{custom\_jvp} backend even
+with the switch on, because the \texttt{custom\_vjp} two-centre kernel
+segfaults on \texttt{ECPscalar} (measured on HI/lanl2dz, for both the
+bare integral gradient and the SCF gradient; \texttt{int1e\_kin},
+\texttt{int1e\_nuc} and \texttt{int1e\_ovlp} are fine).  A two-centre
+tensor is \texttt{nao}$^2$, so its \texttt{custom\_jvp} transpose costs
+\texttt{nctr * nao}$^2$ --- six orders of magnitude below the
+four-centre term at \texttt{nao}~$=100$ --- and is not worth the risk.
+
 \section{Choosing among the options}
 
 \begin{center}
@@ -363,6 +448,10 @@ Use \texttt{component\_args} and \texttt{arrays} for every repeated
 geometry.  Do not jit the joint geometry-dependent entry. \\
 \texttt{ci\_matvec} folding & single fold &
 No user action; the change is internal and numerically neutral. \\
+\texttt{DIFFMRC\_VJP\_INTEGRALS} & off &
+Set to \texttt{1} on a memory-bound gradient chain.  Build molecules
+with \texttt{adint.build\_mole} or accept the build guard; the gradient
+agrees with the default backend to $10^{-12}$ relative. \\
 \bottomrule
 \end{tabular}
 \end{center}

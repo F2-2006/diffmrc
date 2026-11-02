@@ -518,3 +518,63 @@ def test_a_degenerate_threshold_is_a_programming_error():
     for t in (0.0, 1.0, -0.1):
         with pytest.raises(ValueError):
             noon_selection({'a': 1.0}, {}, threshold=t)
+
+
+def test_candidate_from_occupations_takes_the_fractional_shell():
+    """A singly occupied pair is the occupation criterion's direct signal."""
+    from diffmrc.policy.rules import candidate_from_occupations
+
+    occ = np.array([2.0, 2.0, 1.0, 1.0, 0.0, 0.0])
+    cand = candidate_from_occupations(occ)
+    assert cand is not None
+    assert cand.active == [2, 3]
+
+
+def test_candidate_from_occupations_uses_the_frontier_pair_when_closed():
+    """A closed-shell reference has no fractional occupation to read."""
+    from diffmrc.policy.rules import candidate_from_occupations
+
+    occ = np.array([2.0, 2.0, 2.0, 0.0, 0.0])
+    cand = candidate_from_occupations(occ)
+    assert cand is not None
+    assert cand.active == [2, 3]
+
+
+def test_candidate_from_occupations_completes_a_degenerate_pair():
+    """Half a degenerate pair is a symmetry-broken space."""
+    from diffmrc.policy.rules import candidate_from_occupations
+
+    occ = np.array([2.0, 2.0, 2.0, 2.0, 0.0, 0.0])
+    energy = np.array([-1.0, -0.8, -0.5, -0.5, 0.2, 0.2])
+    cand = candidate_from_occupations(occ, mo_energy=energy)
+    assert cand is not None
+    assert cand.active == [2, 3, 4, 5]
+
+
+def test_candidate_from_occupations_refuses_without_a_frontier_pair():
+    from diffmrc.policy.rules import candidate_from_occupations
+
+    assert candidate_from_occupations(np.array([2.0])) is None
+
+
+def test_candidate_from_occupations_rejects_a_bad_energy_vector():
+    from diffmrc.policy.rules import candidate_from_occupations
+
+    with pytest.raises(ValueError, match='mo_energy'):
+        candidate_from_occupations(np.array([2.0, 0.0]), mo_energy=[0.0])
+
+
+def test_select_active_space_falls_back_to_occupations(monkeypatch):
+    """A main-group molecule no element rule covers still gets a space."""
+    from diffmrc.driver import kernel
+
+    class _Mol:
+        def ao_labels(self):
+            return []
+
+    occ = np.array([2.0, 2.0, 1.0, 1.0, 0.0, 0.0])
+    active, evidence = kernel.select_active_space(
+        _Mol(), np.eye(6), occ, ['C', 'H', 'H'],
+        mo_energy=np.arange(6, dtype=float))
+    assert active == [2, 3]
+    assert any('no element rule' in line for line in evidence)

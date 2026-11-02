@@ -7,7 +7,8 @@ jax.config.update("jax_enable_x64", True)
 import jax.numpy as jnp  # noqa: E402
 
 from diffmrc.core.stationary import StopReason  # noqa: E402
-from diffmrc.driver.orbitals import converge_orbital_point  # noqa: E402
+from diffmrc.driver.orbitals import (  # noqa: E402
+    converge_orbital_point, converge_orbital_point_two_stage, embed_theta)
 
 
 def _quadratic(centre, curvature=2.0):
@@ -220,6 +221,106 @@ def test_hessp_matches_the_explicit_hessian_on_a_non_quadratic_energy():
     got = np.asarray(hessp_of(E)(t, v))
     want = np.asarray(jax.hessian(E)(t)) @ np.asarray(v)
     assert np.allclose(got, want, atol=1e-10)
+
+
+def test_embedding_maps_pairs_by_identity_not_by_position():
+    """Core-virtual entries are zero and subset values land on their pairs.
+
+    The two pair lists order their blocks identically but the full list
+    carries an extra core-virtual block in the middle, so a positional
+    copy would move every active-virtual value into a core-virtual slot.
+    A shuffled subset must produce the same full vector.
+    """
+    from diffmrc.core.orblib import orbital_pairs
+
+    ncore, nact, nmo = 2, 3, 9
+    subset = orbital_pairs(ncore, nact, nmo, include_cv=False)
+    full = orbital_pairs(ncore, nact, nmo, include_cv=True)
+    theta = np.arange(len(subset), dtype=float)
+
+    out = embed_theta(subset, full, theta)
+    index = {pair: k for k, pair in enumerate(full)}
+    assert out.shape == (len(full),)
+    for k, pair in enumerate(subset):
+        assert out[index[pair]] == theta[k]
+    nvir = nmo - ncore - nact
+    assert len(full) == ncore * nact + ncore * nvir + nact * nvir
+    for i in range(ncore):
+        for v in range(ncore + nact, nmo):
+            assert out[index[(i, v)]] == 0.0
+
+    rng = np.random.default_rng(0)
+    perm = rng.permutation(len(subset))
+    shuffled = embed_theta([subset[i] for i in perm], full, theta[perm])
+    assert np.array_equal(out, shuffled)
+
+    with pytest.raises(ValueError):
+        embed_theta(subset, full, theta[:-1])
+    with pytest.raises(ValueError):
+        embed_theta([(0, nmo + 1)], full, np.zeros(1))
+
+
+def test_the_split_rule_matches_the_measured_block_ratios():
+    """The route criterion is the size of the core-virtual block.
+
+    The three partitions are the measured ones: HI/def2-SVP CAS(2,2)
+    (204 core-virtual pairs against 58), H2O/6-31G CAS(2,2) (28 against
+    22) and N2/6-31G CAS(4,4) (45 against 56). Only the first is the
+    regime where the joint L-BFGS stage stalled.
+    """
+    from diffmrc.driver.orbitals import should_split_rotation_set
+
+    assert should_split_rotation_set(12, 2, 31)
+    assert not should_split_rotation_set(4, 2, 13)
+    assert not should_split_rotation_set(5, 4, 18)
+    assert not should_split_rotation_set(0, 2, 5)
+
+
+def test_two_stage_converges_the_coupling_the_subset_route_leaves():
+    """A synthetic quadratic whose subset optimum is not the full one.
+
+    The subset minimum leaves the complement coordinates at zero; the
+    full minimum has both blocks displaced. The first stage must stop at
+    the subset optimum, and the second must remove the full-space
+    gradient. Nothing here is an electronic-structure statement -- it
+    pins the composition and the mapping.
+    """
+    nfull = 6
+    full_pairs = [(0, 1), (0, 2), (0, 3), (1, 2), (1, 3), (2, 3)]
+    subset_pairs = [(0, 1), (0, 3), (1, 3)]
+    subset_index = [full_pairs.index(pair) for pair in subset_pairs]
+
+    rng = np.random.default_rng(7)
+    a = rng.standard_normal((nfull, nfull))
+    hess = a @ a.T / nfull + np.eye(nfull)
+    lin = rng.standard_normal(nfull)
+
+    def E_full(t):
+        t = jnp.asarray(t)
+        return 0.5 * t @ hess @ t - lin @ t
+
+    def E_subset(u):
+        t = jnp.zeros(nfull).at[jnp.asarray(subset_index)].set(u)
+        return E_full(t)
+
+    point = converge_orbital_point_two_stage(
+        E_subset, len(subset_pairs), E_full, nfull, subset_pairs,
+        full_pairs, optimize_tol=1e-6, refine_target=1e-10,
+        max_steps=500, refine_max_iter=60)
+
+    target = np.linalg.solve(hess, lin)
+    grad_embedded = jax.grad(E_full)(point.embedded_theta)
+    assert float(jnp.linalg.norm(grad_embedded)) > 1e-2
+    assert point.grad_norm < 1e-8
+    assert np.allclose(np.asarray(point.theta), target, atol=1e-6)
+    assert point.energy == pytest.approx(-0.5 * lin @ target, abs=1e-9)
+    assert point.energy < float(E_full(point.embedded_theta)) - 1e-4
+
+    report = point.stages_report()
+    assert report['n_parameters'] == dict(subset=3, full=6)
+    assert report['stage1']['seconds'] >= 0.0
+    assert report['stage2']['seconds'] >= 0.0
+    assert report['stage2']['energy_change'] < 0.0
 
 
 def test_the_polish_descends_a_curved_valley_with_the_hvp_hessian():

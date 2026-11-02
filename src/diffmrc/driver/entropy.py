@@ -22,6 +22,8 @@ the determinant list in Python and must not run per step.
 from ..analysis.ci import occupation_masks
 
 __all__ = ['entropy_from_ci_masks', 'single_orbital_entropy_from_ci',
+           'manifold_entropy_from_ci_masks',
+           'manifold_single_orbital_entropy_from_ci',
            'make_casscf_entropy_theta_fn', 'pair_density_from_scatter',
            'mutual_information_from_ci', 'make_casscf_mi_theta_fn']
 
@@ -47,6 +49,66 @@ def single_orbital_entropy_from_ci(c_ci, dets, ncore=0, nact=2):
     finite difference of that sibling.
     """
     return entropy_from_ci_masks(c_ci, occupation_masks(dets, ncore, nact))
+
+
+def manifold_entropy_from_ci_masks(ci_vectors, masks, weights=None):
+    """s1 of a manifold of CI vectors given precomputed masks (jax).
+
+    The differentiable sibling of ``analysis.ci.manifold_entropy_from_ci``.
+    The mixture is taken on ``|c|^2`` before the occupation matmuls,
+    which is exact because the four occupation weights are linear in
+    ``(n_a, n_b, p2)``: the weighted mean of the triples is the triple of
+    the mixed one-orbital reduced density matrix. Normalizing each column
+    first keeps a state's contribution equal to its ensemble weight
+    rather than to the arbitrary scale of its vector.
+
+    ``ci_vectors`` may be ``(ndet,)`` or ``(ndet, nroots)``. Shape
+    checks are static and safe under ``jit``; value checks are not, so an
+    all-zero column silently contributes zero occupations -- the numpy
+    sibling is the route that refuses it.
+    """
+    from jax import numpy as jnp
+    from ..analysis.entropy import single_orbital_entropy
+
+    c = jnp.asarray(ci_vectors, dtype=jnp.float64)
+    if c.ndim == 1:
+        c = c[:, None]
+    if c.ndim != 2:
+        raise ValueError(
+            f'ci_vectors must be one vector or a matrix of them, got '
+            f'shape {c.shape}')
+    nroots = int(c.shape[1])
+    w = c * c
+    norm2 = jnp.sum(w, axis=0)
+    w = w / jnp.where(norm2 > 0.0, norm2, 1.0)
+    if weights is None:
+        wv = jnp.full((nroots,), 1.0 / nroots)
+    else:
+        wv = jnp.asarray(weights, dtype=jnp.float64).reshape(-1)
+        if wv.size > nroots:
+            raise ValueError(
+                f'{wv.size} weights for {nroots} states; the mixture '
+                f'cannot weight a state it does not hold')
+        if wv.size < nroots:
+            wv = jnp.concatenate([wv, jnp.zeros(nroots - wv.size)])
+        wv = wv / jnp.sum(wv)
+    w_mix = w @ wv
+    mask_a, mask_b, mask_2 = masks
+    n_a = w_mix @ jnp.asarray(mask_a, dtype=jnp.float64)
+    n_b = w_mix @ jnp.asarray(mask_b, dtype=jnp.float64)
+    p2 = w_mix @ jnp.asarray(mask_2, dtype=jnp.float64)
+    return single_orbital_entropy(n_a, n_b, p2, xp=jnp)
+
+
+def manifold_single_orbital_entropy_from_ci(ci_vectors, dets, ncore=0,
+                                            nact=2, weights=None):
+    """Manifold s1 from the determinant list alone, differentiable (jax).
+
+    The sibling of :func:`single_orbital_entropy_from_ci` for a set of
+    states; a test evaluates both routes on the same vectors.
+    """
+    return manifold_entropy_from_ci_masks(
+        ci_vectors, occupation_masks(dets, ncore, nact), weights=weights)
 
 
 def make_casscf_entropy_theta_fn(C0_, h_, e_, dets, *, ncore, nact, nele,

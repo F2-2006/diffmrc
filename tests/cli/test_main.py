@@ -132,12 +132,13 @@ def test_a_malformed_active_space_is_rejected(tmp_path, capsys):
 
 
 def test_the_default_level_is_the_one_that_can_run():
-    """The robust level refuses until the verification exists.
+    """The default level is the fast one, and the escalation path stays.
 
-    Defaulting to it would make every run end in a refusal whose reason
-    is a missing feature rather than a property of the system. The
-    escalation path stays: a fast run whose checks fail reports that it
-    should be re-run at the robust level.
+    The robust level now runs the entanglement verification and refuses
+    a space it cannot certify, so defaulting to it would refuse the
+    single-reference systems that make up most routine use. A fast run
+    whose checks fail still reports that it should be re-run at the
+    robust level.
     """
     from diffmrc.cli.main import build_parser
 

@@ -54,6 +54,7 @@ Entry point & Purpose \\
 \texttt{orbitals.frontier\_report / classify\_orbital} & frontier identities; window suggestion \\
 \texttt{orbitals.heavy\_atoms / p\_axis\_profile} & atom keys; per-axis p profiles \\
 \texttt{ci.occupations\_from\_ci / entropy\_from\_ci} & occupations and entropies from a CI vector \\
+\texttt{ci.manifold\_entropy\_from\_ci} & the same entropy over a merged spin manifold \\
 \texttt{ci.pair\_density / mutual\_information} & two-orbital reductions and their correlations \\
 \texttt{rdm.entropy\_from\_rdms} & the density-matrix route to the same quantities \\
 \texttt{diagnostics.is\_single\_reference / zs1} & multireference diagnostics \\
@@ -97,10 +98,36 @@ Entry point & Purpose \\
 \texttt{dvs.dvs\_scan(mol, ...)} & the (lambda, N) DVS candidate scan and selection \\
 \texttt{kernel.frozen\_grid(mol)} & the frozen quadrature (AO values, gradients, weights) \\
 \texttt{orbitals.converge\_orbital\_point(E\_theta, npar)} & two-stage convergence with refinement and polish \\
+\texttt{kernel.scf\_reference(..., ecp=None)} & the reference SCF; \texttt{ecp} reaches \texttt{Mole.ecp} \\
+\texttt{kernel.compute\_ground\_state(...)} & the self-checked end-to-end run; \texttt{params['ecp']} is forwarded \\
 \texttt{orbitals.hessp\_of(E\_theta)} & Hessian-vector product for the trust-region stage \\
 \bottomrule
 \end{tabularx}
 \end{center}
+
+\subsection{Effective core potentials}
+\label{sec:api-ecp}
+
+\texttt{scf\_reference(atoms, charge, spin, basis, ecp=None)} and the
+end-to-end path (\texttt{compute\_ground\_state}, and the command line
+through \texttt{params['ecp']}) accept a pseudopotential and assign it
+to \texttt{Mole.ecp} before the molecule is built.  The argument is
+either a name, which applies to every element, or a mapping keyed by
+element.  The mapping is the safe form: the \texttt{def2} sets carry
+an ECP above Kr only, so an iodine--hydrogen molecule needs
+\texttt{\{'I': 'def2-svp'\}}; a bare \texttt{'def2-svp'} also addresses
+hydrogen, which has no ECP under that name.  Without the parameter a
+heavy element is built as the all-electron atom against a valence
+basis, and the reference cannot be constructed because
+$N_{\mathrm{occ}} > N_{\mathrm{mo}}$.
+
+The core Hamiltonian carries the ECP scalar term on every path.  The
+core-Hamiltonian helper in \texttt{kernel} adds \texttt{ECPscalar}
+when the molecule reports an ECP, and the same construction in the
+on-top terms of \texttt{driver.nevpt2} is corrected.  Measured on ThO, dropping the
+term moved the trace of the one-electron matrix by $150.7$~Ha and the
+energy by $71$~Ha; a molecule without an ECP is bit-identical to the
+plain kinetic-plus-nuclear sum.
 
 The two factory families exist because of a pyscfad constraint: the
 \texttt{Mole}-based factories cannot be traced inside

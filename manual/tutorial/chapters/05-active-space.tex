@@ -111,3 +111,72 @@ The corrected formamide window reproduces the reference
 \textsc{sc}-NEVPT2 value to $0.02$~eV.  The residual deviations of the
 linear two-pi systems are a separate story --- they survive every
 window fix and are discussed in Chapter~\ref{sec:limitations}.
+
+\subsection{When no element rule applies}
+\label{sec:fallback-selection}
+
+The rules above are written for the lanthanide families.  A main-group
+molecule used to be refused outright, and a benchmark of six systems
+found the release selecting only one of them.  The driver now falls
+back to the occupation criterion, which is the same signal the
+lanthanide path reads:
+
+\begin{itemize}
+\item every orbital whose reference occupation lies inside
+  $(0.02,\,1.98)$ enters the space;
+\item a closed-shell reference has no such orbital, so the frontier
+  pair --- highest occupied and lowest virtual --- is taken instead;
+\item a degenerate partner of any selected orbital enters with it,
+  because half a degenerate pair describes a symmetry-broken state.
+\end{itemize}
+
+On the benchmark set this turns all four main-group cases into
+selections that converge at the energy and gradient level:
+H$_2$O takes orbitals 4 and 5, triplet CH$_2$ takes its two singly
+occupied orbitals, N$_2$ takes the completed space $\{5,6,7,8\}$ (with
+the curvature fallback described below), and O$_3$ takes the frontier
+pair on its C$_{2v}$ equilibrium geometry, with the CASSCF energy
+0.114~Eh below the RHF reference.
+
+Converging is not the same as being a minimum, and the curvature check
+is a separate gate.  Of these, the triplet CH$_2$ and N$_2$ spaces are
+genuine minima (lowest orbital-Hessian eigenvalues $+0.555$ and
+$+0.065$).  The H$_2$O frontier pair has three negative eigenvalues,
+and the three-orbital space of the equilateral D$_{3h}$ ozone ring has
+thirteen, because the occupied $e'$ pair $0.137$~Ha below the frontier
+is frozen in the core and the orbitals relax along that direction.
+Both are reported as refusals with the curvature evidence.  The ozone
+selection is also geometry dependent: the C$_{2v}$ equilibrium geometry
+gives a clean frontier pair, and the ring geometry is refused.
+
+The retry is decided by curvature, not by the gradient alone.  A
+completed space can converge at both the energy and the gradient level
+and still be an orbital saddle.  The driver therefore evaluates the
+curvature of the proposed space and, when the completion came from the
+occupation fallback and the space holds more than two orbitals, of the
+frontier pair as well, then keeps the candidate with fewer negative
+eigenvalues.  The equilateral D$_{3h}$ ozone ring is the measured case:
+the three-orbital completion has thirteen negative eigenvalues and the
+frontier pair two, so the frontier pair is kept and the run is refused
+with both spectra as evidence.  The H$_2$O frontier pair has three
+negative eigenvalues and is refused in the same way.  N$_2$/6-31G's
+completed space $\{5,6,7,8\}$ is a minimum with zero negative
+eigenvalues, and the space itself is kept.  Its analytic orbital Hessian
+is not finite at the symmetric stationary point, so the refinement
+rebuilds the curvature from symmetric differences of the analytic
+gradient; two steps take the gradient from $7.3\times10^{-5}$ to
+$8.8\times10^{-14}$ and the space passes the robust level.  The retry
+is automatic only for a space the fallback proposed; an active space
+given by hand is used as given.
+
+The curvature route is a separate matter.  At an exactly symmetric
+stationary point --- reached by a manually specified N$_2$/6-31G
+CAS(4,4) and by the automatically selected N quartet CAS(3,3) --- the
+analytic orbital Hessian is not finite, while the energy and the
+analytic gradient are.  The driver then takes the curvature from a
+symmetric difference of the analytic gradient and records
+\texttt{curvature\_method = 'gradient-difference'} in the result.
+
+The fallback gives a \emph{starting} space, not a certified one.  It
+says only what the occupations can say; whether the space holds is the
+question the robust-level entanglement verification answers.

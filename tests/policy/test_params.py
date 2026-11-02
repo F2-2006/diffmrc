@@ -20,9 +20,15 @@ def test_every_param_declares_the_documented_fields():
 
 
 def test_every_param_declares_a_range_or_a_choice_set():
-    """A parameter with neither cannot be validated."""
+    """A parameter with neither cannot be validated here.
+
+    Free-form values (the ECP definition) are validated where they are
+    used, against the basis library, not by a range this module could
+    declare.
+    """
     for key, p in PARAMS.items():
-        assert (p.lo is not None and p.hi is not None) or p.choices, key
+        assert ((p.lo is not None and p.hi is not None) or p.choices
+                or p.freeform), key
 
 
 def test_defaults_are_within_their_declared_ranges():

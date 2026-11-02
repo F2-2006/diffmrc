@@ -80,10 +80,11 @@ def checks_from_result(grad_norm, n_negative, e_casscf, e_reference,
         Thresholds for the first and third checks.
     active_space_verified : bool, optional
         Whether the entanglement verification of the active space ran
-        and agreed. ``None`` -- the fast level -- adds no check at all;
-        ``False`` adds a failing one, because the robust level promises
-        a verification this build does not yet perform and a passing
-        robust result would be a claim it cannot support.
+        and agreed. ``None`` -- the fast level -- adds no check at all.
+        ``False`` adds a failing one: the verification ran and the merged
+        spectrum is single-reference, or it could not be evaluated at
+        all. Either way a passing robust result would be a claim the run
+        cannot support.
 
     Returns
     -------
@@ -124,9 +125,9 @@ def checks_from_result(grad_norm, n_negative, e_casscf, e_reference,
             passed=bool(active_space_verified),
             detail=('the entanglement verification ran and agreed'
                     if active_space_verified else
-                    'the entanglement verification did not run: it is not '
-                    'implemented in this build, so the active space rests '
-                    'on the selection rules alone'),
+                    'the entanglement verification did not agree or could '
+                    'not be evaluated; see active_space_entropy in the '
+                    'result for the merged spectrum and the verdict'),
         ))
     return checks
 

@@ -57,6 +57,7 @@ from dataclasses import dataclass
 import numpy as np
 import jax
 
+from .adint import int2e_s1
 from .orblib import orbital_pairs  # noqa: F401  (re-exported for callers)
 from .rotation import block_rotation
 
@@ -148,7 +149,7 @@ def make_joint_energy_fn(ncore, nact, nele, nmo, pairs, pscf,
         mf_.kernel()
         C_ = mf_.mo_coeff
         h_ = m_.intor('int1e_kin') + m_.intor('int1e_nuc')
-        e_ = m_.intor('int2e', aosym='s1')
+        e_ = int2e_s1(m_)
         C2 = C_ @ block_rotation(th_, nmo, pairs)
         nm = ncore + nact
         h1 = jax.numpy.einsum('ai,ab,bj->ij', C2, h_, C2)[:nm, :nm]

@@ -20,7 +20,7 @@ stationary.  The stages and their defaults:
 \toprule
 Setting & Value & Meaning \\
 \midrule
-\texttt{optimize\_tol} & $10^{-6}$ & L-BFGS-B target; loose on purpose \\
+\texttt{optimizer\_grad\_tol} & $10^{-4}$ & L-BFGS-B target; loose on purpose \\
 \texttt{refine\_target} & $10^{-11}$ & the Newton target, and the verdict \\
 \texttt{max\_steps} & $2000$ & L-BFGS-B iteration cap \\
 \texttt{refine\_max\_iter} & $80$ & damped-Newton iteration cap \\
@@ -28,6 +28,19 @@ Setting & Value & Meaning \\
 \bottomrule
 \end{tabular}
 \end{center}
+
+The first-stage target was raised from $10^{-6}$ to $10^{-4}$ because
+the first stage cannot reach $10^{-6}$: its measured floor is
+$1.5\times10^{-5}$, so a tighter target reports a false
+non-convergence and keeps L-BFGS-B iterating in a flat valley.  The
+Newton refinement continues from wherever the first stage stops and
+carries the verdict.  Measured on HI/def2-SVP CAS(2,2), the
+$10^{-6}$ target ran past 55 minutes, while stopping the first stage
+at $10^{-4}$ and letting the refinement finish reached
+$4.3\times10^{-8}$ in 128~s.  The driver parameter is
+\texttt{optimizer\_grad\_tol}; a direct call to
+\texttt{converge\_orbital\_point} that omits it still sees the module
+constant of $10^{-6}$.
 
 The verdict is the gradient norm at the point the chain stopped at,
 classified by the stop reason:
@@ -53,6 +66,19 @@ intermediate over $n_\mathrm{par}^2$ tangent pairs and was killed by a
 downhill acceptance test is not optional: an unguarded refinement
 moved an energy from $-76.07$ to $+1.04$~Ha in this project's history
 and printed no error.
+
+One more case needs its own route.  At an exactly symmetric stationary
+point the blocked eigensolver's second derivative is undefined: every
+entry of the analytic orbital Hessian is not finite, while the energy
+and the analytic gradient are smooth.  The polish probes one
+Hessian-vector product, and a non-finite entry hands the point to a
+damped Newton step whose Hessian is rebuilt from symmetric differences
+of the analytic gradient (step $10^{-5}$ in rotation-parameter units,
+dense matrix, 300-parameter cap).  Measured on N$_2$/6-31G CAS(4,4):
+the L-BFGS-B stage stops at $7.3\times10^{-5}$, two refinement steps
+reach $8.8\times10^{-14}$, and the robust verdict passes.  On a system
+whose analytic Hessian is finite the probe costs one Hessian-vector
+product and the path is unchanged.
 
 \section{State averaging}
 
@@ -86,6 +112,42 @@ and a window that widens to three orbitals for the linear two-pi and
 amide patterns therefore carries four active electrons, not two.  A
 hard-coded two here produces a wrong ground state that the energy
 alone will not flag.
+
+A second bookkeeping rule belongs to the automatic fallback (the
+occupation criterion used when no element rule covers the
+composition).  The fallback completes degenerate partners, and the
+completed space can be one the orbital optimizer cannot converge.
+When the converged gradient of an automatically selected space with
+more than two orbitals exceeds $10^{-3}$, the driver retries the pure
+frontier pair --- highest occupied and lowest virtual --- and keeps
+that point when its gradient is lower.  Measured on
+HI/def2-SVP CAS(2,2), the completed three-orbital space stalled at
+$10^{-2}$ after hundreds of steps, while the frontier pair reached
+$4\times10^{-8}$ in 128~s.  On N$_2$/6-31G the completed frontier
+manifold stalls in the same way and the frontier pair is kept.  The
+retry is confined to the automatic fallback: a manually given active
+space is never overridden.
+
+The rotation set itself can dominate the cost.  The pairs include the
+core--virtual block, and for a large core that block outnumbers the
+core--active and active--virtual pairs together; the first stage then
+spends most of its iterations on directions that barely change the
+energy.  When the core--virtual pair count exceeds twice the sum of the
+other two blocks, the driver first optimizes the subset without
+core--virtual rotations and then refines the point over the full set:
+\texttt{embed\_theta} maps the subset vector onto the full pair list by
+pair identity, and \texttt{converge\_orbital\_point\_two\_stage} runs
+the second stage from the embedded point.  Measured on HI/def2-SVP
+CAS(2,2) (262 full and 58 subset parameters), the two-stage route reaches
+a final gradient of $1.4\times10^{-9}$ in 378.5~s, against 420.5~s and
+$7.5\times10^{-10}$ for the single-stage full-space route, with the two
+converged points $1.1\times10^{-13}$~Ha apart.  The split is gated
+rather than unconditional because the subset optimum is not always a
+minimum: on H$_2$O/6-31G it is a saddle with two negative curvature
+directions, and only the full-space refinement reaches the minimum.
+H$_2$O and N$_2$ therefore keep the single-stage route and are
+bit-identical.  The gate is an engineering rule supported by three
+systems, not a theorem.
 
 \section{The e2\_scale switch}
 

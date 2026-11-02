@@ -403,8 +403,17 @@ the open-shell doublet OH/6-31G CAS(3,2) the CASSCF stationary point coincides
 with the ROHF orbitals at every geometry, so the response term vanishes
 identically and only the frozen gradient is testable; a non-trivial open-shell
 response (OH CAS(5,4)) remains blocked by a 19.4% discrepancy in the frozen e2
-nuclear derivative. f-block and large-basis relaxed gradients are blocked
-upstream by the dense `nctr * nao^4` integral-derivative allocation. The exact
+nuclear derivative. f-block and large-basis relaxed gradients are memory-bound,
+measured on LrF at 109 spherical basis functions with a 78-core Stuttgart RLC
+ECP (CAS(8,6), 13 frozen core orbitals, one thread): the pinned NEVPT2 energy
+forward peaks at 12.1 GB and the displaced-geometry SCF plus NEVPT2 chain at
+16.5 GB, while the reverse pass of `s = d e2/dtheta` is oom-killed by the
+kernel at the 60 GB cgroup limit, with a measured peak of 60 728 MB after
+1 h 55 min (the same pass is oom-killed at 20 GB, and a 55 GB proactive
+threshold stops it at 56.5 GB). The dense `nctr * nao^4` integral-derivative
+allocation is a separate upstream limit; the `core.adint` custom-VJP backend
+reduces the bare integral-derivative peak from 9.6-19 GB to 4.2-7.8 GB at
+nao = 104-124 and is the natural next step for this chain. The exact
 near-zero treatment applies to the `Si` class only; the other four contraction
 classes retain the release value mask, and no validation system with a masked
 channel outside `Si` has been found. (Branch `wave14/caspt2-nevpt2`, commit

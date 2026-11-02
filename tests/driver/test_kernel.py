@@ -1,4 +1,6 @@
 """Assembling the end-to-end path out of the frozen kernel's pieces."""
+import warnings
+
 import numpy as np
 import pytest
 
@@ -296,6 +298,7 @@ def test_compute_ground_state_refuses_an_unparseable_active_space(monkeypatch):
     class _MF:
         mo_coeff = np.eye(3)
         mo_occ = np.array([2.0, 0.0, 0.0])
+        mo_energy = np.array([-1.0, 0.0, 0.5])
         e_tot = -1.0
 
     from diffmrc.driver.run import ElectronicStructureFailure
@@ -317,6 +320,7 @@ def test_compute_ground_state_reads_parameters_like_the_driver_does(
     class _MF:
         mo_coeff = np.eye(3)
         mo_occ = np.array([2.0, 0.0, 0.0])
+        mo_energy = np.array([-1.0, 0.0, 0.5])
         e_tot = -1.0
 
     monkeypatch.setattr(kernel, 'scf_reference', lambda *a, **k: (mol, _MF()))
@@ -326,3 +330,75 @@ def test_compute_ground_state_reads_parameters_like_the_driver_does(
     out = kernel.compute_ground_state('H 0 0 0; H 0 0 0.74', 0, 0, None,
                                       {'basis': '6-31g'})
     assert out['n_elec_active'] == 2
+
+
+class _FakeEcpMol:
+    """A molecule that reports an ECP and returns distinguishable blocks."""
+
+    def __init__(self):
+        self.n = 2
+
+    def has_ecp(self):
+        return True
+
+    def intor(self, name, **kwargs):
+        if name == 'int1e_kin':
+            return np.eye(self.n)
+        if name == 'int1e_nuc':
+            return 2.0 * np.eye(self.n)
+        if name == 'ECPscalar':
+            return -5.0 * np.eye(self.n)
+        raise KeyError(name)
+
+
+def test_the_core_hamiltonian_carries_the_ecp_term():
+    """The raw kinetic-plus-nuclear sum is not the core Hamiltonian.
+
+    Dropping the ECP scalar term changes the energy of every
+    pseudopotential system; measured on ThO the two traces differ by
+    150.7 Ha. The helper adds the term when the molecule reports an ECP.
+    """
+    from diffmrc.driver.kernel import _core_hamiltonian
+
+    h = _core_hamiltonian(_FakeEcpMol())
+    assert np.allclose(h, (1.0 + 2.0 - 5.0) * np.eye(2))
+
+
+def test_the_core_hamiltonian_leaves_a_molecule_without_ecp_alone():
+    from diffmrc.driver.kernel import _core_hamiltonian
+
+    class _NoEcp:
+        def has_ecp(self):
+            return False
+
+        def intor(self, name, **kwargs):
+            return np.ones((2, 2)) if name == 'int1e_kin' \
+                else 2.0 * np.ones((2, 2))
+
+    assert np.allclose(_core_hamiltonian(_NoEcp()), 3.0 * np.ones((2, 2)))
+
+
+def test_a_thread_count_above_one_is_flagged(monkeypatch):
+    """NEVPT2 values are not reproducible above one thread.
+
+    Measured on H2O/6-31G CAS(2,2): two identical runs at
+    OMP_NUM_THREADS > 1 gave e2 values 5e-3 Ha apart.
+    """
+    from diffmrc.driver.kernel import (
+        _warn_if_thread_count_breaks_reproducibility,
+    )
+
+    monkeypatch.setenv('OMP_NUM_THREADS', '4')
+    with pytest.warns(RuntimeWarning, match='not reproducible'):
+        _warn_if_thread_count_breaks_reproducibility()
+
+
+def test_a_single_thread_is_silent(monkeypatch):
+    from diffmrc.driver.kernel import (
+        _warn_if_thread_count_breaks_reproducibility,
+    )
+
+    monkeypatch.setenv('OMP_NUM_THREADS', '1')
+    with warnings.catch_warnings():
+        warnings.simplefilter('error')
+        _warn_if_thread_count_breaks_reproducibility()

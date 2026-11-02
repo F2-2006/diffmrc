@@ -111,12 +111,13 @@ def test_the_thresholds_are_function_arguments():
 
 
 def test_a_robust_result_without_verification_fails_its_check():
-    """The robust level promises a verification this build does not do.
+    """A robust result whose verification did not agree must not pass.
 
     Refusing is the design: a number that looks reasonable but rests on
-    an unverified active space will be quoted. Until the verification
-    exists, the honest outcome at the robust level is a refusal that
-    names the gap.
+    an unverified active space will be quoted. The driver now runs the
+    verification itself; this test pins the failure path for a result
+    that reports it as not agreed, which is the same path a verification
+    that could not be evaluated takes.
     """
     from diffmrc.driver.run import checks_from_result
 

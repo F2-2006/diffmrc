@@ -69,6 +69,8 @@ correction with a mode argument inside ``core.nevpt2.core.e2_core``.
 """
 import numpy as np
 
+from ..core.adint import int2e_s1
+
 __all__ = ['si_e2_exact',
            'si_energy_from_invariants',
            'si_channel_table',
@@ -281,19 +283,59 @@ def _e2_core_exact_si(blocks, eps, ncore, nact, eri_mo):
     return e2
 
 
+def _si_inputs(blocks, eps, ncore, nact, eri_mo):
+    """The Si-class arguments, built once and shared by both Si forms.
+
+    ``e2_core`` slices the mixed active-core blocks out of
+    ``t = einsum('prqs->pqrs', eri_mo)``; the same slice feeds the exact
+    near-zero form, so one permuted copy and one slice serve both.
+    """
+    from jax import numpy as jnp
+
+    nocc = ncore + nact
+    t = jnp.einsum('prqs->pqrs', eri_mo)
+    return dict(
+        h1e_act=blocks['h1e_act'], h2e_act=blocks['eri_act'],
+        h2e_v_si=t[ncore:nocc, ncore:nocc, :ncore, ncore:nocc],
+        h1e_v_si=blocks['h1eff'][ncore:nocc, :ncore],
+        dm1=blocks['dm1'], dm2=blocks['dm2'], dm3=blocks['dm3'],
+        f3ca=blocks['f3ca'], f3ac=blocks['f3ac'],
+        mo_energy_core=eps[:ncore])
+
+
+def _si_value(si_kw, mode):
+    """One Si class evaluation, ``mode='masked'`` or ``'exact'``."""
+    from ..core.nevpt2.core import si_e2
+
+    if mode == 'masked':
+        return si_e2(**si_kw)
+    if mode != 'exact':
+        raise ValueError('mode must be masked or exact, got {!r}'.format(mode))
+    return si_e2_exact(**si_kw)
+
+
 def nevpt2_e2_full2_si_exact(h1e_mo, eri_mo, c_ci, dets, E0_elec,
                              mo_energy=None, ncore=0, nact=2, nocc=2,
                              links_a=None, links_b=None):
     """``nevpt2_e2_full2`` with the exact-Si core classes.
 
-    The release total is computed as is; then both core assemblies are
-    evaluated on the same recomputed blocks and the difference is applied.
+    The Si class is the only core class whose treatment changes, so only
+    it is evaluated twice: the release total carries the masked Si, and
+    the correction ``si_exact - si_masked`` is applied to that total.
+    The other five core classes are not reassembled -- they already sit
+    in the release total, bit for bit.
+
+    An earlier form rebuilt the whole six-class assembly twice (once
+    masked, once exact) and cancelled five classes against themselves.
+    That cost 48% to 76% of the NEVPT2 evaluation on H2O/6-31G and
+    HI/LANL2DZ and bought nothing: the cancelled terms are identical.
+    ``_e2_core_exact_si`` and ``core.nevpt2.core.e2_core`` are kept so
+    ``tests/driver/test_nevpt2_zvector.py`` can rebuild the old value and
+    compare against this one.
+
     With ``ncore == 0`` or without link tables the release path skips the
     core classes and this function is the release function.
     """
-    from jax import numpy as jnp
-
-    from ..core.nevpt2.core import e2_core
     from ..core.nevpt2.impl import nevpt2_e2_full2
 
     e2_ref, eps = nevpt2_e2_full2(
@@ -303,12 +345,10 @@ def nevpt2_e2_full2_si_exact(h1e_mo, eri_mo, c_ci, dets, E0_elec,
         return e2_ref, eps
     blocks = _core_blocks(h1e_mo, eri_mo, c_ci, dets, ncore, nact, nocc,
                           eps, links_a, links_b)
-    e2_masked = e2_core(blocks['h1e_act'], blocks['eri_act'], blocks['dm1'],
-                        blocks['dm2'], blocks['dm3'], eps, ncore, nact,
-                        blocks['f3ca'], blocks['f3ac'], eri_mo=eri_mo,
-                        h1eff=blocks['h1eff'])
-    e2_exact = _e2_core_exact_si(blocks, eps, ncore, nact, eri_mo)
-    return e2_ref - e2_masked + e2_exact, eps
+    si_in = _si_inputs(blocks, eps, ncore, nact, eri_mo)
+    si_masked = _si_value(si_in, 'masked')
+    si_exact = _si_value(si_in, 'exact')
+    return e2_ref - si_masked + si_exact, eps
 
 
 def align_reference_blocks(C, S, C_ref, bounds):
@@ -377,7 +417,8 @@ def _components_from_si_exact(C0_, h_, e_, enuc, th_, *, ncore, nact, nele,
 def make_nevpt2_joint_fn_si_exact(ncore, nact, nele, nmo, pairs,
                                   scf_builder, e2_scale=1.0,
                                   ci_solver='plain', eig_solver='default',
-                                  align_ref=None, align_bounds=None):
+                                  align_ref=None, align_bounds=None,
+                                  remat_after_scf=False):
     """Build ``E(mol, theta)`` with the exact-Si core classes.
 
     Same contract as ``driver.nevpt2.make_nevpt2_joint_fn``; use it to
@@ -390,7 +431,18 @@ def make_nevpt2_joint_fn_si_exact(ncore, nact, nele, nmo, pairs,
     same gauge the relaxed-path finite differences use; without it the
     frozen partial and the response operator are expressed in different
     coordinates and cannot be added.
+
+    With ``remat_after_scf`` the segment that follows the SCF -- the
+    blockwise alignment, the four AO->MO transforms, the CI solves and
+    the NEVPT2 contraction -- is wrapped in ``jax.checkpoint``, so its
+    intermediates are recomputed in the backward pass instead of being
+    retained.  The SCF stays outside the checkpoint on purpose: the
+    release ``pyscfad`` SCF calls ``to_numpy`` in ``get_occ`` and cannot
+    be traced inside a rematerialised region.  The segment itself is a
+    pure function of arrays, so checkpointing it is safe.
     """
+    import jax
+
     from ..core.nevpt2.impl import cas_dets_for2
     from .nevpt2 import _spin_links
 
@@ -400,6 +452,15 @@ def make_nevpt2_joint_fn_si_exact(ncore, nact, nele, nmo, pairs,
               dets=dets, links_a=links_a, links_b=links_b,
               ci_solver=ci_solver, eig_solver=eig_solver)
 
+    def _core_for(want_e2):
+        def _f(C_, h_, e_, enuc_, th_):
+            return _components_from_si_exact(
+                C_, h_, e_, enuc_, th_, want_e2=want_e2, **kw)
+        return jax.checkpoint(_f) if remat_after_scf else _f
+
+    _core_e2 = _core_for(True)
+    _core_cas = _core_for(False)
+
     def components(m_, th_, want_e2=True):
         mf_ = scf_builder(m_)
         mf_.kernel()
@@ -407,10 +468,8 @@ def make_nevpt2_joint_fn_si_exact(ncore, nact, nele, nmo, pairs,
         if align_ref is not None and align_bounds is not None:
             C = align_reference_blocks(C, m_.intor('int1e_ovlp'),
                                        align_ref, align_bounds)
-        return _components_from_si_exact(
-            C, mf_.get_hcore(),
-            m_.intor('int2e', aosym='s1'), m_.energy_nuc(), th_,
-            want_e2=want_e2, **kw)
+        core = _core_e2 if want_e2 else _core_cas
+        return core(C, mf_.get_hcore(), int2e_s1(m_), m_.energy_nuc(), th_)
 
     def E_joint(m_, th_):
         E_cas, e2 = components(m_, th_, want_e2=(e2_scale != 0.0))

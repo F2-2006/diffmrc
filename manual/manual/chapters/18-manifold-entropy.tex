@@ -1,0 +1,279 @@
+\chapter{Manifold-merged entanglement entropy}
+\label{ch:manifold-entropy}
+
+\section{Purpose and scope}
+
+The active-space criterion of this package ranks orbitals by the
+four-state entanglement entropy of their one-orbital reduced density
+matrix.  The entropy is defined for one state, and the release
+computed it for one state.  A spin multiplet is not one state: it is a
+manifold of $2S+1$ degenerate components related by spin projection,
+and the component that a single-reference calculation returns is a
+poor representative of the manifold for the purpose of this
+criterion.  This chapter defines the merge that fixes the
+representative, gives the derivation, documents the API, and describes
+the verification gate at the robust level that the merge now feeds.
+
+\section{Why one state is not enough}
+\label{sec:manifold-why}
+
+\subsection{The four occupation weights}
+
+For one orbital, the one-orbital reduced density matrix in the
+occupation basis $\{|0\rangle,|\uparrow\rangle,|\downarrow\rangle,
+|\uparrow\downarrow\rangle\}$ is diagonal, and its four weights are
+\begin{equation}
+  w = \bigl(\,1-n_{\alpha}-n_{\beta}+p_{2},\;\;
+             n_{\alpha}-p_{2},\;\;
+             n_{\beta}-p_{2},\;\;
+             p_{2}\,\bigr),
+  \label{eq:four-state-weights}
+\end{equation}
+where $n_{\alpha}$, $n_{\beta}$ are the spin-resolved occupations of
+the orbital and $p_{2}$ is the probability of finding it doubly
+occupied.  The entropy is
+\begin{equation}
+  s_{1} = -\sum_{k=1}^{4} w_{k}\ln w_{k},
+  \qquad 0 \le s_{1} \le \ln 4 .
+  \label{eq:four-state-entropy}
+\end{equation}
+An orbital that is always empty, always singly occupied with a fixed
+spin, or always doubly occupied has $s_{1}=0$; an orbital whose
+occupation fluctuates strongly approaches $\ln 4$.
+
+\subsection{The $M_S=+S$ component of a high-spin determinant}
+
+Consider the component of largest spin projection of a pure
+high-spin state.  It is a single Slater determinant, and every open
+shell carries exactly one electron of the majority spin.  For such an
+orbital the triple is
+\begin{equation}
+  n_{\alpha}=1,\qquad n_{\beta}=0,\qquad p_{2}=0,
+  \label{eq:single-det-triple}
+\end{equation}
+so the weights are $w=(0,1,0,0)$ and
+\begin{equation}
+  s_{1}=0
+  \label{eq:single-det-zero}
+\end{equation}
+for every open shell.  The nitrogen atom in its $^{4}S$ ground state
+is the smallest example: three singly occupied $2p$ orbitals, and the
+single-state criterion reports zero entropy for all three, although a
+correct description of the atom requires all three in the active
+space.
+
+The zero is not a numerical accident.  In that determinant the
+orbital is in a definite Fock state, so there is no entanglement
+between it and the rest with respect to the spin degree of freedom.
+What the determinant does not show is the degeneracy: the same
+electronic structure appears in the $M_S=-S,\dots,+S$ components, and
+the physical state is the manifold, not one projection of it.
+
+\subsection{Merging the manifold}
+
+Let $\{c^{(k)}\}_{k=1}^{R}$ be the CI vectors of the $R$ components,
+with normalized columns $\sum_{I}|c^{(k)}_{I}|^{2}=1$, and let
+$\omega_{k}$ be their ensemble weights.  The mixed one-orbital
+reduced density matrix is the weighted mean of the per-state
+matrices.  The map from the triple $(n_{\alpha},n_{\beta},p_{2})$ to
+the weight vector in Eq.~\eqref{eq:four-state-weights} is affine, so
+the weights of the mixture are the weighted mean of the per-state
+weights:
+\begin{equation}
+  \bar{n}_{\alpha}=\sum_{k}\omega_{k}n^{(k)}_{\alpha},\qquad
+  \bar{n}_{\beta}=\sum_{k}\omega_{k}n^{(k)}_{\beta},\qquad
+  \bar{p}_{2}=\sum_{k}\omega_{k}p^{(k)}_{2}.
+  \label{eq:manifold-mean}
+\end{equation}
+No density matrix is assembled, and the cost is one matrix product per
+root: the per-state occupations follow from the determinant bitmaps
+already used by the single-state route.
+
+For a complete spin manifold the mean is spin-isotropic,
+$\bar{n}_{\alpha}=\bar{n}_{\beta}$, and a singly occupied shell
+obtains
+\begin{equation}
+  \bar{n}_{\alpha}=\bar{n}_{\beta}=\tfrac12,\qquad \bar{p}_{2}=0,
+  \qquad w=\bigl(0,\tfrac12,\tfrac12,0\bigr),
+  \qquad s_{1}=\ln 2 .
+  \label{eq:manifold-ln2}
+\end{equation}
+The value $\ln 2$ is the entropy of one electron of unknown spin in
+one orbital, which is exactly what the criterion should read for a
+degenerate open shell.
+
+\section{Which roots form the manifold}
+
+For a pure spin state of spin $S$ the manifold has $2S+1$ components,
+and in a calculation that returns the lowest eigenvalues in ascending
+order they are the lowest $2S+1$ roots, because the components are
+degenerate.  The gate therefore takes
+\begin{equation}
+  R = 2S+1,
+  \label{eq:nroots}
+\end{equation}
+which the driver evaluates from the spin multiplicity of the request.
+The assumption fails when a state of different spin and lower energy
+lies inside the same window; the merged occupations then contain a
+foreign state.  The worked example in
+Sec.~\ref{sec:manifold-example} is the case where the assumption
+holds and can be checked.
+
+\section{API}
+
+The analysis layer exposes the occupation triple and the entropy of a
+manifold:
+\begin{lstlisting}
+from diffmrc.analysis.ci import (manifold_occupations,
+                                 manifold_entropy_from_ci)
+
+# vectors: shape (ndet,) or (ndet, nroots), in the determinant order
+# produced by core.nevpt2.impl.cas_dets_for2
+s1 = manifold_entropy_from_ci(vectors, dets, ncore=ncore, nact=nact)
+n_a, n_b, p2 = manifold_occupations(vectors, dets, ncore=ncore,
+                                    nact=nact)
+\end{lstlisting}
+Each column is normalized before use; the mixture weights carry the
+ensemble, not the arbitrary scale of a vector.  The default is equal
+weights.  A weight vector shorter than the root count is padded with
+zeros, and negative weights, a zero weight sum, more weights than
+states, and an all-zero column are refused with a message.
+
+The differentiable sibling, used when the entropy is itself a function
+of the orbital parameters, is
+\texttt{driver.entropy.manifold\_entropy\_from\_ci\_masks} (masks
+precomputed once per determinant list) and
+\texttt{driver.entropy.manifold\_single\_orbital\_entropy\_from\_ci}
+(determinant list given directly).  Both are bound to the NumPy route
+by a test at $10^{-12}$.
+
+The CI vectors of a converged calculation are obtained without
+re-solving in a different basis:
+\begin{lstlisting}
+from diffmrc.driver.kernel import casci_vectors_at
+
+vectors = casci_vectors_at(mol, C, space, theta, nroots=2 * S + 1)
+\end{lstlisting}
+\texttt{casci\_vectors\_at} shares the integral block and the orbital
+rotation with the energy route, so the vectors belong to the reported
+energy.
+
+\section{The robust-level gate}
+\label{sec:manifold-gate}
+
+At the robust level the driver evaluates the merged spectrum after the
+CASSCF has converged and records two entries of
+\texttt{algorithm\_data}:
+\begin{lstlisting}
+{'active_space_verified': True | False,
+ 'active_space_entropy': {'s1': [...], 'nroots': R,
+                          'verdict': '...', 'plateau_heights': [...],
+                          'evidence': [...]}}
+\end{lstlisting}
+The check passes when the merged spectrum is not single-reference,
+that is, when its largest single-orbital entropy reaches the
+multireference criterion of $0.14$.  A verdict of
+\texttt{single\_reference} fails the check, and the robust level
+refuses the run: there is no active space to verify.  A verdict that
+the spectrum is larger than the selected space is recorded but does
+not veto the run, because the element rules add ligand orbitals whose
+entropy lies below the line by construction; vetoing them would
+contradict the selection rules themselves.
+
+Two properties of the gate should be stated plainly.
+
+\textbf{Scope.}  The spectrum is the one the selected space can show.
+An orbital outside the space has zero entropy by construction, so the
+gate can certify that the space is multireference and that its
+orbitals are not noise; it cannot certify that the space is not
+truncated at the frontier.  Completeness at the frontier remains the
+responsibility of the selection rules.
+
+\textbf{Failure to evaluate.}  If the spectrum cannot be evaluated the
+gate reports unverified with the reason, rather than raising.  At the
+robust level an unverified space is a refusal, which is the same
+outcome the exception would have produced and a more useful record.
+
+\section{Worked example: the nitrogen quartet}
+\label{sec:manifold-example}
+
+The $^{4}S$ ground state of the nitrogen atom, CAS(3,3) over the three
+$2p$ orbitals with the 6-31G basis, at the ROHF reference orbitals.
+The calculation returns four roots; Table~\ref{tab:manifold-n} lists
+the single-orbital entropy of each root and of the merged manifold.
+
+\begin{table}[h]
+\centering
+\caption{Single-orbital entropy of the N $^{4}S$ manifold,
+CAS(3,3)/6-31G.  Each root is a component of the quartet; read
+individually the roots disagree by three orders of magnitude, and the
+merged value is $\ln 2$.}
+\label{tab:manifold-n}
+\begin{tabular}{lccc}
+\toprule
+root & $s_{1}(2p_x)$ & $s_{1}(2p_y)$ & $s_{1}(2p_z)$ \\
+\midrule
+0 & $6.60849\times10^{-1}$ & $6.60849\times10^{-1}$ & $6.60849\times10^{-1}$ \\
+1 & $6.36514\times10^{-1}$ & $6.36514\times10^{-1}$ & $6.36514\times10^{-1}$ \\
+2 & $2.2\times10^{-25}$ & $1.5\times10^{-24}$ & $5.1\times10^{-25}$ \\
+3 & $1.68823\times10^{-1}$ & $1.68823\times10^{-1}$ & $1.68823\times10^{-1}$ \\
+\midrule
+merged & $6.93147\times10^{-1}$ & $6.93147\times10^{-1}$ & $6.93147\times10^{-1}$ \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Root 2 is the determinant of Eq.~\eqref{eq:single-det-zero} and
+reports zero; roots 0, 1 and 3 are the other projections and report
+values that depend on the projection.  The merged value equals
+$\ln 2=0.693147$ for all three orbitals to the printed precision,
+which is the spin-isotropic result of
+Eq.~\eqref{eq:manifold-ln2} and confirms that the four roots form the
+complete manifold.
+
+For comparison, two closed-shell cases run through the same gate
+report $4.787\times10^{-3}$ (H$_2$O/6-31G, CAS(2,2) over the two
+frontier orbitals) and $6.792\times10^{-2}$ (H$_2$/STO-3G, CAS(2,2)).
+Both lie below the $0.14$ criterion and are reported as
+single-reference, which is the intended outcome: an active space is
+not justified for them.
+
+\section{Limitations}
+\label{sec:manifold-limits}
+
+\textbf{Root selection.}  Equation~\eqref{eq:nroots} assumes that the
+lowest $2S+1$ roots are the components of the target manifold.  A
+lower state of another spin inside the same window contaminates the
+mixture.  The assumption can be checked by printing the root energies
+and confirming degeneracy, which the driver records in the report but
+does not enforce.
+
+\textbf{Equal weights.}  The default weights are equal, which is the
+state-averaged convention for a degenerate manifold.  A manifold split
+by spin-orbit coupling is not degenerate; the API accepts explicit
+weights, and the caller is responsible for choosing them.
+
+\textbf{Within-space scope.}  As stated in
+Sec.~\ref{sec:manifold-gate}, the spectrum cannot see orbitals that
+the selection left out.
+
+\textbf{A pre-existing failure on the quartet.}  The end-to-end
+driver evaluates the orbital Hessian for its curvature check, and on
+the N $^{4}S$ case that Hessian is not finite: at the converged point,
+which sits within $2\times10^{-7}$ of the symmetric $\theta=0$, all
+676 entries are NaN, while a random displacement of $0.01$ gives a
+finite Hessian.  The exact degeneracy of the high-spin multiplet makes
+the second derivative of the blocked eigensolver undefined.  The
+driver now recovers the curvature from a symmetric difference of the
+analytic gradient, which is finite at the same point, using a step of
+$10^{-5}$ in the rotation parameters.  The route costs two gradient
+evaluations per parameter and is capped at 300 parameters; a rotation
+space with more than 300 parameters is refused with the diagnosis
+rather than approximated by the difference route.  On N$_2$ the
+spectra at steps $10^{-5}$, $10^{-4}$ and $10^{-3}$ agree (minimum
+$0.0648$, maximum $66.96$, no negative eigenvalues), and
+\texttt{algorithm\_data['curvature\_method']} records which route ran.
+The numbers in Table~\ref{tab:manifold-n} were produced by calling
+\texttt{casci\_vectors\_at} directly at the SCF orbitals.  The defect
+is recorded here so that it is not mistaken for a property of the
+merge.
