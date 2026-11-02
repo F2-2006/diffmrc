@@ -496,3 +496,37 @@ def test_the_joint_function_accepts_the_alignment_hook():
     g_plain = np.asarray(jax.grad(lambda m: f_plain(m, theta))(mol).coords)
     g_aligned = np.asarray(jax.grad(lambda m: f_aligned(m, theta))(mol).coords)
     assert np.abs(g_plain - g_aligned).max() < 1e-10
+
+
+def test_the_fixed_theta_state_is_invariant_to_reference_column_signs():
+    """The rotation chart is measured from the SCF columns, whose sign is
+    an arbitrary eigenvector gauge; a fixed theta must therefore describe
+    the same physical rotation after a column flip.  Without the
+    canonicalization in ``_casscf_solution`` this test fails by ~1e-3 Ha
+    on H2O at a non-zero theta."""
+    from pyscfad import scf
+
+    from diffmrc.driver.nevpt2 import _casscf_solution
+
+    mol = _h2o()
+    nmo = mol.nao_nr()
+    mf = scf.RHF(mol)
+    mf.kernel()
+    C0 = np.asarray(mf.mo_coeff)
+    h1 = np.asarray(mf.get_hcore())
+    eri = mol.intor("int2e", aosym="s1")
+    pairs = _pairs(1, 2, nmo)
+    theta = 0.01 * np.arange(len(pairs))
+
+    def state(C):
+        return _casscf_solution(
+            jnp.asarray(C), jnp.asarray(h1), jnp.asarray(eri),
+            jnp.asarray(theta), ncore=1, nact=2, nele=2, nmo=nmo,
+            pairs=pairs, ci_solver="blocked")
+
+    a = state(C0)
+    flipped = C0.copy()
+    flipped[:, ::2] *= -1.0
+    b = state(flipped)
+    assert float(a[0]) == pytest.approx(float(b[0]), abs=1e-10)
+    assert np.allclose(np.asarray(a[2]), np.asarray(b[2]), atol=1e-10)

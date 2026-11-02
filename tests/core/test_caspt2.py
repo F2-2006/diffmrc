@@ -700,3 +700,21 @@ def test_coupled_h2o_co_ratios_and_coupling_direction():
         shift = e2 - e2_diag
         assert np.sign(shift) == cfg['shift_sign'], (cfg['name'], shift)
         assert abs(shift) > 1e-6
+
+
+def test_the_replica_rule_warns_above_two_active_orbitals():
+    """The dropped (u, u) rows are replicas only for nact = 2."""
+    import warnings
+
+    from diffmrc.core.caspt2 import caspt2_contracted_e2
+
+    h1, e4, eps, dets, ci = _synthetic_case(nact=3, nele=2)
+    with pytest.warns(RuntimeWarning, match="not replicas"):
+        caspt2_contracted_e2(h1, e4, ci, dets, ncore=2, nact=3, nele=2,
+                             eps=eps)
+
+    h1, e4, eps, dets, ci = _synthetic_case()
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        caspt2_contracted_e2(h1, e4, ci, dets, ncore=2, nact=2, nele=2,
+                             eps=eps)

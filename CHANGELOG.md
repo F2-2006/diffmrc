@@ -21,6 +21,39 @@
   0.112 Eh apart with identical occupations, become bit-repeatable
   across runs. The flag is set per call; existing callers are unchanged.
 
+### Changed
+
+- `core.caspt2`: the per-function diagonal path now warns when
+  `active_row='replica'` is used with more than two active orbitals,
+  because the dropped `(u, u)` rows are replicas only for `nact = 2`.
+  The N2/6-31G CAS(6,6) audit behind the warning: the default total
+  0.9893 (Wave 12 frozen reference) is a cancellation of `V2_ij`
+  +5.71 mEh against -4.95 mEh over the other seven classes; the
+  class-complete block solve with `v0_ia='class'` gives `Vm2_ab` 1.0000,
+  `V2_ij` 1.0542 and `V0_ia` 0.9970 and a total of 1.0232, while it
+  leaves the H2O and CO CAS(2,2) anchors bit-identical. `V1_ija` stays
+  at 1.553 in the gauge-invariant class-block solve, with its normalized
+  minimum denominator 2.7e-6 from ORCA, and is registered as a
+  class-space definition boundary. `active_row='keep'` alone double
+  counts under the per-function diagonal (N2 total 1.3280).
+
+### Fixed
+
+- `core.gauge.canonical_mo_phases` and its three call sites in
+  `driver.nevpt2`: a deterministic column phase for the SCF reference
+  orbitals. The threaded eigen-decomposition returns the same orbitals
+  with different column signs (MKL/OMP dependent through the JAX/XLA
+  path), and `theta` is measured from those columns; a fixed `theta`
+  therefore described different physical rotations under different
+  thread counts. After the fix, H2O/6-31G CAS(2,2) at one fixed `theta`
+  is bit-identical over `OMP_NUM_THREADS = 1, 2, 4, 8, 32` (ten runs),
+  the optimized-`theta` energy and `e2` are unchanged, and HI/LANL2DZ
+  agrees across the same thread sweep. The phase call is `O(nmo^2)`
+  (28 us at 13 columns, 418 us at 256) and is not measurable against a
+  NEVPT2 evaluation. Explicit column-sign flips on the reference change
+  the old fixed-`theta` result by 1.8 Ha on H2O and 0.34 Ha on HI; they
+  change nothing after the fix.
+
 ## 0.3.3 (2026-11-02)
 
 ### Added
@@ -213,13 +246,20 @@
 
 ### Known limitations
 
-- NEVPT2 values are not reproducible with `OMP_NUM_THREADS > 1`. On
-  H2O/6-31G CAS(2,2) two identical runs differed by 5e-3 Ha in `e2`
-  (-0.12328 and -0.12830), while five runs at `=1` were bit-identical and a
-  change of CI solver did not remove the difference. The threefold-degenerate
-  CI block leaves the vectors inside the degenerate subspace to rounding, so
-  `OMP_NUM_THREADS=1` is a reproducibility requirement and not only a memory
-  policy.
+- NEVPT2 fixed-`theta` values were thread-dependent before 0.3.4. The cause
+  is not the CI eigen-decomposition but the arbitrary sign of the SCF
+  eigenvectors: `theta` is measured from those columns, so a
+  thread-dependent phase gauge makes one numeric `theta` describe
+  different physical rotations. Measured on H2O/6-31G CAS(2,2) at one
+  fixed `theta`, `e2` spanned 2.96e-3 Ha over `OMP_NUM_THREADS = 1, 2, 4,
+  8, 32`, while the SCF energies agreed to 2e-14 and the coefficient
+  matrices differed by column signs only (off-diagonal overlap 1.5e-12).
+  The NEVPT2 driver now canonicalizes the MO phases (`core.gauge`);
+  optimized values are unchanged and fixed-`theta` values are
+  thread-independent. The kernel, Hessian and X2C `theta` paths still
+  consume the SCF columns without this canonicalization and remain
+  exposed to the same gauge; `OMP_NUM_THREADS=1` remains the safe
+  setting for those paths.
 - The matrix-free route needs the LSMR iteration cap to reach convergence on
   the tested stationary points; the unrolled route with three Newton steps
   exceeds 20 GiB on H2O/6-31G CAS(2,2).

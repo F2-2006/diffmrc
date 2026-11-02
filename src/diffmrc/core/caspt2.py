@@ -27,6 +27,7 @@ construction, traceable in the CI coefficients).
 """
 import logging  # noqa: E402
 import os  # noqa: E402
+import warnings  # noqa: E402
 from collections import defaultdict  # noqa: E402
 
 import jax
@@ -695,6 +696,16 @@ def caspt2_contracted_e2(h1e_mo, eri_mo, ci, dets, *, ncore, nact, nele, eps,
         if active_row not in ('replica', 'keep'):
             raise ValueError('unknown active_row: {!r}'.format(active_row))
         drop_replicas = (active_row == 'replica')
+        if drop_replicas and int(nact) > 2:
+            warnings.warn(
+                "the per-function diagonal path drops the (u, u) active "
+                "rows for nact = {} > 2, where those rows are not replicas "
+                "of the first active orbital; the total may benefit from "
+                "cancellation, but per-class values are not accurate. Use "
+                "class_diagonal='block' with v0_ia='class' for "
+                "class-complete values; active_row='keep' alone double "
+                "counts under this diagonal.".format(int(nact)),
+                RuntimeWarning, stacklevel=2)
         for name, o1, o2, i1c, i2c in classes:
             acc = 0.0
             for qs in pairs(o1, o2):
@@ -1041,6 +1052,15 @@ def caspt2_contracted_e2_jax(h1e_mo, eri_mo, ci, dets, *, ncore, nact, nele,
     if active_row not in ('replica', 'keep'):
         raise ValueError('unknown active_row: {!r}'.format(active_row))
     drop_replicas = (active_row == 'replica')
+    if drop_replicas and int(nact) > 2:
+        warnings.warn(
+            "the per-function diagonal path drops the (u, u) active rows "
+            "for nact = {} > 2, where those rows are not replicas of the "
+            "first active orbital; the total may benefit from cancellation, "
+            "but per-class values are not accurate. The differentiable path "
+            "has no class-complete variant; treat the per-class values as "
+            "approximate and the total with the cancellation caveat."
+            .format(int(nact)), RuntimeWarning, stacklevel=2)
     breakdown = {}
     total = 0.0
     for name, o1, o2, i1c, i2c in classes:

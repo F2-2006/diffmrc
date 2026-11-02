@@ -33,6 +33,8 @@ wired into the jax chain; the differentiable production path remains
 """
 from collections import defaultdict
 
+import warnings
+
 import numpy as np
 
 from .caspt2 import (_PLAIN_CLASSES, _apply2, _apply_chain,
@@ -252,6 +254,16 @@ def caspt2_contracted_e2_three_center(h1e_mo, u_mo, ci, dets, *, ncore,
         if active_row not in ('replica', 'keep'):
             raise ValueError('unknown active_row: {!r}'.format(active_row))
         drop_replicas = (active_row == 'replica')
+        if drop_replicas and int(nact) > 2:
+            warnings.warn(
+                "the per-function diagonal path drops the (u, u) active "
+                "rows for nact = {} > 2, where those rows are not replicas "
+                "of the first active orbital; the total may benefit from "
+                "cancellation, but per-class values are not accurate. Use "
+                "class_diagonal='block' with v0_ia='class' for "
+                "class-complete values; active_row='keep' alone double "
+                "counts under this diagonal.".format(int(nact)),
+                RuntimeWarning, stacklevel=2)
         for name, o1, o2, i1c, i2c in classes:
             acc = 0.0
             for qs in pairs(o1, o2):

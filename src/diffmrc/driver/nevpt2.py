@@ -90,6 +90,7 @@ def _casscf_solution(C0_, h_, e_, th_, *, ncore, nact, nele, nmo, pairs,
     from jax import numpy as jnp
 
     from ..core.casci import cs_casci_blocked
+    from ..core.gauge import canonical_mo_phases
     from ..core.nevpt2.impl import _casci_ci, canonicalize_jax
     from ..core.rotation import block_rotation
 
@@ -112,7 +113,19 @@ def _casscf_solution(C0_, h_, e_, th_, *, ncore, nact, nele, nmo, pairs,
             return _casci_ci(h1, eri, ncore, nact, nele, eig_solver=pln_eig)
         raise ValueError('unknown ci_solver: {!r}'.format(ci_solver))
 
-    C2 = jnp.asarray(C0_) @ block_rotation(th_, nmo, pairs)
+    # The SCF eigenvectors carry an arbitrary sign, and the threaded
+    # eigen-decomposition picks that sign along a code path that depends
+    # on the thread count (on this stack OMP_NUM_THREADS, through the
+    # JAX/XLA path).  Measured: H2O/6-31G coefficients at OMP 1/4/8
+    # differ by column signs only, to 1e-12, with the SCF energy
+    # identical to 1e-14.
+    # theta is measured from these columns, so an unfixed gauge makes a
+    # fixed theta describe a different physical rotation under a
+    # different thread count (2.5e-3 Ha in e2 on H2O at one fixed
+    # theta).  Canonicalizing is a gauge choice: the orbitals and every
+    # energy computed from them are unchanged.
+    C2 = canonical_mo_phases(jnp.asarray(C0_)) @ block_rotation(
+        th_, nmo, pairs)
 
     h1_, eri_ = _stepwise_mo_ints(C2, h_, e_)
     _, ci = ci_solve(h1_, eri_)
@@ -473,9 +486,14 @@ def _sa_components_from(C0_, h_, e_, enuc, th_, *, ncore, nact, nele, nmo,
     from jax import numpy as jnp
 
     from ..core.nevpt2.impl import nevpt2_e2_full2
+    from ..core.gauge import canonical_mo_phases
     from ..core.rotation import block_rotation
 
-    C2 = jnp.asarray(C0_) @ block_rotation(th_, nmo, pairs)
+    # Same phase-gauge fix as ``_casscf_solution``: theta is measured
+    # from the reference columns, and an SCF eigenvector sign is not
+    # reproducible across thread counts.
+    C2 = canonical_mo_phases(jnp.asarray(C0_)) @ block_rotation(
+        th_, nmo, pairs)
     h1_, eri_ = _stepwise_mo_ints(C2, h_, e_)
     E_sa_rot, CIs_rot = sa_cas_solution(h1_, eri_, ncore=ncore,
                                         nact=nact, nele=nele,
@@ -1020,11 +1038,15 @@ def make_sa_energy_fn(mol, scf_builder, *, ncore, nact, nele, nmo, pairs,
     ``make_nevpt2_sa_theta_fn``; ``c0`` is the trial-orbital hook the
     DVS scan uses.
     """
+    from ..core.gauge import canonical_mo_phases
     from ..core.rotation import block_rotation
 
     mf_ = scf_builder(mol)
     mf_.kernel()
-    C0_ = (mf_.mo_coeff if c0 is None else np.asarray(c0, dtype=float))
+    # Canonical phases for the same reason as ``_casscf_solution``: the
+    # rotation chart is measured from these columns.
+    C0_ = canonical_mo_phases(
+        mf_.mo_coeff if c0 is None else np.asarray(c0, dtype=float))
     h_ = mf_.get_hcore()
     e_ = mol.intor('int2e', aosym='s1')
     enuc = mol.energy_nuc()
