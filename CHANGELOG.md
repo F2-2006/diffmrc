@@ -20,6 +20,15 @@
   CeO's two solutions,
   0.112 Eh apart with identical occupations, become bit-repeatable
   across runs. The flag is set per call; existing callers are unchanged.
+- `analysis.ci.spin_free_*`: Pittner's spin-free orbital entropy, pair
+  entropy and mutual information (arXiv:2502.04800): the three-weight and
+  nine-pattern forms, built from the same occupation triple and requiring
+  no additional density matrix. For a spin-adapted state the
+  manifold-averaged reading satisfies
+  `S_manifold = S_spin_free + (N - 2 p2) ln 2`; the identity is checked
+  numerically and on N/6-31G, CH2/6-31G and CeO. The two quantities
+  measure different objects: the spin-free form removes the spin
+  degeneracy of singly occupied orbitals, the manifold average keeps it.
 
 ### Changed
 

@@ -24,7 +24,12 @@ from .entropy import single_orbital_entropy
 __all__ = ['occupation_masks', 'occupations_from_ci', 'entropy_from_ci',
            'manifold_occupations', 'manifold_entropy_from_ci',
            'pair_scatter', 'pair_density', 'two_orbital_entropy',
-           'mutual_information', 'dets_and_vector_from_fci']
+           'mutual_information', 'dets_and_vector_from_fci',
+           'spin_free_weights', 'spin_free_orbital_entropy',
+           'spin_free_pair_weights',
+           'spin_free_pair_entropy_from_probs',
+           'pair_pattern_probabilities',
+           'spin_free_mutual_information']
 
 
 def occupation_masks(dets, ncore=0, nact=2):
@@ -350,5 +355,115 @@ def mutual_information(c_ci, dets, ncore=0, nact=2):
         for j in range(i + 1, nact):
             s2 = two_orbital_entropy(c_ci, dets, i, j, ncore=ncore,
                                      nact=nact)
+            I[i, j] = I[j, i] = float(s1[i] + s1[j] - s2)
+    return I
+
+# ---------------------------------------------------------------------------
+# Pittner spin-free entropy and mutual information (arXiv:2502.04800)
+# ---------------------------------------------------------------------------
+
+#: Group index of each of the 16 pair patterns: the pattern stores the
+#: occupations of (i-alpha, i-beta, j-alpha, j-beta) in bits 0..3, and the
+#: group is 3 * n_i + n_j with n_i, n_j the electrons on each spatial orbital.
+_PAIR_GROUP = np.array(
+    [3 * ((p & 1) + ((p >> 1) & 1)) + ((p >> 2) & 1) + ((p >> 3) & 1)
+     for p in range(16)], dtype=np.int64)
+
+
+def _spin_free_entropy(w):
+    """``-sum w ln w`` over the leading axis, zeros skipped."""
+    w = np.asarray(w, dtype=float)
+    positive = w > 0.0
+    contrib = np.where(positive,
+                       w * np.log(np.where(positive, w, 1.0)), 0.0)
+    return -contrib.sum(axis=0)
+
+
+def spin_free_weights(n_a, n_b, p2):
+    """Three spin-free occupation weights per orbital.
+
+    Pittner's spin-free reading merges the |up> and |down> one-orbital
+    states into one microstate, so the weights are
+    ``[1 - N + p2, N - 2 p2, p2]`` with ``N = n_a + n_b``.  The array is
+    stacked on a leading axis of length three; summing the entropy over
+    that axis gives one value per orbital.
+    """
+    n_a = np.asarray(n_a, dtype=float)
+    n_b = np.asarray(n_b, dtype=float)
+    p2 = np.asarray(p2, dtype=float)
+    n = n_a + n_b
+    w = np.stack([1.0 - n + p2, n - 2.0 * p2, p2])
+    # Same clip-and-renormalize convention as single_orbital_entropy; a
+    # physical triple already satisfies the bounds and sums to one.
+    w = np.clip(w, 0.0, 1.0)
+    total = w.sum(axis=0)
+    return w / np.where(total > 0.0, total, 1.0)
+
+
+def spin_free_orbital_entropy(n_a, n_b, p2):
+    """Pittner's spin-free single-orbital entropy, one value per orbital."""
+    s1 = _spin_free_entropy(spin_free_weights(n_a, n_b, p2))
+    return np.maximum(s1, 0.0)
+
+
+def pair_pattern_probabilities(dets, c_ci, i, j, ncore=0, nact=2):
+    """Probability of each of the 16 occupation patterns of orbitals i, j.
+
+    This is the diagonal of the pair reduced density matrix, obtained
+    without the environment groups or the crossing signs: for a fixed pair
+    pattern and a fixed environment occupation the determinant is unique,
+    so the diagonal is the sum of |c|^2 over the determinant list.
+    """
+    dets = np.asarray(dets, dtype=np.int64)
+    c = np.asarray(c_ci, dtype=float)
+    if c.ndim != 1:
+        raise ValueError(f'c_ci must be one-dimensional, got shape '
+                         f'{c.shape}')
+    if c.shape[0] != dets.shape[0]:
+        raise ValueError(f'c_ci has {c.shape[0]} coefficients for '
+                         f'{dets.shape[0]} determinants')
+    if not (0 <= i < j < nact):
+        raise ValueError(f'pair ({i}, {j}) outside the active space of '
+                         f'{nact} orbitals')
+    if 2 * nact > 63:
+        raise ValueError(
+            f'active space of {nact} orbitals spans {2 * nact} spin '
+            f'orbitals, past the 63-bit window these bitmaps are read with')
+    d = dets >> (2 * ncore)
+    pat = (((d >> (2 * i)) & 1)
+           | (((d >> (2 * i + 1)) & 1) << 1)
+           | (((d >> (2 * j)) & 1) << 2)
+           | (((d >> (2 * j + 1)) & 1) << 3))
+    return np.bincount(pat, weights=c * c, minlength=16)
+
+
+def spin_free_pair_weights(prob16):
+    """Sum the 16 pattern probabilities into the nine occupation groups."""
+    prob16 = np.asarray(prob16, dtype=float)
+    if prob16.shape != (16,):
+        raise ValueError(f'prob16 must have shape (16,), got {prob16.shape}')
+    return np.bincount(_PAIR_GROUP, weights=prob16, minlength=9)
+
+
+def spin_free_pair_entropy_from_probs(prob16):
+    """Pittner's nine-state spin-free pair entropy."""
+    return float(_spin_free_entropy(spin_free_pair_weights(prob16)))
+
+
+def spin_free_mutual_information(c_ci, dets, ncore=0, nact=2):
+    """``Itilde_ij = Stilde_i + Stilde_j - Stilde_ij`` for every pair.
+
+    The diagonal is zero by convention.  The orbital triple comes from
+    :func:`occupations_from_ci`; the pair term needs only the 16 pattern
+    probabilities, so no 16x16 eigenproblem is solved.
+    """
+    s1 = spin_free_orbital_entropy(*occupations_from_ci(
+        c_ci, dets, ncore=ncore, nact=nact))
+    I = np.zeros((nact, nact))
+    for i in range(nact):
+        for j in range(i + 1, nact):
+            s2 = spin_free_pair_entropy_from_probs(
+                pair_pattern_probabilities(dets, c_ci, i, j,
+                                           ncore=ncore, nact=nact))
             I[i, j] = I[j, i] = float(s1[i] + s1[j] - s2)
     return I
