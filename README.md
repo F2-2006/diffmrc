@@ -66,6 +66,14 @@ manual/         Tutorial and Manual (LaTeX sources and built PDFs)
 - `driver.ri_scf` and `driver.ri_scf_driver`: a RIJONX SCF loop
   (RI-J Coulomb plus exact exchange) on top of pyscfad RHF/ROHF, including the
   SCF-level overlap-derivative term.
+- `driver.scf_ad`: implicit-differentiation ROHF references for f-block
+  molecules. pyscfad's default unrolled SCF AD freezes the DIIS
+  coefficients and is not the derivative of the converged solution
+  (YbF: 3.42 times the analytic gradient magnitude); this module
+  differentiates the fixed point (3.0e-7 against the analytic ROHF
+  gradient, 1.7e-6 against central differences) and selects
+  multi-solution branches from a fixed energy-ordered ladder. The route
+  is opt-in; existing drivers are unchanged.
 - `core.x2c_casscf_df`: scalar (spin-free) DF-X2C CASSCF energies, analytic
   nuclear gradients, and state-averaged response.
 

@@ -1,5 +1,26 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- `driver.scf_ad`: implicit-differentiation ROHF reference for f-block
+  molecules. The unrolled pyscfad SCF gradient is not the derivative of
+  the converged solution when DIIS participates (its error vectors are
+  detached in the AD graph, so the linearized iteration map does not
+  contract); on YbF/stuttgart_rsc it returns +2.418e-1 Eh/Bohr, 3.42 times
+  the magnitude of the analytic +7.070e-2. `rohf_energy` differentiates
+  the fixed point
+  instead (+7.0703535e-2, 3.0e-7 from the analytic ROHF gradient,
+  1.7e-6 from central differences), `scf_reference` selects the branch
+  by a fixed energy-ordered candidate ladder shared with
+  `driver.scf_protocol`, and the coordinate-only pytree view keeps the
+  YbF gradient at 3.7 GB in the single-purpose probe (4.1 GB with the
+  candidate ladder held in the same process) instead of above 20 GB.
+  CeO's two solutions,
+  0.112 Eh apart with identical occupations, become bit-repeatable
+  across runs. The flag is set per call; existing callers are unchanged.
+
 ## 0.3.3 (2026-11-02)
 
 ### Added
