@@ -574,12 +574,12 @@ not that the absolute operator is exact.
 
 \subsection{GeF with an ECP: the ECP spin--orbit operator}
 
-The ECP validation on GeF uses \texttt{lanl2dz} on Ge and F, the
-spin--orbit ECP \texttt{ecpds28mdfso} on Ge, and a two-state
-state-averaged calculation.  The recorded valence-level SOMF splitting
-is $28.37$~cm$^{-1}$, against $43.72$~cm$^{-1}$ for the nuclear-only
-operator on the same density.  The difference is the valence mean
-field and is the quantity the ECP decomposition does not fix uniquely.
+The ECP validation on GeF uses \texttt{lanl2dz} on Ge and F.  The
+scalar-ECP control (no spin--orbit ECP) gives a valence-level SOMF
+splitting of $26.00$~cm$^{-1}$, against $40.14$~cm$^{-1}$ for the
+nuclear-only operator on the same density; the ORCA SOCType~3 value is
+$26.00$~cm$^{-1}$.  The difference is the valence mean field and is the
+quantity the ECP decomposition does not fix uniquely.
 On YbF the \texttt{ECPso} norm on Yb is $17.04$ per component, while
 the raw nuclear operator norm on the same center is of order
 $10^{4}$; adding both would be dominated by an operator that the ECP
@@ -587,7 +587,7 @@ was built to replace.  The gradient prototype on GeF follows a finite
 difference of the SOC matrix element to $2.4\times10^{-5}$ relative,
 with a density-response term of $4.4\times10^{-7}$ in that direction.
 The source files are
-\texttt{experiments/somf\_ecp/results\_compare\_orca\_gef.json} and
+\texttt{experiments/somf\_ecp/results\_ecp\_somf\_gef\_recalc.json} and
 \texttt{experiments/somf\_ecp/results\_somf\_grad\_f.json}.
 
 \subsection{H\texorpdfstring{$_2$}{2}O/6-31G: two-component X2C

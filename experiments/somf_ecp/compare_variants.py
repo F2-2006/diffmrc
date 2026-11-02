@@ -43,6 +43,18 @@ Free-atom subtraction
 
 The output JSON records every operator's Frobenius norm, the selected
 pair's transition tensor, and the state-interaction level splitting.
+
+WARNING (2026-11-02): every state-interaction splitting here is assembled
+from pyscf ``trans_rdm1`` spin-summed transition densities; see the
+warning in ``validate_ecp_somf.py``.  The defect is operator- and
+geometry-dependent (measured on the GeF bent setup: 1.0235 for ECPso,
+1.0250 for the valence SOMF operator, 1.0912 for nuclear-only, 1.0848 for
+two-electron-only).  The variant ordering and the free-atom-subtraction
+construction are unaffected in structure, but the absolute splittings and
+the Ge+ 2P calibration offset quoted in the README (11.6%) must be
+re-derived with ``recalc_determinant_space.py`` before they are cited.
+No archived JSON of this script is distributed; the printed numbers are
+diagnostic only.
 """
 import os
 

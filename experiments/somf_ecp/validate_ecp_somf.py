@@ -19,6 +19,21 @@ Operator variants (all in the state-interaction layer)
 
 The report separates the ECPso one-electron value from the valence SOMF
 value; no claim of a unique physical decomposition is made.
+
+WARNING (2026-11-02): the state-interaction matrix in this script is built
+from pyscf ``trans_rdm1`` transition densities, which are spin-summed
+charge densities (D_alpha + D_beta).  The spin-orbit matrix element needs
+the spin-resolved determinant coupling, so every splitting below is high
+by an operator-dependent factor.  Measured on this exact GeF setup
+(``results_ecp_somf_gef_recalc.json``, bent geometry): 1.0235 for ECPso,
+1.0250 for the valence SOMF operator, 1.0912 for the nuclear-only
+operator.  The absolute values in ``results_ecp_somf_gef.json`` and
+``results_ecp_somf_ybf.json`` are history and must not be cited as primary
+numbers.  The correct route is the determinant-space spin-orbital CI of
+``core.spinor_ci``; ``recalc_determinant_space.py`` recomputes these
+values (the linear F-paper setup gives 1329.607404 cm^-1 against 1368.084
+on the archived route).  The operator definitions, the density checks,
+and the YbF state identification are unaffected.
 """
 import os
 

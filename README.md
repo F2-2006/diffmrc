@@ -463,8 +463,11 @@ valence, one-center, on-site-subtracted, point-charge and a double-counting
 upper view) in one convention, and `experiments/somf_ecp/compare_variants.py`
 implements a free-atom subtraction that removes the mean field the ECP already
 contains. On the YbF model window the free-atom-subtracted and full-valence
-values differ by 10%, and the Ge+ 2P calibration leaves an 11.6% absolute
-offset traced to the small basis and the ECP fit. A unique definition and a
+values differ by about 10%, and the Ge+ 2P calibration leaves an absolute
+offset of about 12%; both percentages come from the legacy spin-summed
+transition-density assembly and are order-of-magnitude brackets only -- the
+row is pending a determinant-space recalculation, and the density-combination
+offset alone is 2.4-9.1% on GeF (see the script warnings). A unique definition and a
 double-counting correction remain open; it is not a production absolute-SOC
 method, so report the variant bracket and use the free-atom subtraction only
 with its atomic-reference caveat. (Branch `wave14/relativistic`, commits

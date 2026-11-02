@@ -6,6 +6,12 @@ active-space occupations and the norm of the ECPso SOC vector between
 the ground state and every root.  A nonzero entry identifies a Sigma-Pi
 type partner; the degenerate pair with identical occupations is the
 model 2Pi manifold used for the value-layer check.
+
+NOTE (2026-11-02): the transition densities come from pyscf ``trans_rdm1``
+and are spin-summed.  Use this probe only to decide which roots carry a
+nonzero SOC vector; the printed |T0j| magnitudes are not absolute
+splittings and inherit the density-convention offset described in
+``validate_ecp_somf.py``.
 """
 import os
 

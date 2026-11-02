@@ -38,6 +38,13 @@ R +/- delta.
 Boundaries: fixed reference orbitals, no variational orbital relaxation,
 small active space, one geometric direction at a time.  This is a
 prototype, not a production gradient.
+
+NOTE (2026-11-02): the scalar chain uses spin-summed ``trans_rdm1``
+densities through ``soc_grad_model``.  The reported finite-difference
+agreement is an internal consistency check of the derivative chain and is
+unaffected.  ``t0`` and ``t0_split_cm`` are the SOC vector and its norm at
+the reference geometry; they inherit the density-convention offset and
+must not be read as a physical splitting.
 """
 import os
 

@@ -18,6 +18,18 @@ geometry, and SA-CASSCF CAS(9,6) with two roots.  The splitting is the
 
 Run with the pyscf environment used by the project.  The ORCA numbers
 are constants in this script and are also recorded in the report.
+
+WARNING (2026-11-02): this script shares the spin-summed ``trans_rdm1``
+transition-density defect of ``validate_ecp_somf.py``.  On this exact
+setup the archived values are high by 8.9% (nuclear-only 43.716 ->
+40.144), 9.1% (SOMF 28.375 -> 26.002) and 8.5% (two-electron-only
+15.341 -> 14.142).  The ORCA constants are unaffected.  Under the
+determinant-space route of ``recalc_determinant_space.py`` the SOMF and
+two-electron values move onto the ORCA printed values (26.002 against
+26.00; 14.142 against 14.14), while the point-charge nuclear-only view
+stays about 16% below ORCA SOCType 1.  The archived
+``results_compare_orca_gef.json`` is history; the corrected numbers are
+in ``results_ecp_somf_gef_recalc.json``.
 """
 import os
 

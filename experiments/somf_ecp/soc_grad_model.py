@@ -12,6 +12,14 @@ derivative kernels are available for them.
 The module provides no production gradient.  It supports the prototype
 in ``validate_somf_grad.py``: the full-chain finite difference, the
 analytic scalar response (dC, dD, dP), and the SOMF-specific terms.
+
+NOTE (2026-11-02): ``CIModel.trans_rdm`` calls pyscf ``trans_rdm1``, which
+returns the spin-summed density.  The analytic response chain and its
+finite-difference comparison are built from the same tensor on both
+sides, so the relative agreement remains valid.  The absolute SOC vector
+``T0`` and ``t0_split_cm`` inherit the density-convention offset and are
+not physical splittings; see ``validate_ecp_somf.py`` for the
+determinant-space route.
 """
 import math
 

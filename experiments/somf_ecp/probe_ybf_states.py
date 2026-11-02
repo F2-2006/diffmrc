@@ -7,6 +7,11 @@ F 2p-derived orbitals and the singly occupied 6s sigma orbital, adds two
 lowest virtuals, and runs a CASCI with three roots.  The point is to see
 whether the lowest roots are the 2Sigma+ ground state plus the two
 components of 2Pi, and to record the transition 1-RDMs.
+
+NOTE (2026-11-02): the transition 1-RDMs come from pyscf ``trans_rdm1``
+and are spin-summed.  Their traces, symmetry, and antisymmetry are
+structural diagnostics and are unaffected; the printed norms are not
+absolute SOC quantities.
 """
 import os
 
