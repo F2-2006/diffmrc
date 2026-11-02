@@ -1,6 +1,21 @@
 #!/usr/bin/env python
 """Probe: SOMF two-electron mean-field operator via pyscf integral kernels.
 
+WARNING (2026-11-02): deprecated as a value source.  The state-interaction
+matrix here is built from pyscf ``trans_rdm1`` transition densities, which are
+spin-summed charge densities (D_alpha + D_beta).  The Breit--Pauli z component
+requires the spin difference (D_alpha - D_beta)/2, so every printed splitting
+is systematically high by a system-dependent factor (0.3% for OH, 0.4% for OF,
+2.9% for ECP systems such as GeF).  The ORCA reference values quoted below are
+unaffected and remain the comparison target.  This probe writes no JSON; its
+console output is diagnostic only and must not be cited as a primary value.
+Correct route: the determinant-space spin-orbital CI of ``core/spinor_ci.py``,
+driven by the Wave 18 SOC benchmark (``code/soc_bench.py``).  The sibling
+``experiments/somf/validate_oh_of.py``,
+``experiments/somf/validate_oh_of_jax.py`` and
+``experiments/somf_ri/validate_oh_of_ri.py`` share the same spin-summed
+transition density and inherit the offset.
+
 Purpose: establish, before writing ``diffmrc.core.somf``, that
 
   (a) libcint exposes the two-electron SOC kernel as ``int2e_p1vxp1`` and

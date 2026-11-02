@@ -1,6 +1,23 @@
 #!/usr/bin/env python
 """End-to-end validation of RI-SOMF and the one-center exchange on OH/OF.
 
+WARNING (2026-11-02): deprecated as a value source for absolute splittings.
+This script reproduces the value-layer setup of
+``experiments/somf/validate_oh_of.py`` and therefore builds every
+state-interaction matrix from pyscf ``trans_rdm1`` transition densities, which
+are spin-summed charge densities (D_alpha + D_beta).  The Breit--Pauli z
+component requires the spin difference (D_alpha - D_beta)/2, so the printed
+one-electron and route splittings are systematically high by a system-dependent
+factor (0.3% for OH, 0.4% for OF).  The numbers in
+``results_oh_of_ri.json`` are kept as history and must not be cited as primary
+values.  Route-to-route differences and the RI auxiliary-basis scan use a common
+spin-summed density and remain useful as internal comparisons, but their
+absolute scale inherits the offset.  Correct route: the determinant-space
+spin-orbital CI of ``core/spinor_ci.py``, driven by the Wave 18 SOC benchmark
+(``code/soc_bench.py``).  The sibling ``experiments/somf/validate_oh_of.py``
+and ``experiments/somf/validate_oh_of_jax.py`` share the same transition
+density and inherit the offset.
+
 Reproduces the SA-CASSCF / SI pipeline of ``experiments/somf/validate_oh_of.py``
 and compares five operator routes:
 

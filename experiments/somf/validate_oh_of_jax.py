@@ -1,6 +1,22 @@
 #!/usr/bin/env python
 """Acceptance run for the differentiable SOMF layer on OH and OF.
 
+WARNING (2026-11-02): deprecated as a value source for absolute splittings.
+This script inherits ``validate_oh_of.py`` and therefore builds every
+state-interaction matrix from pyscf ``trans_rdm1`` transition densities, which
+are spin-summed charge densities (D_alpha + D_beta).  The Breit--Pauli z
+component requires the spin difference (D_alpha - D_beta)/2, so the printed
+one-electron and SOMF splittings are systematically high by a system-dependent
+factor (0.3% for OH, 0.4% for OF).  The numbers in
+``results_somf_jax.json`` are kept as history and must not be cited as primary
+values.  The numpy-versus-JAX and AD-versus-FD comparisons remain internally
+valid because both sides use the same spin-summed density, but they do not
+certify the absolute splitting.  Correct route: the determinant-space
+spin-orbital CI of ``core/spinor_ci.py``, driven by the Wave 18 SOC benchmark
+(``code/soc_bench.py``).  The sibling ``experiments/somf/validate_oh_of.py``
+and ``experiments/somf_ri/validate_oh_of_ri.py`` share the same transition
+density and inherit the offset.
+
 Reproduces the value-layer setup of ``validate_oh_of.py`` (state-averaged
 CASSCF, 6-31G, two roots) and adds the differentiable path.
 

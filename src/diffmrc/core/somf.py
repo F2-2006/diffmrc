@@ -5,8 +5,8 @@ WHY THIS MODULE EXISTS
 The SOC layer of this stack assembles the state-interaction (SI) matrix
 from the one-electron Breit-Pauli operator
 ``int1e_pnucxp`` only.  On OH the one-electron operator gives a 2Pi
-splitting of 206.52 cm^-1, against 205.88 cm^-1 for ORCA with
-``SOCFlags 1,0,0,0`` (0.31%), while the ORCA default SOMF operator gives
+splitting of 205.883 cm^-1, against 205.883 cm^-1 for ORCA with
+``SOCFlags 1,0,0,0`` (0.00%), while the ORCA default SOMF operator gives
 128.83 cm^-1.  The missing term is the two-electron part: the
 spin-same-orbit and spin-other-orbit interactions screened by the
 ground-state density.  This module supplies that operator.
