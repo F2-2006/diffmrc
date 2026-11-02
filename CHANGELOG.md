@@ -19,6 +19,17 @@
   is a symmetry-layer diagnostic entry and its frozen-core energies must not
   be quoted. The non-relativistic FCI comparison (4.3e-11/4.9e-11) validates
   determinant algebra and the ERI convention, not relativistic FCI.
+- `driver.scf_response`: canonical closed-shell RHF reference response for
+  the excited-state property chain. PySCF's CPHF returns the occupied
+  response in the `-S1/2` gauge, which keeps the density derivative exact
+  but not the individual orbitals, and says nothing about the virtual
+  columns; adding the occupied-occupied and virtual-virtual canonical
+  rotations, the symmetric overlap term and the pyscf/pyscfad column-sign
+  alignment closes the response. H2O/6-31G SA-CASSCF total nuclear
+  derivatives of mu_z and f then agree with central differences to 8.0e-8
+  and 2.4e-10 at theta=0 (4.1e-7 and 8.5e-8 at theta*). Open-shell
+  references are refused: PySCF 2.13 has no ROHF CPHF, and a UHF
+  substitute breaks symmetry.
 
 ## 0.3.4 (2026-11-02)
 
