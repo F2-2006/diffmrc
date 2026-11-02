@@ -1,6 +1,18 @@
 #!/usr/bin/env python
 """Acceptance run for the SOMF two-electron operator on OH and OF.
 
+WARNING (2026-11-02): deprecated as a value source.  This script builds the
+state-interaction matrix from pyscf ``trans_rdm1`` transition densities, which
+are spin-summed charge densities (D_alpha + D_beta).  The Breit--Pauli z
+component requires the spin difference (D_alpha - D_beta)/2, so every splitting
+printed here is systematically high by a system-dependent factor (0.3% for OH,
+0.4% for OF, 2.9% for GeF).  The numbers in ``results_somf.json`` are kept
+as history and must not be cited as primary values.  Correct route: the
+determinant-space spin-orbital CI of ``core/spinor_ci.py``, driven by the
+Wave 18 SOC benchmark (``code/soc_bench.py``).  Note that
+``experiments/somf_ri/validate_oh_of_ri.py`` shares the same spin-summed
+transition density and inherits the offset.
+
 Compares the stack against ORCA 6.1.1 (same geometry, basis, active space,
 two state-averaged roots):
 

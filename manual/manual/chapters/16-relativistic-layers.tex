@@ -547,20 +547,24 @@ SI convention of this stack.  The recorded numbers are
 \toprule
 System & one-electron (ours) & SOMF (ours) & ORCA one-electron & ORCA SOMF \\
 \midrule
-OH & $206.52$ & $129.23$ & $205.88$ & $128.83$ \\
-OF & $273.06$ & $176.77$ & $272.06$ & $176.12$ \\
+OH & $205.883$ & $128.829$ & $205.883$ & $128.829$ \\
+OF & $272.061$ & $176.125$ & $272.064$ & $176.127$ \\
 \bottomrule
 \end{tabular}
 \end{center}
 in cm$^{-1}$.  The screening ratio SOMF/one-electron removes the
 overall one-electron convention offset between the codes.  The
-recorded ratios are $0.625738$ (OH) and $0.647358$ (OF), against ORCA
-$0.625753$ and $0.647357$; the scale-corrected SOMF values are
-$128.827$ and $176.120$~cm$^{-1}$, with deviations
-$-0.0030$~cm$^{-1}$ ($-2.35\times10^{-5}$ relative) and
-$+0.00024$~cm$^{-1}$ ($1.34\times10^{-6}$ relative).  The source file
-is \texttt{experiments/somf/results\_somf.json}; the driver is
-\texttt{experiments/somf/validate\_oh\_of.py}.
+recorded ratios are $0.625738$ (OH) and $0.647373$ (OF), against ORCA
+$0.625739$ and $0.647373$; the scale-corrected SOMF values are
+$128.829$ and $176.127$~cm$^{-1}$, with deviations
+$-0.00015$~cm$^{-1}$ ($-1.19\times10^{-6}$ relative) and
+$-0.000023$~cm$^{-1}$ ($-1.33\times10^{-7}$ relative).  The stack column
+uses the determinant-space state-interaction route
+(\texttt{src/diffmrc/core/spinor\_ci.py}); the legacy driver
+\texttt{experiments/somf/validate\_oh\_of.py} builds the matrix from
+spin-summed transition densities and overestimates the splittings by
+0.3\% (OH) and 0.4\% (OF), so it is retained for history only.  The ORCA column is
+the QDPT output of the same benchmark.
 
 The one-electron column is not the physical SOC; it omits the
 two-electron screening.  The SOMF column is the mean-field
