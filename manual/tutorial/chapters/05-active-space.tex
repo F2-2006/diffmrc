@@ -183,6 +183,14 @@ such a window from a certified minimum.  Include both components of a
 degenerate shell when a window is specified by hand; the automatic
 fallback already does.
 
+Every run records the smallest orbital-Hessian eigenvalue and the
+reference gaps on both boundaries of the space.  A zero mode below
+$10^{-6}$ with no negative eigenvalue is labelled a flat direction and
+not certified; an exact degeneracy on either boundary (gap below
+$10^{-8}$~Ha) is labelled as a shell split across the boundary.  Both
+labels are diagnostic: they are written to the result and the evidence,
+and they do not change the four self-checks.
+
 The curvature route is a separate matter.  At an exactly symmetric
 stationary point --- reached by a manually specified N$_2$/6-31G
 CAS(4,4) and by the automatically selected N quartet CAS(3,3) --- the

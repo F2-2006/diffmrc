@@ -42,6 +42,23 @@ STATIONARY_GRADIENT = 1e-3
 # it does not change any decision, it only makes the refusal readable.
 NEAR_DEGENERATE_GAP = 0.2
 
+# A minimum with no negative eigenvalue can still carry a zero mode, for
+# example when one component of a degenerate shell was frozen outside the
+# space. The smallest orbital-Hessian eigenvalue is always recorded; when
+# it falls below this value the evidence says the minimum is not certified.
+# The value is diagnostic: it never changes a self-check or a verdict.
+FLAT_DIRECTION_TOL = 1e-6
+
+# A reference core-active or active-virtual gap below this value means an
+# exactly degenerate shell was split across the space boundary. The
+# threshold is deliberately tight so that only exact degeneracy is caught:
+# N2/6-31G has a core-active gap of 8.1e-3 Ha and must not be flagged.
+# HF/6-31G's final [4,5] space is exactly degenerate (2.8e-15 Ha) and is
+# flagged; that is the same split pi shell as HCl and HI, and HF is
+# already refused by its gradient. The check is report-only until it has
+# been validated as a self-check on its own.
+BOUNDARY_DEGENERACY_TOL = 1e-8
+
 
 def _candidate_key(record, stationary_tol=STATIONARY_GRADIENT):
     """Sort key for one optimized orbital candidate.
@@ -179,6 +196,101 @@ def _core_active_gap(space, mo_energy):
     core_i = int(max(space.core, key=lambda i: e[i]))
     active_i = int(min(space.active, key=lambda i: e[i]))
     return core_i, active_i, float(e[active_i] - e[core_i])
+
+
+def _active_virtual_gap(space, mo_energy):
+    """Reference gap from the highest active to the lowest virtual orbital.
+
+    Returns ``(active_index, virtual_index, gap_in_hartree)`` or None when
+    either block is empty. Together with :func:`_core_active_gap` this
+    bounds the active space on both sides, so an exact degeneracy on
+    either boundary can be reported.
+    """
+    if mo_energy is None or not space.active or not space.virtual:
+        return None
+    e = np.asarray(mo_energy, dtype=float).reshape(-1)
+    active_i = int(max(space.active, key=lambda i: e[i]))
+    virtual_i = int(min(space.virtual, key=lambda i: e[i]))
+    return active_i, virtual_i, float(e[virtual_i] - e[active_i])
+
+
+def _boundary_degeneracy_evidence(degeneracy):
+    """Evidence lines for an exactly degenerate shell split at a boundary.
+
+    One line per boundary whose gap is below the report tolerance. The
+    wording states both facts a reader needs: the pair of orbitals and
+    the reason the energy is still invariant while the wavefunction is
+    not symmetry-adapted.
+    """
+    lines = []
+    tol = float(degeneracy.get('tol', BOUNDARY_DEGENERACY_TOL))
+    for label, gap in (('core-active', degeneracy.get('core_active')),
+                       ('active-virtual', degeneracy.get('active_virtual'))):
+        if gap is None:
+            continue
+        high_i, low_i, value = gap
+        if float(value) >= tol:
+            continue
+        lines.append(
+            f'a degenerate shell is split across the space boundary: the '
+            f'{label} gap between orbitals {int(high_i)} and {int(low_i)} '
+            f'is {float(value):.3e} Ha (< {tol:.0e} Ha); the energy is '
+            f'invariant under the omitted rotation, but the wavefunction '
+            f'is not symmetry-adapted')
+    return lines
+
+
+def _boundary_degeneracy(space, mo_energy, tol=BOUNDARY_DEGENERACY_TOL):
+    """Reference-orbital boundary check, report only.
+
+    Both boundaries are tested. A gap below ``tol`` means the highest
+    core (or lowest virtual) orbital is degenerate with the lowest (or
+    highest) active orbital, so one component of a degenerate shell was
+    frozen outside the space. This function only reports the condition;
+    whether it becomes a self-check is a separate decision made by the
+    caller. See ``driver.run.checks_from_result`` for the optional check.
+
+    Returns
+    -------
+    dict
+        ``core_active`` and ``active_virtual`` are None or
+        ``(high_index, low_index, gap)``, ``split`` is True when either
+        gap is below ``tol``, ``tol`` is carried for the record, and
+        ``evidence`` holds one line per split boundary.
+    """
+    core_active = _core_active_gap(space, mo_energy)
+    active_virtual = _active_virtual_gap(space, mo_energy)
+    split = any(gap is not None and float(gap[2]) < float(tol)
+                for gap in (core_active, active_virtual))
+    report = dict(core_active=core_active,
+                  active_virtual=active_virtual,
+                  split=bool(split),
+                  tol=float(tol))
+    report['evidence'] = _boundary_degeneracy_evidence(report)
+    return report
+
+
+def _flat_direction_evidence(curvature, tol=FLAT_DIRECTION_TOL, npar=None):
+    """Evidence for a zero-mode minimum that is not certified.
+
+    A point with no negative eigenvalue can still carry a flat direction,
+    for example when a degenerate shell is split across the boundary. The
+    line is diagnostic and is never converted into a failing check here.
+    Returns None unless ``n_negative`` is zero and the smallest eigenvalue
+    is below ``tol``. ``npar`` is the number of rotation directions; zero
+    means there is no curvature to certify, not a flat direction.
+    """
+    if npar is not None and int(npar) == 0:
+        return None
+    if int(curvature.n_negative) != 0:
+        return None
+    smallest = float(curvature.smallest)
+    if smallest >= float(tol):
+        return None
+    return (f'flat direction, not certified: the smallest eigenvalue of '
+            f'the orbital Hessian is {smallest:.3e} (< {float(tol):.0e}) '
+            f'with zero negative eigenvalues; a zero mode is present and '
+            f'the curvature does not exclude it')
 
 
 def _non_minimum_evidence(active, curvature, gradient, gap=None,
@@ -1191,13 +1303,27 @@ def compute_ground_state(atoms, charge, spin, active_space, params,
             f'the core-virtual block holds {n_cv} of {int(npar)} rotation '
             f'parameters ({n_cv / selected["npar_subset"]:.1f} times the '
             f'rest); the two-stage orbital route was used')
+    # Reference-orbital gaps on both sides of the space, and the smallest
+    # orbital-Hessian eigenvalue, are recorded for every run. They are
+    # diagnostic: neither line feeds a self-check, so no verdict changes.
+    core_active_gap = _core_active_gap(space, mo_energy)
+    active_virtual_gap = _active_virtual_gap(space, mo_energy)
+    boundary_degeneracy = _boundary_degeneracy(space, mo_energy)
+    smallest_eigenvalue = float(curvature.smallest)
+    flat_direction = bool(int(curvature.n_negative) == 0
+                          and int(npar) > 0
+                          and smallest_eigenvalue < FLAT_DIRECTION_TOL)
+    flat_evidence = _flat_direction_evidence(curvature, npar=npar)
+    if flat_evidence is not None:
+        evidence.append(flat_evidence)
+    evidence.extend(boundary_degeneracy['evidence'])
     if int(curvature.n_negative) > 0:
         # The self-check still sees n_negative and refuses; this line is
         # the reason a reader can check, including the measured reference
         # gap that points at a partner left outside the space.
         evidence.append(_non_minimum_evidence(
             space.active, curvature, float(point.grad_norm),
-            gap=_core_active_gap(space, mo_energy)))
+            gap=core_active_gap))
     n_doubly = sum(1 for i in space.active if occ[i] > 1.5)
     energy = float(point.energy)
     e_casscf = energy
@@ -1232,6 +1358,7 @@ def compute_ground_state(atoms, charge, spin, active_space, params,
         e_casscf=e_casscf,
         grad_norm=float(point.grad_norm),
         n_negative=int(curvature.n_negative),
+        min_eigenvalue=smallest_eigenvalue,
         e_reference=float(mf.e_tot),
         n_elec_active=int(space.n_elec),
         n_elec_expected=int(space.n_elec),
@@ -1255,6 +1382,25 @@ def compute_ground_state(atoms, charge, spin, active_space, params,
             multistart_tries=int(tries),
             n_doubly_active=int(n_doubly),
             curvature_method=curvature_method,
+            curvature=dict(method=curvature_method,
+                           n_negative=int(curvature.n_negative),
+                           min_eigenvalue=smallest_eigenvalue,
+                           flat_direction=flat_direction,
+                           flat_tol=float(FLAT_DIRECTION_TOL)),
+            orbital_gaps=dict(
+                core_active=(None if core_active_gap is None
+                             else float(core_active_gap[2])),
+                active_virtual=(None if active_virtual_gap is None
+                                else float(active_virtual_gap[2])),
+                core_active_pair=(None if core_active_gap is None
+                                  else [int(core_active_gap[0]),
+                                        int(core_active_gap[1])]),
+                active_virtual_pair=(None if active_virtual_gap is None
+                                     else [int(active_virtual_gap[0]),
+                                           int(active_virtual_gap[1])]),
+                boundary_degeneracy_tol=float(BOUNDARY_DEGENERACY_TOL),
+            ),
+            boundary_degeneracy=boundary_degeneracy,
             active_space_verified=verification,
             active_space_entropy=entropy_report,
             **method_data,

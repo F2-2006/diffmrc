@@ -60,7 +60,8 @@ def checks_from_result(grad_norm, n_negative, e_casscf, e_reference,
                        n_elec_active, n_elec_expected,
                        gradient_tol=GRADIENT_TOL,
                        identity_tol=ENERGY_IDENTITY_TOL,
-                       active_space_verified=None):
+                       active_space_verified=None,
+                       boundary_degeneracy=None):
     """Build the four self-checks from a finished calculation.
 
     Parameters
@@ -85,13 +86,21 @@ def checks_from_result(grad_norm, n_negative, e_casscf, e_reference,
         spectrum is single-reference, or it could not be evaluated at
         all. Either way a passing robust result would be a claim the run
         cannot support.
+    boundary_degeneracy : dict or bool, optional
+        Report from ``kernel._boundary_degeneracy`` (or a bare flag).
+        ``None`` adds no check: the boundary-degeneracy condition is
+        report-only until its behaviour as a self-check is validated.
+        When supplied, a split exact degeneracy adds a failing
+        ``boundary_degeneracy`` check. Nothing in the driver passes this
+        yet, so the default path keeps the original verdicts.
 
     Returns
     -------
     list of SelfCheck
         Always four, always in the same order, so a report can be
         compared across runs; a fifth when the robust level asked for
-        the verification.
+        the verification; an optional ``boundary_degeneracy`` check when
+        the caller supplied its report.
     """
     checks = [
         SelfCheck(
@@ -128,6 +137,22 @@ def checks_from_result(grad_norm, n_negative, e_casscf, e_reference,
                     'the entanglement verification did not agree or could '
                     'not be evaluated; see active_space_entropy in the '
                     'result for the merged spectrum and the verdict'),
+        ))
+    if boundary_degeneracy is not None:
+        if isinstance(boundary_degeneracy, dict):
+            split = bool(boundary_degeneracy.get('split', False))
+            lines = list(boundary_degeneracy.get('evidence') or [])
+        else:
+            split = bool(boundary_degeneracy)
+            lines = []
+        if not lines:
+            lines = ['a degenerate shell is split across the space '
+                     'boundary' if split else
+                     'no exactly degenerate shell is split by the boundary']
+        checks.append(SelfCheck(
+            name='boundary_degeneracy',
+            passed=not split,
+            detail='; '.join(str(line) for line in lines),
         ))
     return checks
 
