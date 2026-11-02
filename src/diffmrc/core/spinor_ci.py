@@ -42,10 +42,13 @@ GHF energy with this array is
     H = sum_pq h_pq a^dag_p a_q
         + 1/2 sum_pqrs E[p,q,r,s] a^dag_p a^dag_r a_s a_q.
 
-That ordering was pinned numerically: for every determinant tested, the
-brute-force action of this operator reproduces
+That ordering was pinned numerically on arrays that satisfy the
+real-orbital relation ``E[i,j,i,j] = E[i,j,j,i]`` for every determinant
+tested, where the brute-force action of this operator reproduces
 ``1/2 tr(D J) - 1/2 tr(D K)`` of pyscf to machine precision (H2O/6-31G
-spinor basis, same-spin and mixed determinants).
+spinor basis, same-spin and mixed determinants).  The physical pyscf
+spinor array does not satisfy that relation; see FROZEN-CORE CONVENTION
+below.
 
 With a frozen core the active-space Hamiltonian is
 
@@ -61,26 +64,48 @@ spinors.  These are the only formulas in the module that are not a direct
 transcription of the operator; they are pinned in the tests against a
 full-space construction that keeps the core in the determinant list.
 
-PYSF SPINOR ERI CONVENTION (MEASURED BOUNDARY)
+PYSCF SPINOR ERI CONVENTION
 
 ``mol.intor('int2e_spinor')`` is reproduced to 6.7e-16 by the explicit
-``sph2spinor_coeff`` contraction, but the resulting array does not obey
-the chemist pair symmetry ``E[p,q,r,s] = conj(E[q,p,r,s])`` (measured
-maximum violation 0.618 on H2O/6-31G).  The ordering used here is the
-one that reproduces the pyscf GHF determinant energy with that array.
-With it the complex CI reproduces pyscf FCI in the non-relativistic
-spin-orbital limit and the exact Kramers theorem on a synthetic
-time-reversal-invariant Hamiltonian.  On the physical X2C HF MO basis,
-however, the many-body time reversal does not commute with the CI
-Hamiltonian built from the pyscf spinor array (measured
-``T H^* T^T - H = 143`` on OH/6-31G with a time-reversal-closed active
-space).  A production two-component CI therefore needs a
-convention-aware ERI transform, or an explicitly orthonormal spinor
-basis with a validated four-index transform.  That interface is the
-remaining gap; the determinant algebra itself is validated.
+``sph2spinor_coeff`` contraction.  The array obeys the two identities
+that hold for a complex chemist integral,
+
+    E[p,q,r,s] = E[r,s,p,q],      E[p,q,r,s] = conj(E[q,p,s,r]),
+
+to 1e-15, and it does *not* obey the real-orbital relations
+``E[p,q,r,s] = conj(E[q,p,r,s])`` or the unconjugated eightfold exchange
+(maximum violation 0.618 / 0.233 on the validation systems).  Those two
+relations are the conventions that hold for real orbitals only; using
+them as a check on the spinor array is the source of the earlier
+"0.618 / 0.233" residual, not an array defect.
+
+With the array as-is, the complex CI reproduces pyscf FCI in the
+non-relativistic spin-orbital limit (4.9e-11) and the exact Kramers
+theorem on a synthetic time-reversal-invariant Hamiltonian.  On a
+physical X2C HF MO basis the many-body time reversal commutes with the
+CI Hamiltonian only after the spinor basis is Kramers adapted and the
+core/active spaces are cut at complete pairs: measured
+``max |T H^* T^dag - H|`` is 6.1e-13 (H2O/6-31G) and 3.7e-13
+(OH/6-31G) with the construction of
+:mod:`diffmrc.core.kramers`.  Without the adaptation the same check
+fails by several orders of magnitude on OH.  The earlier value
+``T H^* T^T - H = 143`` used the transpose in place of the Hermitian
+conjugate of ``T``; it is a convention error, not a failed transform.
 
 SCOPE AND LIMITS
 
+* FROZEN-CORE CONVENTION (OPEN).  The determinant-energy identity that
+  pins the two-body ordering above holds for the array used in
+  ``tests/core/test_spinor_ci.py::test_single_determinant_matches_ghf``
+  because that fixture imposes the real-orbital relation
+  ``E[i,j,i,j] = E[i,j,j,i]``.  The physical pyscf spinor array does not
+  obey it, and on H2O/6-31G the frozen-core CI built here then differs
+  from the projection of the full determinant-space operator by 0.66 in
+  matrix elements and 0.56 Eh in the lowest eigenvalue.  The Kramers
+  basis construction of :mod:`diffmrc.core.kramers` is independent of
+  this issue and its symmetry checks remain valid, but the frozen-core
+  *energies* of the two-component path must not be used until the
+  reduction is re-derived for the physical array.
 * The CI is a value layer plus an eigenvalue-only JAX path.  It is not a
   full Kramers-restricted CASSCF: there is no complex unitary orbital
   rotation, no orbital Z-vector, and no state-specific response.

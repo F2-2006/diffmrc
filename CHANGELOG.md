@@ -1,5 +1,25 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- `core.kramers`: a Kramers-adapted spinor basis and a T-closed active-space
+  slice, with `x2c_spinor_ci` as an opt-in physical X2C determinant-space
+  entry. The threaded complex GHF basis is not guaranteed to be
+  Kramers-paired; on OH/6-31G the unadapted core breaks time-reversal
+  invariance to 5.06 and opens a pseudo Kramers gap of 0.0495 Eh, while the
+  adapted basis gives `T H* T† - H` of 6.1e-13 (H2O) and 3.7e-13 (OH) with
+  a Kramers gap of 9.9e-14. The module also documents an open defect it
+  exposed: `spinor_ci`'s two-body operator ordering assumes the real-orbital
+  relation `E[i,j,i,j] = E[i,j,j,i]`, which physical complex ERI does not
+  satisfy, so its determinant energies differ from the pyscf GHF formula by
+  up to 0.59 Eh and the frozen-core reduction is not invariant under core
+  rotations. Until that ordering and the reduction are fixed, `x2c_spinor_ci`
+  is a symmetry-layer diagnostic entry and its frozen-core energies must not
+  be quoted. The non-relativistic FCI comparison (4.3e-11/4.9e-11) validates
+  determinant algebra and the ERI convention, not relativistic FCI.
+
 ## 0.3.4 (2026-11-02)
 
 ### Added
