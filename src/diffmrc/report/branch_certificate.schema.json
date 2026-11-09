@@ -1,0 +1,563 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://example.invalid/diffmrc/branch_certificate-1.0.schema.json",
+  "title": "diffmrc branch certificate",
+  "description": "A reproducibility certificate for one declared electronic branch of a multireference calculation. The certificate records what was declared, what was measured, the gauge interval of the orbital-dependent quantities, the degeneracy partner set, the tolerances together with the code commit, and the environment that produced the evidence. The verdict is three-valued: accept, reject, or undetermined.",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "kind",
+    "certificate_id",
+    "payload_hash",
+    "created_utc",
+    "target",
+    "evidence",
+    "branches",
+    "canonical_interval",
+    "degeneracy",
+    "tolerances",
+    "versions",
+    "environment",
+    "verdict",
+    "provenance"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "1.0"
+    },
+    "kind": {
+      "const": "diffmrc.branch-certificate"
+    },
+    "certificate_id": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$",
+      "description": "The payload hash with a sha256: prefix. Equal inputs produce equal identifiers."
+    },
+    "payload_hash": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$",
+      "description": "SHA-256 of the canonical JSON of the certificate without certificate_id, payload_hash and created_utc."
+    },
+    "created_utc": {
+      "type": "string",
+      "description": "Creation time in ISO 8601 UTC. Excluded from the payload hash so that regenerating the same input is byte-identical in identity."
+    },
+    "target": {
+      "type": "object",
+      "required": [
+        "system",
+        "geometry",
+        "charge",
+        "spin",
+        "multiplicity",
+        "basis",
+        "active_space",
+        "state",
+        "branch_label",
+        "declared_energy_hartree",
+        "declared_natural_occupations",
+        "identity_criteria"
+      ],
+      "properties": {
+        "system": {"type": "string", "minLength": 1},
+        "geometry": {
+          "type": "object",
+          "required": ["atoms", "units"],
+          "properties": {
+            "atoms": {"type": "string", "minLength": 1},
+            "units": {"enum": ["angstrom", "bohr"]}
+          }
+        },
+        "charge": {"type": "integer"},
+        "spin": {"type": "integer", "description": "2S, the spin multiplicity minus one."},
+        "multiplicity": {"type": "integer", "minimum": 1},
+        "basis": {"type": "string", "minLength": 1},
+        "active_space": {
+          "type": "object",
+          "required": ["ncore", "nact", "nelec", "active_indices"],
+          "properties": {
+            "ncore": {"type": "integer", "minimum": 0},
+            "nact": {"type": "integer", "minimum": 1},
+            "nelec": {"type": "integer", "minimum": 1},
+            "active_indices": {
+              "type": "array",
+              "items": {"type": "integer", "minimum": 0},
+              "minItems": 1
+            }
+          }
+        },
+        "state": {
+          "type": "object",
+          "required": ["kind", "root"],
+          "properties": {
+            "kind": {
+              "enum": ["minimum", "stationary_point"],
+              "description": "A minimum requires a curvature check; a stationary point requires only the gradient check."
+            },
+            "root": {"type": "integer", "minimum": 0},
+            "irrep": {"type": ["string", "null"]}
+          }
+        },
+        "branch_label": {"type": "string", "minLength": 1},
+        "declared_energy_hartree": {"type": "number"},
+        "declared_natural_occupations": {
+          "type": "array",
+          "items": {"type": "number", "minimum": 0, "maximum": 2},
+          "minItems": 1
+        },
+        "identity_criteria": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "object",
+            "required": ["name", "observable", "required"],
+            "properties": {
+              "name": {"type": "string", "minLength": 1},
+              "observable": {
+                "enum": ["energy", "natural_occupation_spectrum", "overlap", "curvature", "excluded_orbital_occupation", "excluded_orbital_entropy"]
+              },
+              "tolerance_ref": {"type": "string"},
+              "required": {"type": "boolean"}
+            }
+          }
+        }
+      }
+    },
+    "evidence": {
+      "type": "object",
+      "required": [
+        "energy_hartree",
+        "orbital_gradient_norm",
+        "gradient_chart",
+        "natural_occupations",
+        "curvature",
+        "excluded_orbitals"
+      ],
+      "properties": {
+        "energy_hartree": {"type": "number"},
+        "energy_source": {"type": "string"},
+        "orbital_gradient_norm": {"type": "number", "minimum": 0},
+        "gradient_chart": {
+          "type": "string",
+          "description": "The rotation chart in which the gradient was measured, including whether core-virtual rotations are present."
+        },
+        "natural_occupations": {
+          "type": "array",
+          "items": {"type": "number", "minimum": 0, "maximum": 2},
+          "minItems": 1
+        },
+        "natural_occupation_sum": {"type": "number"},
+        "overlap_to_reference": {"type": ["number", "null"]},
+        "curvature": {
+          "type": ["object", "null"],
+          "required": ["method", "lowest_eigenvalue", "n_negative"],
+          "properties": {
+            "method": {"type": "string", "minLength": 1},
+            "lowest_eigenvalue": {"type": "number"},
+            "n_negative": {"type": "integer", "minimum": 0},
+            "step": {"type": ["number", "null"]},
+            "cross_check": {
+              "type": ["object", "null"],
+              "properties": {
+                "method": {"type": "string"},
+                "lowest_eigenvalue": {"type": "number"},
+                "n_negative": {"type": "integer", "minimum": 0}
+              }
+            }
+          }
+        },
+        "excluded_orbitals": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["label", "natural_occupation", "basis_dependent_occupation", "entropy", "is_lowest_correlation"],
+            "properties": {
+              "label": {"type": "string", "minLength": 1},
+              "natural_occupation": {"type": "number", "minimum": 0, "maximum": 2},
+              "basis_dependent_occupation": {"type": "number", "minimum": 0, "maximum": 2},
+              "entropy": {"type": "number", "minimum": 0},
+              "is_lowest_correlation": {"type": "boolean"}
+            }
+          }
+        }
+      }
+    },
+    "branches": {
+      "type": "object",
+      "required": ["competitors", "inventory"],
+      "properties": {
+        "competitors": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["label", "energy_hartree", "natural_occupations"],
+            "properties": {
+              "label": {"type": "string", "minLength": 1},
+              "energy_hartree": {"type": "number"},
+              "natural_occupations": {
+                "type": "array",
+                "items": {"type": "number", "minimum": 0, "maximum": 2},
+                "minItems": 1
+              },
+              "gradient_norm": {"type": ["number", "null"]},
+              "curvature": {
+                "type": ["object", "null"],
+                "properties": {
+                  "method": {"type": "string"},
+                  "lowest_eigenvalue": {"type": "number"},
+                  "n_negative": {"type": "integer", "minimum": 0}
+                }
+              },
+              "excluded_orbital_entropy": {"type": ["number", "null"]},
+              "source": {"type": ["string", "null"]}
+            }
+          }
+        },
+        "inventory": {
+          "type": "object",
+          "required": ["complete", "n_solutions_reported",
+                       "n_solutions_recorded", "missing"],
+          "properties": {
+            "complete": {"type": "boolean"},
+            "n_solutions_reported": {"type": "integer", "minimum": 1},
+            "n_solutions_recorded": {"type": "integer", "minimum": 0},
+            "missing": {"type": "integer", "minimum": 0},
+            "source": {"type": "string"}
+          }
+        }
+      }
+    },
+    "canonical_interval": {
+      "type": "object",
+      "required": [
+        "protocol",
+        "same_active_space",
+        "active_space_sha256",
+        "composition_unchanged",
+        "n_rotations",
+        "rotations",
+        "occupation_interval",
+        "entropy_interval",
+        "reference",
+        "discriminating",
+        "quality"
+      ],
+      "properties": {
+        "protocol": {"type": "string", "minLength": 1},
+        "same_active_space": {"type": "boolean"},
+        "active_space_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "composition_unchanged": {"type": "boolean"},
+        "n_rotations": {"type": "integer", "minimum": 0},
+        "rotation_amplitude_rad": {"type": ["number", "null"]},
+        "rotations": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["rotation_id", "seed", "matrix_sha256", "occupation", "entropy", "energy_change_hartree"],
+            "properties": {
+              "rotation_id": {"type": "string", "minLength": 1},
+              "seed": {"type": ["integer", "null"]},
+              "matrix_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+              "matrix": {"type": ["array", "null"]},
+              "occupation": {"type": "number", "minimum": 0, "maximum": 2},
+              "entropy": {"type": "number", "minimum": 0},
+              "energy_change_hartree": {"type": "number"}
+            }
+          }
+        },
+        "reference": {
+          "type": "object",
+          "required": ["occupation", "entropy"],
+          "properties": {
+            "occupation": {"type": "number", "minimum": 0, "maximum": 2},
+            "entropy": {"type": "number", "minimum": 0}
+          }
+        },
+        "occupation_interval": {
+          "$ref": "#/$defs/interval"
+        },
+        "entropy_interval": {
+          "$ref": "#/$defs/interval"
+        },
+        "energy_invariance_max_hartree": {"type": "number", "minimum": 0},
+        "discriminating": {
+          "type": "object",
+          "required": ["occupation", "entropy", "reason"],
+          "properties": {
+            "occupation": {"type": ["boolean", "null"]},
+            "entropy": {"type": ["boolean", "null"]},
+            "candidate_occupation_difference": {"type": ["number", "null"]},
+            "candidate_entropy_difference": {"type": ["number", "null"]},
+            "reason": {"type": "string"}
+          }
+        },
+        "quality": {
+          "type": "object",
+          "required": ["min_rotations_met", "same_active_space", "energy_invariant"],
+          "properties": {
+            "min_rotations_met": {"type": "boolean"},
+            "same_active_space": {"type": "boolean"},
+            "energy_invariant": {"type": "boolean"}
+          }
+        }
+      }
+    },
+    "degeneracy": {
+      "type": "object",
+      "required": [
+        "criterion",
+        "relative_threshold",
+        "noise_floor_relative",
+        "threshold_used",
+        "effective_threshold",
+        "partner_set",
+        "n_partners",
+        "unresolved_partners",
+        "status"
+      ],
+      "properties": {
+        "criterion": {"type": "string", "minLength": 1},
+        "relative_threshold": {"type": "number", "minimum": 0},
+        "noise_floor_relative": {"type": "number", "minimum": 0},
+        "threshold_used": {"enum": ["relative_threshold", "10x_noise_floor"]},
+        "effective_threshold": {"type": "number", "minimum": 0},
+        "partner_set": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["i", "j", "value_i", "value_j", "relative_gap"],
+            "properties": {
+              "i": {"type": "integer", "minimum": 0},
+              "j": {"type": "integer", "minimum": 0},
+              "value_i": {"type": "number"},
+              "value_j": {"type": "number"},
+              "relative_gap": {"type": "number", "minimum": 0}
+            }
+          }
+        },
+        "n_partners": {"type": "integer", "minimum": 0},
+        "unresolved_partners": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["i", "j", "relative_gap"],
+            "properties": {
+              "i": {"type": "integer", "minimum": 0},
+              "j": {"type": "integer", "minimum": 0},
+              "relative_gap": {"type": "number", "minimum": 0}
+            }
+          }
+        },
+        "status": {"enum": ["clear", "degenerate_resolved", "degenerate_unresolved"]},
+        "related_measurements": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["system", "space", "n_partner_pairs", "in_scope", "source"],
+            "properties": {
+              "system": {"type": "string"},
+              "space": {"type": "string"},
+              "n_partner_pairs": {"type": "integer", "minimum": 0},
+              "in_scope": {"type": "boolean"},
+              "source": {"type": "string"},
+              "note": {"type": "string"}
+            }
+          }
+        }
+      }
+    },
+    "tolerances": {
+      "type": "object",
+      "required": [
+        "gradient_norm_max",
+        "energy_match_hartree",
+        "occupation_match_max",
+        "overlap_min",
+        "curvature_min_eigenvalue",
+        "canonical_interval_energy_max_hartree",
+        "tolerance_id"
+      ],
+      "properties": {
+        "gradient_norm_max": {"type": "number", "minimum": 0},
+        "energy_match_hartree": {"type": "number", "minimum": 0},
+        "occupation_match_max": {"type": "number", "minimum": 0},
+        "overlap_min": {"type": "number", "minimum": 0, "maximum": 1},
+        "curvature_min_eigenvalue": {"type": "number"},
+        "canonical_interval_energy_max_hartree": {"type": "number", "minimum": 0},
+        "degeneracy_relative_threshold": {"type": "number", "minimum": 0},
+        "degeneracy_noise_floor_relative": {"type": "number", "minimum": 0},
+        "tolerance_id": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "policy": {
+          "type": "object",
+          "properties": {
+            "require_complete_environment": {"type": "boolean"},
+            "allow_incomplete_branch_inventory": {"type": "boolean"}
+          }
+        }
+      }
+    },
+    "versions": {
+      "type": "object",
+      "required": ["code_commit", "code_version", "certificate_module_sha256", "schema_sha256"],
+      "properties": {
+        "code_commit": {"type": "string", "minLength": 7},
+        "code_version": {"type": "string", "minLength": 1},
+        "release_commit_subject": {"type": "string"},
+        "certificate_module_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "schema_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+      }
+    },
+    "environment": {
+      "type": "object",
+      "required": [
+        "measurement",
+        "generation",
+        "environment_hash",
+        "thread_sensitivity",
+        "status"
+      ],
+      "properties": {
+        "measurement": {"$ref": "#/$defs/environment_record"},
+        "generation": {"$ref": "#/$defs/environment_record"},
+        "environment_hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "status": {"enum": ["complete", "partial"]},
+        "missing": {
+          "type": "array",
+          "items": {"type": "string"}
+        },
+        "thread_sensitivity": {
+          "type": "object",
+          "required": ["measured", "tolerance_insensitive_claim"],
+          "properties": {
+            "measured": {"type": "boolean"},
+            "quantity": {"type": "string"},
+            "thread_counts": {
+              "type": "array",
+              "items": {"type": "integer", "minimum": 1}
+            },
+            "difference": {"type": ["number", "null"]},
+            "difference_unit": {"type": ["string", "null"]},
+            "branch_change_observed": {"type": ["boolean", "null"]},
+            "source": {"type": "string"},
+            "tolerance_insensitive_claim": {
+              "type": "boolean",
+              "description": "True only when a measurement shows that the tolerance is insensitive to the thread count. A false value is the default and must not be read as a claim of insensitivity."
+            },
+            "note": {"type": "string"}
+          }
+        }
+      }
+    },
+    "verdict": {
+      "type": "object",
+      "required": ["value", "reasons", "checks"],
+      "properties": {
+        "value": {"enum": ["accept", "reject", "undetermined"]},
+        "reasons": {
+          "type": "array",
+          "items": {"type": "string"}
+        },
+        "warnings": {
+          "type": "array",
+          "items": {"type": "string"}
+        },
+        "residual_risks": {
+          "type": "array",
+          "items": {"type": "string"}
+        },
+        "checks": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["name", "status", "detail"],
+            "properties": {
+              "name": {"type": "string", "minLength": 1},
+              "status": {"enum": ["pass", "fail", "undetermined", "not_applicable"]},
+              "value": {},
+              "threshold": {},
+              "detail": {"type": "string"}
+            }
+          }
+        }
+      }
+    },
+    "provenance": {
+      "type": "object",
+      "required": ["sources", "generated_by"],
+      "properties": {
+        "sources": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["path", "what"],
+            "properties": {
+              "path": {"type": "string", "minLength": 1},
+              "what": {"type": "string", "minLength": 1},
+              "sha256": {"type": ["string", "null"]}
+            }
+          }
+        },
+        "generated_by": {"type": "string", "minLength": 1},
+        "notes": {
+          "type": "array",
+          "items": {"type": "string"}
+        }
+      }
+    }
+  },
+  "$defs": {
+    "interval": {
+      "type": "object",
+      "required": ["low", "high", "width", "n_values"],
+      "properties": {
+        "low": {"type": "number"},
+        "high": {"type": "number"},
+        "width": {"type": "number", "minimum": 0},
+        "n_values": {"type": "integer", "minimum": 1}
+      }
+    },
+    "environment_record": {
+      "type": "object",
+      "required": [
+        "python",
+        "platform",
+        "numpy",
+        "blas",
+        "lapack",
+        "jax",
+        "jaxlib",
+        "xla",
+        "pyscf",
+        "pyscfad",
+        "omp_num_threads_effective",
+        "precision_mode"
+      ],
+      "properties": {
+        "python": {"$ref": "#/$defs/component"},
+        "platform": {"type": "string", "minLength": 1},
+        "numpy": {"$ref": "#/$defs/component"},
+        "blas": {"$ref": "#/$defs/component"},
+        "lapack": {"$ref": "#/$defs/component"},
+        "jax": {"$ref": "#/$defs/component"},
+        "jaxlib": {"$ref": "#/$defs/component"},
+        "xla": {"$ref": "#/$defs/component"},
+        "pyscf": {"$ref": "#/$defs/component"},
+        "pyscfad": {"$ref": "#/$defs/component"},
+        "omp_num_threads_effective": {
+          "type": ["integer", "string"],
+          "description": "The effective OpenMP thread count. A string is allowed only for an explicit declaration such as 'runtime default (unset)'."
+        },
+        "precision_mode": {"type": "string", "minLength": 1}
+      }
+    },
+    "component": {
+      "type": "object",
+      "required": ["name", "version"],
+      "properties": {
+        "name": {"type": "string", "minLength": 1},
+        "version": {"type": "string", "minLength": 1},
+        "build": {"type": ["string", "null"]}
+      }
+    }
+  }
+}

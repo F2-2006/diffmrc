@@ -1,0 +1,496 @@
+{
+  "schema_version": "1.0",
+  "kind": "diffmrc.branch-certificate",
+  "created_utc": "2026-11-05T09:00:52+00:00",
+  "target": {
+    "system": "N2",
+    "geometry": {
+      "atoms": "N 0 0 0; N 0 0 1.0977",
+      "units": "angstrom"
+    },
+    "charge": 0,
+    "spin": 0,
+    "multiplicity": 1,
+    "basis": "cc-pVDZ",
+    "active_space": {
+      "ncore": 2,
+      "nact": 2,
+      "nelec": 2,
+      "active_indices": [
+        2,
+        3
+      ]
+    },
+    "state": {
+      "kind": "stationary_point",
+      "root": 0,
+      "irrep": null
+    },
+    "branch_label": "N2-cc-pVDZ-A",
+    "declared_energy_hartree": -108.98580107908153,
+    "declared_natural_occupations": [
+      1.936771,
+      0.063229
+    ],
+    "identity_criteria": [
+      {
+        "name": "energy",
+        "observable": "energy",
+        "tolerance_ref": "energy_match_hartree",
+        "required": true
+      },
+      {
+        "name": "natural_occupation_spectrum",
+        "observable": "natural_occupation_spectrum",
+        "tolerance_ref": "occupation_match_max",
+        "required": true
+      },
+      {
+        "name": "excluded_orbital_occupation",
+        "observable": "excluded_orbital_occupation",
+        "tolerance_ref": "canonical_interval",
+        "required": false
+      },
+      {
+        "name": "excluded_orbital_entropy",
+        "observable": "excluded_orbital_entropy",
+        "tolerance_ref": "canonical_interval",
+        "required": false
+      }
+    ]
+  },
+  "evidence": {
+    "energy_hartree": -108.98580107908153,
+    "energy_source": "server/results/m5_data_20261010/t106_layerA_recheck.json, N2/cc-pVDZ row",
+    "orbital_gradient_norm": 1.6084801089670203e-07,
+    "gradient_chart": "CASSCF orbital rotations including core-active, core-virtual and active-virtual pairs (orblib.orbital_pairs include_cv=True)",
+    "natural_occupations": [
+      1.936771,
+      0.063229
+    ],
+    "natural_occupation_sum": 2.0,
+    "overlap_to_reference": null,
+    "curvature": null,
+    "excluded_orbitals": [
+      {
+        "label": "active orbital 2 (lowest correlation)",
+        "natural_occupation": 0.063229,
+        "basis_dependent_occupation": 0.063229,
+        "entropy": 0.14031030066224554,
+        "is_lowest_correlation": true
+      }
+    ]
+  },
+  "branches": {
+    "competitors": [
+      {
+        "label": "N2-cc-pVDZ-C",
+        "energy_hartree": -108.95448879451199,
+        "natural_occupations": [
+          1.9991,
+          0.0009
+        ],
+        "gradient_norm": null,
+        "curvature": null,
+        "excluded_orbital_entropy": null,
+        "source": "多解定案与复核_20260916.md section 5 (t82); code/t82_multistart_diff.py docstring"
+      }
+    ],
+    "inventory": {
+      "complete": false,
+      "n_solutions_reported": 3,
+      "n_solutions_recorded": 2,
+      "missing": 1,
+      "source": "t106_layerA_recheck.json reports n_solutions=3 and n_certified=3; per-branch records exist for the variational lowest solution and for solution 3 (t82)"
+    }
+  },
+  "canonical_interval": {
+    "protocol": "two_electron_singlet_reconstruction",
+    "same_active_space": true,
+    "active_space_sha256": "9780f0c0aa90ea584b5f8c35e89484bb156f18f97f5c71d7cdb44771743ffd39",
+    "composition_unchanged": true,
+    "n_rotations": 3,
+    "rotation_amplitude_rad": 0.5,
+    "rotations": [
+      {
+        "rotation_id": "rot-101",
+        "seed": 101,
+        "matrix": [
+          [
+            0.9967089724246163,
+            -0.08106308832178434
+          ],
+          [
+            0.08106308832178434,
+            0.9967089724246163
+          ]
+        ],
+        "matrix_sha256": "e362642f98c896f8d90341049b23c3ba68eceb9e880d13676fba336f9c7473fd",
+        "occupation": 0.07554046469548534,
+        "entropy": 0.20131546312727622,
+        "all_occupations": [
+          1.9244595353045149,
+          0.07554046469548534
+        ],
+        "energy_change_hartree": 0.0,
+        "energy_change_source": "exact invariance of an active-space rotation"
+      },
+      {
+        "rotation_id": "rot-202",
+        "seed": 202,
+        "matrix": [
+          [
+            0.9653848232287264,
+            -0.2608297204684324
+          ],
+          [
+            0.2608297204684324,
+            0.9653848232287264
+          ]
+        ],
+        "matrix_sha256": "5682ad7c546b6a946d840dcfc5e61ff37353ddb3c0e34b1d42a851b8001f1ddf",
+        "occupation": 0.190690077409716,
+        "entropy": 0.547511612125716,
+        "all_occupations": [
+          1.809309922590284,
+          0.190690077409716
+        ],
+        "energy_change_hartree": 0.0,
+        "energy_change_source": "exact invariance of an active-space rotation"
+      },
+      {
+        "rotation_id": "rot-303",
+        "seed": 303,
+        "matrix": [
+          [
+            0.8923177104468553,
+            0.4514079126719891
+          ],
+          [
+            -0.4514079126719891,
+            0.8923177104468553
+          ]
+        ],
+        "matrix_sha256": "15f4f2caf9ebf77e745b5c6f273ec42ebc46c430c2949d3475c8bca0c35e4907",
+        "occupation": 0.4449989739398219,
+        "entropy": 0.9926396876307612,
+        "all_occupations": [
+          1.5550010260601783,
+          0.4449989739398219
+        ],
+        "energy_change_hartree": 0.0,
+        "energy_change_source": "exact invariance of an active-space rotation"
+      }
+    ],
+    "reference": {
+      "occupation": 0.063229,
+      "entropy": 0.14031030066224554
+    },
+    "occupation_interval": {
+      "low": 0.063229,
+      "high": 0.4449989739398219,
+      "width": 0.3817699739398219,
+      "n_values": 4
+    },
+    "entropy_interval": {
+      "low": 0.14031030066224554,
+      "high": 0.9926396876307612,
+      "width": 0.8523293869685156,
+      "n_values": 4
+    },
+    "energy_invariance_max_hartree": 0.0,
+    "quality": {
+      "min_rotations_met": true,
+      "same_active_space": true,
+      "energy_invariant": true
+    },
+    "discriminating": {
+      "occupation": false,
+      "entropy": null,
+      "candidate_occupation_difference": 0.06232900000000008,
+      "candidate_entropy_difference": null,
+      "reason": "occupation interval width 0.38177 vs nearest competitor difference 0.062329: non-discriminating; no competitor entropy was supplied"
+    }
+  },
+  "degeneracy": {
+    "criterion": "|v_i - v_j| / max(|v_i|, |v_j|) < max(10 * noise_floor, relative_threshold)",
+    "relative_threshold": 1e-06,
+    "noise_floor_relative": 1e-12,
+    "threshold_used": "relative_threshold",
+    "effective_threshold": 1e-06,
+    "partner_set": [],
+    "n_partners": 0,
+    "detected_pairs": [],
+    "unresolved_partners": [],
+    "status": "clear",
+    "related_measurements": [
+      {
+        "system": "N2/6-31G",
+        "space": "CAS(4,4) frontier pair",
+        "n_partner_pairs": 1,
+        "in_scope": false,
+        "source": "release/diffmrc/src/diffmrc/driver/orbitals.py lines 104-118; tests/driver/test_fd_refinement.py",
+        "note": "A different active space from this certificate. The exact frontier degeneracy makes the analytic Hessian entirely NaN at the symmetric stationary point; it is recorded here as a related observation, not as a partner of the CAS(2,2) target."
+      }
+    ],
+    "in_scope": true,
+    "spectrum": [
+      1.936771,
+      0.063229
+    ]
+  },
+  "tolerances": {
+    "gradient_norm_max": 1e-05,
+    "energy_match_hartree": 0.0005,
+    "occupation_match_max": 0.05,
+    "overlap_min": 0.95,
+    "curvature_min_eigenvalue": -0.0001,
+    "canonical_interval_energy_max_hartree": 1e-08,
+    "degeneracy_relative_threshold": 1e-06,
+    "degeneracy_noise_floor_relative": 1e-12,
+    "policy": {
+      "require_complete_environment": false,
+      "allow_incomplete_branch_inventory": true
+    },
+    "tolerance_id": "8c733baebf9e6d5728568eaa96debb2d2fb8bcdcea6167e08464251c818fd6f0"
+  },
+  "versions": {
+    "code_commit": "721c62f348cc559422ba4c6e094423345a75e443",
+    "code_version": "0.3.4",
+    "release_commit_subject": "release: 0.3.5",
+    "certificate_module_sha256": "942c05d70c564a40a88990aece5026ce5c6a367b4f12c4ddde66f6a912e94404",
+    "schema_sha256": "54ddfd53a6c367b2756b44b9552df8064f8d77008eada8abdacb8613cf012ac9"
+  },
+  "environment": {
+    "measurement": {
+      "python": {
+        "name": "CPython",
+        "version": "3.11.15"
+      },
+      "platform": "Linux x86_64; 101 compute server; conda environment pyscfad214",
+      "numpy": {
+        "name": "numpy",
+        "version": "2.4.6"
+      },
+      "blas": {
+        "name": "MKL (inferred from MKL_CBWR=COMPATIBLE; build not recorded)",
+        "version": "unrecorded"
+      },
+      "lapack": {
+        "name": "MKL (inferred from MKL_CBWR=COMPATIBLE; build not recorded)",
+        "version": "unrecorded"
+      },
+      "jax": {
+        "name": "jax",
+        "version": "0.10.2"
+      },
+      "jaxlib": {
+        "name": "jaxlib",
+        "version": "0.10.2"
+      },
+      "xla": {
+        "name": "XLA (jaxlib)",
+        "version": "0.10.2"
+      },
+      "pyscf": {
+        "name": "pyscf",
+        "version": "2.14.0"
+      },
+      "pyscfad": {
+        "name": "pyscfad",
+        "version": "0.3.3"
+      },
+      "omp_num_threads_effective": 8,
+      "precision_mode": "float64 (jax_enable_x64=True); JAX_PLATFORMS=cpu; MKL_CBWR=COMPATIBLE"
+    },
+    "generation": {
+      "python": {
+        "name": "CPython",
+        "version": "3.14.2"
+      },
+      "platform": "Windows AMD64; cpu_count=32",
+      "numpy": {
+        "name": "numpy",
+        "version": "2.4.2"
+      },
+      "blas": {
+        "name": "scipy-openblas",
+        "version": "0.3.31.dev",
+        "build": "OpenBLAS 0.3.31.dev  USE64BITINT DYNAMIC_ARCH NO_AFFINITY SkylakeX MAX_THREADS=24"
+      },
+      "lapack": {
+        "name": "scipy-openblas",
+        "version": "0.3.31.dev",
+        "build": "OpenBLAS 0.3.31.dev  USE64BITINT DYNAMIC_ARCH NO_AFFINITY SkylakeX MAX_THREADS=24"
+      },
+      "jax": {
+        "name": "jax",
+        "version": "0.11.2"
+      },
+      "jaxlib": {
+        "name": "jaxlib",
+        "version": "0.11.2"
+      },
+      "xla": {
+        "name": "XLA (jaxlib)",
+        "version": "0.11.2"
+      },
+      "pyscf": {
+        "name": "pyscf",
+        "version": "not installed"
+      },
+      "pyscfad": {
+        "name": "pyscfad",
+        "version": "not installed"
+      },
+      "omp_num_threads_effective": "runtime default (OMP_NUM_THREADS unset)",
+      "precision_mode": "float64 (declared by the certificate module; the certificate arithmetic is pure Python float)"
+    },
+    "thread_sensitivity": {
+      "measured": true,
+      "quantity": "fixed-theta CASSCF energy and the stationary point reached (project-level measurement)",
+      "thread_counts": [
+        1,
+        4
+      ],
+      "difference": 0.035,
+      "difference_unit": "hartree",
+      "branch_change_observed": true,
+      "source": "release/diffmrc/src/diffmrc/driver/kernel.py lines 936-940; SESSION_HANDOFF_20260916.md",
+      "tolerance_insensitive_claim": false,
+      "note": "The measured thread-induced difference exceeds the energy-match tolerance and a thread-dependent branch change was observed on EuF. The tolerance is not claimed to be thread-insensitive; the effective thread count is part of the hashed environment."
+    },
+    "status": "partial",
+    "missing": [
+      "blas.version",
+      "lapack.version"
+    ],
+    "environment_hash": "722192be23d6c642721b7dd308a04e0f62904459c771675b9710cc4df2fdc172"
+  },
+  "verdict": {
+    "value": "accept",
+    "reasons": [
+      "all required checks passed; the evidence identifies the declared branch N2-cc-pVDZ-A"
+    ],
+    "warnings": [
+      "environment record is partial (missing: blas.version, lapack.version); the certificate identity includes the declared gaps",
+      "the excluded-orbital occupation is non-discriminating (canonical interval wider than the candidate difference) and is not used for acceptance"
+    ],
+    "residual_risks": [
+      "branch inventory is incomplete: 1 branch(es) have no per-branch record; an unrecorded competitor closer than the energy tolerance cannot be excluded"
+    ],
+    "checks": [
+      {
+        "name": "version_binding",
+        "status": "pass",
+        "detail": "tolerances bound to commit 721c62f348cc559422ba4c6e094423345a75e443 and module sha256 942c05d70c56"
+      },
+      {
+        "name": "environment_declared",
+        "status": "pass",
+        "detail": "the environment record is partial; missing fields are declared and hashed: ['blas.version', 'lapack.version']",
+        "value": [
+          "blas.version",
+          "lapack.version"
+        ]
+      },
+      {
+        "name": "gradient_converged",
+        "status": "pass",
+        "detail": "orbital gradient 1.608e-07 <= 1.000e-05",
+        "value": 1.6084801089670203e-07,
+        "threshold": 1e-05
+      },
+      {
+        "name": "curvature_minimum",
+        "status": "not_applicable",
+        "detail": "the target is declared as a stationary point, not a minimum; curvature is not required"
+      },
+      {
+        "name": "energy_matches_declaration",
+        "status": "pass",
+        "detail": "|E - E_declared| = 0.000e+00 <= 5.000e-04",
+        "value": 0.0,
+        "threshold": 0.0005
+      },
+      {
+        "name": "occupation_matches_declaration",
+        "status": "pass",
+        "detail": "max natural-occupation change 0.000e+00 <= 5.000e-02",
+        "value": 0.0,
+        "threshold": 0.05
+      },
+      {
+        "name": "canonical_interval_protocol",
+        "status": "pass",
+        "detail": "3 independent rotations in the same active space; max energy change 0.000e+00 Ha",
+        "value": 3,
+        "threshold": 3
+      },
+      {
+        "name": "observable_discriminates",
+        "status": "pass",
+        "detail": "the target is separable from the competitors by: energy",
+        "value": [
+          "energy"
+        ]
+      },
+      {
+        "name": "branch_identity",
+        "status": "pass",
+        "detail": "the evidence does not match any declared competitor within the energy and occupation tolerances"
+      },
+      {
+        "name": "branch_inventory",
+        "status": "pass",
+        "detail": "the inventory is incomplete: 2 of 3 branches are recorded (missing 1); the policy permits the certificate with a residual risk",
+        "value": 1
+      },
+      {
+        "name": "degeneracy_resolved",
+        "status": "pass",
+        "detail": "no degenerate partner pair was detected above the effective threshold 1.000e-06",
+        "value": 0
+      },
+      {
+        "name": "thread_sensitivity",
+        "status": "pass",
+        "detail": "no thread-insensitivity is claimed; the effective thread count is part of the hashed environment",
+        "value": 8
+      }
+    ]
+  },
+  "provenance": {
+    "sources": [
+      {
+        "path": "server/results/m5_data_20261010/t106_layerA_recheck.json",
+        "what": "N2/cc-pVDZ CAS(2,2) energy, orbital gradient, natural occupations, n_solutions=3, spread_kcal=19.64875522224779, nthread=8"
+      },
+      {
+        "path": "多解定案与复核_20260916.md",
+        "what": "N2/cc-pVDZ has three stationary points; solution 3 energy and occupations; the variational lowest solution is the target"
+      },
+      {
+        "path": "code/t82_multistart_diff.py",
+        "what": "Multistart protocol and the two per-branch records quoted here"
+      },
+      {
+        "path": "code/agent_work/A1_P05_report.md",
+        "what": "pyscfad214 environment: Python 3.11.15, jax 0.10.2, pyscfad 0.3.3"
+      },
+      {
+        "path": "code/t106_layerAB_recheck.py",
+        "what": "Run settings: OMP/MKL/OpenBLAS/NumExpr/VecLib thread variables set to 8; MKL_CBWR=COMPATIBLE; JAX_PLATFORMS=cpu; jax_enable_x64=True. The BLAS/LAPACK build version was not written to the archived record and is marked unrecorded."
+      }
+    ],
+    "generated_by": "certificate.py 1.0",
+    "notes": [
+      "The target is declared as a stationary point, not a minimum; the archived t106 record does not contain a curvature spectrum for N2/cc-pVDZ CAS(2,2).",
+      "The third stationary point reported by t106 has no per-branch record. The inventory is therefore incomplete and the certificate carries that as a residual risk.",
+      "The canonical interval is an exact gauge transform of the two-electron singlet reconstructed from the measured natural occupations. It is not a new electronic-structure calculation.",
+      "The CAS(2,2) active space has no degenerate partner pair. The N2/6-31G CAS(4,4) degeneracy in related_measurements is out of scope for this target."
+    ]
+  },
+  "payload_hash": "c047d5f97717013ebe024d5685ad09e8e4fbd45aee0f88373f66c16bb093980e",
+  "certificate_id": "sha256:c047d5f97717013ebe024d5685ad09e8e4fbd45aee0f88373f66c16bb093980e"
+}

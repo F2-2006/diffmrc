@@ -33,6 +33,7 @@ where = ["src"]
 
 [tool.setuptools.package-data]
 "diffmrc.core.data" = ["*.json", "README.md"]
+"diffmrc.report" = ["*.json"]
 
 [tool.importlinter]
 root_package = "diffmrc"
@@ -79,4 +80,9 @@ forbidden_modules = [
     "diffmrc.policy",
     "diffmrc.driver",
     "diffmrc.cli",
+]
+
+[tool.pytest.ini_options]
+markers = [
+    "slow: end-to-end regression that takes tens of seconds; deselect with -m 'not slow'",
 ]

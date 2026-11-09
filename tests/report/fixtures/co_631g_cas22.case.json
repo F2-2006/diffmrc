@@ -1,0 +1,216 @@
+{
+  "case_id": "co_631g_cas22_b_minimum",
+  "target": {
+    "system": "CO",
+    "geometry": {
+      "atoms": "C 0 0 0; O 0 0 1.1283",
+      "units": "angstrom"
+    },
+    "charge": 0,
+    "spin": 0,
+    "multiplicity": 1,
+    "basis": "6-31G",
+    "active_space": {
+      "ncore": 6,
+      "nact": 2,
+      "nelec": 2,
+      "active_indices": [6, 7]
+    },
+    "state": {
+      "kind": "minimum",
+      "root": 0,
+      "irrep": null
+    },
+    "branch_label": "CO-6-31G-B",
+    "declared_energy_hartree": -112.6933751778,
+    "declared_natural_occupations": [1.953255, 0.046745],
+    "identity_criteria": [
+      {
+        "name": "energy",
+        "observable": "energy",
+        "tolerance_ref": "energy_match_hartree",
+        "required": true
+      },
+      {
+        "name": "natural_occupation_spectrum",
+        "observable": "natural_occupation_spectrum",
+        "tolerance_ref": "occupation_match_max",
+        "required": true
+      },
+      {
+        "name": "curvature",
+        "observable": "curvature",
+        "tolerance_ref": "curvature_min_eigenvalue",
+        "required": true
+      },
+      {
+        "name": "excluded_orbital_occupation",
+        "observable": "excluded_orbital_occupation",
+        "tolerance_ref": "canonical_interval",
+        "required": false
+      },
+      {
+        "name": "excluded_orbital_entropy",
+        "observable": "excluded_orbital_entropy",
+        "tolerance_ref": "canonical_interval",
+        "required": false
+      }
+    ]
+  },
+  "evidence": {
+    "energy_hartree": -112.6933751778,
+    "energy_source": "多解定案与复核_20260916.md section 4 (t97/t102); code/t97_second_order.py docstring",
+    "orbital_gradient_norm": 2.5e-06,
+    "gradient_chart": "CASSCF orbital rotations including core-active, core-virtual and active-virtual pairs (orblib.orbital_pairs include_cv=True)",
+    "natural_occupations": [1.953255, 0.046745],
+    "natural_occupation_sum": 2.0,
+    "overlap_to_reference": null,
+    "curvature": {
+      "method": "numerical Hessian diagonal minimum (central differences of the analytic gradient)",
+      "lowest_eigenvalue": 0.0852,
+      "n_negative": 0,
+      "step": null,
+      "cross_check": {
+        "method": "AD Hessian full spectrum",
+        "lowest_eigenvalue": -2.13e-09,
+        "n_negative": 0
+      },
+      "note": "The numerical route records the minimum diagonal element, not a full eigenvalue spectrum. The AD full-spectrum minimum is -2.13e-9, inside the numerical noise floor; both routes report no negative eigenvalue above the -1e-4 threshold."
+    },
+    "excluded_orbitals": [
+      {
+        "label": "active orbital 2 (lowest correlation)",
+        "natural_occupation": 0.046745,
+        "basis_dependent_occupation": 0.046745,
+        "entropy": 0.11088888134559437,
+        "is_lowest_correlation": true
+      }
+    ]
+  },
+  "branches": {
+    "competitors": [
+      {
+        "label": "CO-6-31G-A",
+        "energy_hartree": -112.6762235410,
+        "natural_occupations": [1.979633, 0.020367],
+        "gradient_norm": 1.7e-06,
+        "curvature": {
+          "method": "AD Hessian full spectrum; the numerical Hessian diagonal is also negative",
+          "lowest_eigenvalue": -0.028,
+          "n_negative": 1
+        },
+        "excluded_orbital_entropy": null,
+        "source": "多解定案与复核_20260916.md section 4 (t97): A is 10.76 kcal/mol above B and carries a negative curvature direction"
+      }
+    ],
+    "inventory": {
+      "complete": true,
+      "n_solutions_reported": 2,
+      "n_solutions_recorded": 2,
+      "missing": 0,
+      "source": "t97 A/B two-minimum search; both branches have energy, occupation, gradient and curvature records"
+    }
+  },
+  "canonical_interval": {
+    "protocol": "two_electron_singlet_reconstruction",
+    "same_active_space": true,
+    "composition_unchanged": true,
+    "rotation_amplitude_rad": 0.5,
+    "seeds": [101, 202, 303],
+    "excluded_index": 1
+  },
+  "degeneracy": {
+    "relative_threshold": 1e-06,
+    "noise_floor_relative": 1e-12,
+    "declared_partner_set": [],
+    "in_scope": true,
+    "related_measurements": [
+      {
+        "system": "CO/6-31G",
+        "space": "CAS(6,6) winning CI block (400 determinants)",
+        "n_partner_pairs": 24,
+        "in_scope": false,
+        "source": "SESSION_HANDOFF_20260924_night.md; JCTC投稿规划_20260924.md E13; code/t241c_co_health_lean.py",
+        "note": "Twenty-four bit-exact degenerate pairs in a different active space. They make the analytic second derivative unusable in that space and are the reason the CO/6-31G CAS(6,6) second-derivative route uses gradient differences or Lanczos. They are not partners of the CAS(2,2) target certified here."
+      }
+    ]
+  },
+  "tolerances": {
+    "gradient_norm_max": 1e-05,
+    "energy_match_hartree": 0.0005,
+    "occupation_match_max": 0.05,
+    "overlap_min": 0.95,
+    "curvature_min_eigenvalue": -0.0001,
+    "canonical_interval_energy_max_hartree": 1e-08,
+    "degeneracy_relative_threshold": 1e-06,
+    "degeneracy_noise_floor_relative": 1e-12,
+    "policy": {
+      "require_complete_environment": false,
+      "allow_incomplete_branch_inventory": true
+    }
+  },
+  "versions": {
+    "code_commit": "721c62f348cc559422ba4c6e094423345a75e443",
+    "code_version": "0.3.4",
+    "release_commit_subject": "release: 0.3.5"
+  },
+  "environment": {
+    "measurement": {
+      "python": {"name": "CPython", "version": "3.11.15"},
+      "platform": "Linux x86_64; 101 compute server; conda environment pyscfad214",
+      "numpy": {"name": "numpy", "version": "2.4.6"},
+      "blas": {"name": "MKL (inferred from MKL_CBWR=COMPATIBLE; build not recorded)", "version": "unrecorded"},
+      "lapack": {"name": "MKL (inferred from MKL_CBWR=COMPATIBLE; build not recorded)", "version": "unrecorded"},
+      "jax": {"name": "jax", "version": "0.10.2"},
+      "jaxlib": {"name": "jaxlib", "version": "0.10.2"},
+      "xla": {"name": "XLA (jaxlib)", "version": "0.10.2"},
+      "pyscf": {"name": "pyscf", "version": "2.14.0"},
+      "pyscfad": {"name": "pyscfad", "version": "0.3.3"},
+      "omp_num_threads_effective": 8,
+      "precision_mode": "float64 (jax_enable_x64=True); JAX_PLATFORMS=cpu; MKL_CBWR=COMPATIBLE"
+    },
+    "generation": "auto",
+    "thread_sensitivity": {
+      "measured": true,
+      "quantity": "fixed-theta CASSCF energy and the stationary point reached (project-level measurement)",
+      "thread_counts": [1, 4],
+      "difference": 0.035,
+      "difference_unit": "hartree",
+      "branch_change_observed": true,
+      "source": "release/diffmrc/src/diffmrc/driver/kernel.py lines 936-940; SESSION_HANDOFF_20260916.md",
+      "tolerance_insensitive_claim": false,
+      "note": "The branch change was observed on EuF, not re-measured on CO. The tolerance is not claimed to be thread-insensitive; the effective thread count is part of the hashed environment."
+    }
+  },
+  "provenance": {
+    "sources": [
+      {
+        "path": "多解定案与复核_20260916.md",
+        "what": "CO/6-31G CAS(2,2) A/B two-minimum data: energies, occupations, gradients and Hessian curvature"
+      },
+      {
+        "path": "code/t97_second_order.py",
+        "what": "Second-order analysis of A and B; environment (OMP=8, MKL_CBWR=COMPATIBLE, JAX_PLATFORMS=cpu, float64)"
+      },
+      {
+        "path": "SESSION_HANDOFF_20260924_night.md",
+        "what": "CO/6-31G CAS(6,6) 24 bit-exact degenerate pairs in the 400-determinant winning CI block; t241c health record"
+      },
+      {
+        "path": "JCTC投稿规划_20260924.md",
+        "what": "E13 defect record: blocked eigh on bit-exact degenerate pairs, CO winning block 24 pairs; A/B difference 10.76 kcal/mol"
+      },
+      {
+        "path": "code/t241c_co_health_lean.py",
+        "what": "CO/6-31G CAS(6,6) health check: E=-112.7955083, |g|=5.2e-6, lambda_min=1.194e-2, n_neg=0"
+      }
+    ],
+    "generated_by": "certificate.py 1.0",
+    "notes": [
+      "The target is the lower of the two stationary points, B. A is 10.76 kcal/mol higher and carries a negative curvature direction; the energy and curvature criteria separate the branches.",
+      "The natural-occupation spectrum changes by 0.0264 between A and B, below the 0.05 occupation tolerance. The occupation criterion is therefore non-discriminating for this pair and is not used for acceptance.",
+      "The canonical interval is an exact gauge transform of the two-electron singlet reconstructed from the measured natural occupations. It is not a new electronic-structure calculation.",
+      "The 24-pair degeneracy belongs to the CO/6-31G CAS(6,6) CI block, a different active space. It is recorded as an out-of-scope related measurement."
+    ]
+  }
+}
