@@ -23,8 +23,6 @@ import jax
 jax.config.update("jax_enable_x64", True)
 from jax import numpy as jnp
 
-from pyscfad import scf as pscf
-
 from functools import lru_cache
 from itertools import combinations
 
@@ -437,6 +435,13 @@ def _block_H(h1e_mo, eri_mo, DETS, idx, ncore, nact, nele_act):
 
 def casci_energy_from_mol(mol):
     """Fully differentiable map from a Mole pytree to the CASCI energy."""
+    # The only entry that needs the differentiable SCF. It is imported here
+    # rather than at module level so that the determinant-space kernels
+    # (cs_casci, cs_casci_blocked) load on machines without pyscfad; every
+    # other module of this package reaches the CI layer for its integrals,
+    # not for its SCF.
+    from pyscfad import scf as pscf
+
     h1e = mol.intor("int1e_kin") + mol.intor("int1e_nuc")
     eri = mol.intor("int2e", aosym="s1")
     mf = pscf.RHF(mol)

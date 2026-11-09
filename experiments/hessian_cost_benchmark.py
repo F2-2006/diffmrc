@@ -216,13 +216,21 @@ def cmd_run(args):
     elif args.route == 'hvp':
         res = implicit_hessian_hvp(
             mol, theta, E_joint, E_tt=E_tt,
-            atol=args.atol, btol=args.btol, maxiter=args.maxiter)
+            atol=args.atol, btol=args.btol, maxiter=args.maxiter,
+            deflate=not args.no_deflate,
+            deflate_cond_target=args.deflate_cond_target,
+            deflate_tol_rel=args.deflate_tol_rel,
+            stall_iters=args.stall_iters,
+            time_limit=args.time_limit)
         meta = dict(lsmr_iterations=res.lsmr_iterations.tolist(),
                     lsmr_istop=res.lsmr_istop.tolist(),
                     lsmr_residual=res.lsmr_residual.tolist(),
-                    lsmr_maxiter=int(res.maxiter),
+                    lsmr_total_iterations=int(res.total_iterations),
+                    lsmr_maxiter=res.maxiter,
                     lsmr_atol=float(res.atol),
                     lsmr_btol=float(res.btol),
+                    solver_reason=res.solver_reason,
+                    deflation=res.deflation,
                     dtheta_dR_max=res.dtheta_dR_max)
     elif args.route == 'unrolled':
         def E_unrolled(m, n_steps):
@@ -327,6 +335,12 @@ def main():
     p.add_argument('--atol', type=float, default=1.0e-12)
     p.add_argument('--btol', type=float, default=1.0e-12)
     p.add_argument('--maxiter', type=int, default=None)
+    p.add_argument('--no-deflate', action='store_true',
+                   help='solve on the full operator (old behaviour)')
+    p.add_argument('--deflate-cond-target', type=float, default=100.0)
+    p.add_argument('--deflate-tol-rel', type=float, default=1e-8)
+    p.add_argument('--stall-iters', type=int, default=40)
+    p.add_argument('--time-limit', type=float, default=None)
     p.set_defaults(func=cmd_run)
 
     p = sub.add_parser('compare')

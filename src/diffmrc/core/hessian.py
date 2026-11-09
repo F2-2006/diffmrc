@@ -100,6 +100,11 @@ class ImplicitHessianHVPResult:
     response solve is a matrix-free least-squares solution of
     ``H_tt x = M v``; ``lsmr_*`` records how each column converged, so a
     reader can judge the result instead of trusting the solver.
+
+    ``deflation`` carries the report of the near-null basis the solve
+    used: how many directions were deflated, whether the basis was
+    certified, and how many operator products it cost.  ``None`` means
+    the solve ran on the full operator.
     """
 
     H_total: np.ndarray
@@ -111,10 +116,15 @@ class ImplicitHessianHVPResult:
     lsmr_iterations: np.ndarray
     lsmr_istop: np.ndarray
     lsmr_residual: np.ndarray
-    maxiter: int
+    maxiter: object
     atol: float
     btol: float
     dtheta_dR_max: float
+    deflation: object = None
+    solver_reason: object = None
+    total_iterations: int = 0
+    relative_residual: object = None
+    total_residual: object = None
 
 
 def make_joint_energy_fn(ncore, nact, nele, nmo, pairs, pscf,
@@ -441,6 +451,18 @@ class ImplicitHessianHVPOps:
     symmetric operator, which is the same role the relative-cutoff
     pseudo-inverse plays in the dense route.  Nothing of size
     ``n_par**2`` or ``n_par * n_geom`` is formed.
+
+    The solve has no iteration cap.  It stops on the relative residual
+    (``rtol``) or on the normal-equation criterion (``atol``), with a
+    wall-clock guard and a stagnation guard so that a hopeless system
+    terminates.  ``maxiter`` remains available for a caller who wants a
+    hard budget, but it is no longer the control.
+
+    ``deflate`` builds a near-null basis once (see
+    :func:`core.lsmr.near_null_basis`) and hands the small-eigenvalue
+    block to an exact pseudo-inverse action, so LSMR only sees the
+    complement.  The basis is used only when it certifies; otherwise
+    the solve falls back to the full operator.
     """
 
     E_joint: object
@@ -452,6 +474,14 @@ class ImplicitHessianHVPOps:
     atol: float = 1e-12
     btol: float = 1e-12
     maxiter: int = None
+    deflate: bool = True
+    deflate_cond_target: float = 100.0
+    deflate_tol_rel: float = 1e-8
+    deflate_max_size: int = None
+    deflate_max_rounds: int = 30
+    stall_iters: int = 40
+    time_limit: float = None
+    fallback: bool = True
 
     def __post_init__(self):
         self.theta = jax.numpy.asarray(
@@ -470,13 +500,10 @@ class ImplicitHessianHVPOps:
             # working set grow across columns.
             self._htt_jit = jax.jit(
                 lambda u: jax.jvp(self._g_tt, (self.theta,), (u,))[1])
-        if self.maxiter is None:
-            # Measured: H2O/6-31G (n_par=50) needed up to 323 LSMR
-            # iterations for a converged column, CO/6-31G (n_par=92)
-            # up to 238.  Eight times n_par covers both; the products
-            # are jitted when E_tt is supplied, so the extra iterations
-            # are cheap relative to one mixed derivative.
-            self.maxiter = max(8 * self.n_par, 200)
+        self._basis = None
+        self._ritz = None
+        self._diag = None
+        self.deflation_info = None
 
     @property
     def n_par(self):
@@ -512,24 +539,61 @@ class ImplicitHessianHVPOps:
                           self.tangent_fn)
         return _tangent_coords(jax.jvp(g, (self.mol,), (tan,))[1])
 
+    def prepare_deflation(self, diag=None):
+        """Build (once) the near-null basis used by every column solve.
+
+        The basis costs ``n_par`` products for the diagonal when it is
+        not supplied, plus the greedy expansion; it is shared by all
+        ``n_geom`` columns, so its cost does not grow with the number
+        of displacements.
+        """
+        from .lsmr import near_null_basis
+
+        if not self.deflate:
+            self.deflation_info = dict(certified=False, reason='disabled',
+                                       n_wanted=0, block_size=0,
+                                       matvecs=0)
+            return None
+        if diag is None:
+            diag = self.h_tt_diagonal()
+        self._diag = np.asarray(diag, dtype=float)
+        basis, ritz, info = near_null_basis(
+            self.h_tt, self.n_par, diag=self._diag,
+            cond_target=self.deflate_cond_target, tol_rel=self.deflate_tol_rel,
+            max_size=self.deflate_max_size, max_rounds=self.deflate_max_rounds)
+        self.deflation_info = info
+        if info.get('certified'):
+            self._basis, self._ritz = basis, ritz
+        else:
+            self._basis, self._ritz = None, None
+        return info
+
     def solve(self, b):
         """Minimum-norm least-squares action of ``pinv(H_tt)`` on ``b``."""
-        from scipy.sparse.linalg import LinearOperator, lsmr
+        from .lsmr import deflated_solve, lsmr_solve
 
         b = np.asarray(b, dtype=float).reshape(-1)
-        n = self.n_par
-        # H_tt is symmetric, so the transpose product is the same map;
-        # LSMR needs both callbacks to exist.
-        op = LinearOperator((n, n), matvec=self.h_tt, rmatvec=self.h_tt,
-                            dtype=float)
-        x, istop, itn, normr = lsmr(
-            op, b, atol=float(self.atol), btol=float(self.btol),
-            conlim=1.0e15, maxiter=int(self.maxiter))[:4]
-        return x, {'istop': int(istop), 'itn': int(itn),
-                   'normr': float(normr)}
+        if self._basis is not None:
+            x, info = deflated_solve(
+                self.h_tt, b, self._basis, self._ritz, rcond=self.rcond,
+                rtol=float(self.btol), atol=float(self.atol),
+                maxiter=self.maxiter, time_limit=self.time_limit,
+                stall_iters=self.stall_iters, fallback=self.fallback,
+                lambda_max=(self.deflation_info or {}).get('lambda_max'))
+            return x, info
+        x, info = lsmr_solve(
+            self.h_tt, b, rtol=float(self.btol), atol=float(self.atol),
+            maxiter=self.maxiter, time_limit=self.time_limit,
+            stall_iters=self.stall_iters)
+        return x, info
 
     def matvec(self, v):
-        """One relaxed Hessian-vector product ``H_total @ v``."""
+        """One relaxed Hessian-vector product ``H_total @ v``.
+
+        Uses whatever basis ``prepare_deflation`` installed; a single
+        product does not build one, because the basis costs ``n_par``
+        products and only pays off across the column loop.
+        """
         x, _ = self.solve(self.mixed(v))
         return self.frozen(v) - self.mixed_transpose(x)
 
@@ -538,22 +602,27 @@ class ImplicitHessianHVPOps:
         n_r = self.n_geom
         H = np.zeros((n_r, n_r))
         X = np.zeros((self.n_par, n_r))
-        iters = np.zeros(n_r, dtype=int)
-        istop = np.zeros(n_r, dtype=int)
-        normr = np.zeros(n_r)
+        iters = np.zeros(n_r, dtype=int)      # LSMR iterations per column
+        istop = np.zeros(n_r, dtype=int)      # 1 residual, 2 normal eqs, ...
+        normr = np.zeros(n_r)                 # relative residual (projected)
+        infos = []
         for j in range(n_r):
             v = np.zeros(n_r)
             v[j] = 1.0
             b = self.mixed(v)
             x, info = self.solve(b)
             X[:, j] = x
-            iters[j] = info['itn']
-            istop[j] = info['istop']
-            normr[j] = info['normr']
+            iters[j] = int(info.get('itn', info.get('iterations', 0)))
+            istop[j] = int(info.get('istop', 0))
+            normr[j] = info.get('relative_residual', info.get('normr', np.nan))
+            infos.append(info)
             H[:, j] = self.frozen(v) - self.mixed_transpose(x)
+        self.column_info = infos
         return H, X, iters, istop, normr
 
     def h_tt_diagonal(self):
+        if self._diag is not None:
+            return np.array(self._diag)
         diag = np.zeros(self.n_par)
         for j in range(self.n_par):
             e = np.zeros(self.n_par)
@@ -564,7 +633,11 @@ class ImplicitHessianHVPOps:
 
 def implicit_hessian_hvp(mol, theta, E_joint, rcond=DEFAULT_RCOND,
                          tangent_fn=None, E_tt=None, atol=1e-12,
-                         btol=1e-12, maxiter=None, with_ht_diagonal=True):
+                         btol=1e-12, maxiter=None, with_ht_diagonal=True,
+                         deflate=True, deflate_cond_target=100.0,
+                         deflate_tol_rel=1e-8, deflate_max_size=None,
+                         deflate_max_rounds=30, stall_iters=40,
+                         time_limit=None, fallback=True):
     """Relaxed Hessian assembled without forming any large matrix.
 
     The three blocks of the implicit route are used only through
@@ -595,29 +668,75 @@ def implicit_hessian_hvp(mol, theta, E_joint, rcond=DEFAULT_RCOND,
         ``E_joint``.  When ``None``, every product goes through
         ``E_joint`` and the SCF is rebuilt per iteration.
     atol, btol : float
-        LSMR stopping tolerances.
+        LSMR stopping tolerances: ``btol`` bounds ``||r|| / ||b||``,
+        ``atol`` bounds the normal-equation residual, which is the
+        criterion that fires on a singular operator whose right-hand
+        side has a null-space component.
     maxiter : int or None
-        LSMR iteration cap per column; ``None`` means ``8 * n_par``
-        (at least 200).  Below this cap on H2O/6-31G the LSMR columns
-        stop at ``istop = 7`` and the Hessian differs from the dense
-        route by about 3e-5; at the cap every column reaches
-        ``istop = 1`` and the difference is 6e-12.
+        Optional hard iteration cap per column.  ``None`` (the default)
+        means no cap; the solve stops on the tolerance, on the
+        wall-clock guard or on the stagnation guard.  The cap that used
+        to be ``8 * n_par`` is gone.
     with_ht_diagonal : bool
         Record ``diag(H_tt)`` for a curvature sanity check.  This costs
-        ``n_par`` extra products.
+        ``n_par`` products, and the same array seeds the deflation
+        basis, so it is not wasted when ``deflate`` is on.
+    deflate : bool
+        Build a near-null basis once and solve the small-|lambda| block
+        exactly, leaving LSMR the complement.  A basis that does not
+        certify is not used.
+    deflate_cond_target : float
+        Deflate until the complement has condition number about this.
+    deflate_tol_rel : float
+        Certification threshold on the Ritz residual, relative to
+        ``lambda_max``.  Measured on the two test systems: 1e-4 leaves
+        the complement as ill-conditioned as the original operator (the
+        CO Hessian came out wrong by 6e4), 1e-6 is already exact; the
+        default 1e-8 keeps a margin.
+    deflate_max_size, deflate_max_rounds : int or None
+        Caps on the basis block and its growth rounds.
+    stall_iters : int
+        Stagnation guard passed to the solver.
+    time_limit : float or None
+        Wall-clock guard per column, in seconds.
+    fallback : bool
+        Re-solve with plain LSMR when the deflated route has not
+        converged, so the answer is the unaccelerated one rather than a
+        wrong one.
     """
     ops = ImplicitHessianHVPOps(
         E_joint=E_joint, mol=mol, theta=theta, rcond=rcond,
         tangent_fn=tangent_fn, E_tt=E_tt, atol=atol, btol=btol,
-        maxiter=maxiter)
+        maxiter=maxiter, deflate=deflate,
+        deflate_cond_target=deflate_cond_target,
+        deflate_tol_rel=deflate_tol_rel, deflate_max_size=deflate_max_size,
+        deflate_max_rounds=deflate_max_rounds, stall_iters=stall_iters,
+        time_limit=time_limit, fallback=fallback)
+    # The diagonal seeds the deflation basis; when neither the curvature
+    # report nor deflation needs it, the n_par products are not spent.
+    if deflate or with_ht_diagonal:
+        diag = ops.h_tt_diagonal()
+    else:
+        diag = None
+    ops.prepare_deflation(diag=diag)
     H, X, iters, istop, normr = ops.dense_columns()
     H = 0.5 * (H + H.T)
-    diag = ops.h_tt_diagonal() if with_ht_diagonal else np.zeros(ops.n_par)
+    if not with_ht_diagonal:
+        diag = np.zeros(ops.n_par)
+    reasons = [info.get('reason') for info in getattr(ops, 'column_info', [])]
+    total_res = [info.get('total_residual') for info in
+                 getattr(ops, 'column_info', [])]
     return ImplicitHessianHVPResult(
         H_total=H, H_tt_diagonal=diag, hvp=ops.matvec, rcond=float(rcond),
         n_par=ops.n_par, n_geom=ops.n_geom,
         lsmr_iterations=iters, lsmr_istop=istop, lsmr_residual=normr,
-        maxiter=int(ops.maxiter), atol=float(ops.atol),
+        maxiter=ops.maxiter, atol=float(ops.atol),
         btol=float(ops.btol),
         dtheta_dR_max=float(np.abs(X).max()) if X.size else 0.0,
+        deflation=ops.deflation_info,
+        solver_reason=reasons,
+        total_iterations=int(np.sum(iters)),
+        relative_residual=normr.copy(),
+        total_residual=np.asarray(
+            [v if v is not None else np.nan for v in total_res]),
     )

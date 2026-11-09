@@ -373,6 +373,25 @@ def make_nevpt2_joint_fn(ncore, nact, nele, nmo, pairs, scf_builder,
         versus ``lambda m: pscf.ROHF(m)``. An earlier version hard-coded
         ``pscf.RHF``, which silently excluded every open-shell system
         this project actually studies.
+
+        For a geometry derivative the builder must deliver the
+        derivative of the *converged* SCF solution. pyscfad's default
+        unrolled SCF differentiation does not: the DIIS extrapolation is
+        frozen in the differentiated pass, so the linearised map is not
+        the map that converges (``driver.scf_ad`` documents the measured
+        failure and the implicit-differentiation fix). The defect is
+        invisible to the CASSCF part of the chain, because that energy
+        is stationary under every orbital rotation; it appears first in
+        the correlation-energy gradient, whose virtual-orbital response
+        is constrained by no stationarity at all. Wrap ``kernel()`` in
+        ``diffmrc.driver.scf_ad.implicit_diff(True)`` for open-shell
+        references. Measured on OH/6-31G CAS(5,4) at theta*: the frozen
+        e2 gradient from the unrolled path is +1.9137e-3 Eh/bohr while
+        the chain-rule value from finite-difference orbital tangents is
+        +2.3471e-3, a 18.5% deviation carried by a 10.4% error in the
+        rotational part of the orbital-response channel. That part is
+        invisible to the CASSCF closure: the CASSCF energy's rotational
+        contraction is 2.5e-14 at the same stationary point.
     e2_scale : float
         Multiplier on the correlation energy; 0 gives the CASSCF
         function exactly, which is the validation anchor.
@@ -933,6 +952,21 @@ def nevpt2_relaxed_nuclear_gradient(mol, theta, E_casscf, E_nevpt2,
       defect of the e2 chain's AD nuclear derivative, orthogonal to the
       response term, and is tracked with the t418 gradient probe. Until
       it is resolved the relaxed gradient inherits it.
+
+    Open-shell SCF response
+    -----------------------
+    ``E_nevpt2`` and ``E_casscf`` must both deliver the derivative of the
+    *converged* reference. For a pyscfad ROHF the default unrolled
+    differentiation is not that derivative (``driver.scf_ad``); enable
+    ``config.scf_implicit_diff`` in the SCF builder. The CASSCF part
+    cannot detect the difference -- it is stationary under orbital
+    rotations, so an orbital-response error cancels there -- while the
+    correlation source ``d e2/dtheta`` does not vanish and the frozen
+    partial inherits the error. Measured on OH/6-31G CAS(5,4) at theta*:
+    the unrolled frozen e2 gradient is +1.9137e-3 Eh/bohr against a
+    chain-rule value of +2.3471e-3 (18.5%); the rotational part of the
+    orbital-response channel is +4.176e-3, 1.8 times the total, while the
+    CASSCF energy's rotational contraction at the same point is 2.5e-14.
 
     Returns
     -------

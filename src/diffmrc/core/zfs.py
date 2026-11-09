@@ -47,30 +47,57 @@ CONVENTIONS
   the phase is fixed by the experimental OH ^2Pi ordering (with ``-1j``
   the ^2Pi_1/2 lies below ^2Pi_3/2, opposite to experiment).  Splitting
   magnitudes do not depend on this phase.
-* Orbital angular momentum: ``L = I_SOC * int1e_cg_irxp`` with the same
-  ``I_SOC``, so that L and the orbital part of H_SO carry the same phase.
-  Only the product of L and H_SO enters the g-shift, so the g-tensor is
-  invariant under a global flip of ``I_SOC``.
+* Orbital angular momentum: ``int1e_cg_irxp`` carries the opposite raw
+  sign to ``int1e_pnucxp`` (numerically every dominant
+  ``<p_i|irxp_k|p_j>`` element is minus the corresponding nuclear
+  ``pnucxp`` element; the analytic p^1 Lande factor below fixes the
+  absolute sign).  The physical operator is therefore
+  ``L = I_L * int1e_cg_irxp`` with ``I_L = -1j = -I_SOC``.  Applying
+  ``I_SOC`` to both raw tensors flips the orbital Zeeman contribution
+  relative to the SOC orbital part.  The g-tensor is invariant under a
+  global flip of the two phases, but not under flipping only one.
 * Energies in Eh unless a ``_cm1`` suffix says cm^-1.
+
+G-TENSOR DEFINITION
+-------------------
+``g_tensor_doublet`` returns the pseudo-spin-1/2 g-tensor of an isolated
+Kramers doublet in the zero-field limit,
+
+    g[k, j] = Tr(sigma_j P^T M_k P),    M = L + g_e S,
+
+i.e. the Zeeman matrix of the doublet is written as
+``(mu_B/2) B . g . sigma``.  Two consequences are easy to misread:
+
+* Only the principal values (singular values of ``g``) are invariant
+  under a change of basis inside the doublet; the matrix itself is tied
+  to the pseudo-spin frame returned by the SI diagonalization.
+* For a pure spin system the result is not ``g_e``.  The |+/-M>
+  doublet of a spin-S multiplet has ``g_parallel = 2 M g_e`` and, for
+  M = 1/2, ``g_perp = (S + 1/2) g_e``: S = 1/2 gives ``g_e``
+  isotropically, while the |+/-1/2> doublet of a sextet gives
+  ``(3 g_e, 3 g_e, g_e)``.  Quenched orbital angular momentum therefore
+  does not imply an isotropic ``g_e``; that benchmark applies only to a
+  genuine S = 1/2 system.
 
 VALIDATED SCOPE
 ---------------
-OH/6-31G CAS(4,4), ROHF reference, all four M_S blocks: the lowest block
-eigenvalue reproduces the pyscf FCI energy to 1e-9 Eh and <S^2> to 1e-6;
-the spin-summed active-space 1-RDM reproduces the pyscf natural
-occupations to 1e-7; <S_z> equals M_S to 1e-10 while <S_x> and <S_y>
-vanish to 1e-10.  The QDPT2 + D/E machinery was exercised on MnO
-CAS(7,7) in the development study (D = 0.19 cm^-1 on the warm branch,
-with a window spread of about 20%).
-
-EXPERIMENTAL
-------------
-``g_tensor_doublet`` is experimental and unvalidated.  In the
-development study its principal values moved by more than 30% when the
-QDPT2 window changed from 1.5 to 2.0 Eh, and a system with a quenched
-orbital angular momentum came out strongly anisotropic, which is
-unphysical.  Do not use it to produce reported numbers until the
-projection and the operator construction are re-derived.
+* Scalar layer: OH/6-31G CAS(4,4), ROHF reference, all four M_S blocks:
+  the lowest block eigenvalue reproduces the pyscf FCI energy to 1e-9 Eh
+  and <S^2> to 1e-6; the spin-summed active-space 1-RDM reproduces the
+  pyscf natural occupations to 1e-7; <S_z> equals M_S to 1e-10 while
+  <S_x> and <S_y> vanish to 1e-10.  The QDPT2 + D/E machinery was
+  exercised on MnO CAS(7,7) in the development study (D = 0.19 cm^-1 on
+  the warm branch, with a window spread of about 20%).
+* g-tensor: a p^1 atom in a minimal basis (B/STO-3G, C = identity,
+  CAS(3,4)) gives the analytic ^2P_1/2 Lande factor
+  ``1 - (g_e - 1)/3 = 0.665894`` isotropically to 1e-5.  Synthetic
+  pure-spin doublets reproduce ``g_e`` (S = 1/2), ``(2 g_e, 2 g_e, g_e)``
+  (|+/-1/2> of S = 3/2) and ``(5 g_e, 0, 0)`` (|+/-5/2> of S = 5/2).
+* MnO ^6Sigma^+ (warm branch): the principal values are stable to
+  1e-3 between ecut = 1.0 and 3.0 Eh once ``nkeep`` is large enough that
+  the energy window, not the per-block cap, limits the state space.
+  With a small ``nkeep`` the values drift by tens of percent; see
+  ``solve_scalar``, which warns when the cap truncates the window.
 
 BOUNDARIES
 ----------
@@ -80,19 +107,28 @@ BOUNDARIES
 * The frozen core is closed shell; SOC-induced core excitations are not
   in the determinant space.
 * The SOMF operator uses one reference density, so the SI matrix is not
-  state dependent beyond that approximation.
+  state dependent beyond that approximation.  The density of a single
+  component of a degenerate open shell breaks the degeneracy of that
+  shell; pass a symmetry-averaged density if the reference state is
+  degenerate (on a linear molecule the ground Sigma density preserves
+  the relevant axial symmetry).
 * The g-tensor is first order in the magnetic field (all orders in SOC
   through the SI eigenvectors); the second-order Zeeman response is not
-  included.
+  included.  It is the zero-field (isolated-doublet) pseudo-spin
+  g-tensor.  When the Zeeman energy is comparable to the splitting
+  between doublets (high-field EPR of a spin system with zero-field
+  splitting), the doublets mix and the EPR g must come from the full
+  field-dependent spectrum instead.
 """
 
+import warnings
 from itertools import combinations
 
 import numpy as np
 from scipy.sparse import coo_matrix
 
 __all__ = [
-    "CM1", "ALPHA2_HALF", "GE", "I_SOC",
+    "CM1", "ALPHA2_HALF", "GE", "I_SOC", "I_L",
     "det_space", "block_hamiltonian", "solve_scalar",
     "active_integrals", "soc_mo_operator", "l_mo_operator",
     "build_connections", "onee_matrix", "state_matrix",
@@ -103,8 +139,11 @@ __all__ = [
 CM1 = 219474.6313702            # Eh -> cm^-1
 ALPHA2_HALF = 0.5 * 7.2973525693e-3 ** 2
 GE = 2.00231930436256
-I_SOC = 1j                      # phase of the raw r x p integrals;
+I_SOC = 1j                      # phase of the raw int1e_pnucxp integrals;
                                 # fixed by the experimental OH 2Pi ordering
+I_L = -1j                       # phase of the raw int1e_cg_irxp integrals;
+                                # they carry the opposite sign to pnucxp,
+                                # so the physical L is -i * irxp
 
 PAULI = np.array([[[0, 1], [1, 0]],
                   [[0, -1j], [1j, 0]],
@@ -226,21 +265,40 @@ def solve_scalar(h1, eri, nact, nele_act, nkeep=24, ecut=None):
     """Lowest scalar states of every M_S block.
 
     Returns a list of dicts with keys ``E``, ``ms``, ``block``, ``ci``
-    (vector over the block masks), ``masks`` (block bitmaps) and
-    ``s2`` (filled by the caller, which owns the spin_square helper).
+    (vector over the block masks), ``masks`` (block bitmaps) and ``s2``
+    (``<S^2>`` from :func:`diffmrc.analysis.states.spin_square`).
+
+    ``nkeep`` caps the states kept per M_S block.  A cap that falls
+    inside the ``ecut`` window makes the state-interaction space
+    spin-incomplete and is reported with a ``RuntimeWarning``; raise
+    ``nkeep`` or lower ``ecut`` until the warning disappears.
     """
     from diffmrc.analysis.states import spin_square
 
     blocks, all_masks, _ = det_space(nact, nele_act)
     e_min = None
     raw = []
+    first_excluded = []
     for key in sorted(blocks):
         masks = blocks[key]
         ham = block_hamiltonian(h1, eri, masks, nact)
         w, v = np.linalg.eigh(0.5 * (ham + ham.T))
         e_min = w[0] if e_min is None else min(e_min, w[0])
         keep = min(nkeep, len(w))
+        first_excluded.append(
+            (key, float(w[keep]) if keep < len(w) else None))
         raw.append((key, masks, w[:keep], v[:, :keep]))
+
+    if ecut is not None:
+        binding = [key for key, e_next in first_excluded
+                   if e_next is not None and e_next - e_min <= ecut]
+        if binding:
+            warnings.warn(
+                f"nkeep={nkeep} truncates states inside the {ecut:g} Eh "
+                f"window in block(s) {binding}; the state-interaction "
+                "space is not spin-complete, so D/E and g may be "
+                "unconverged (raise nkeep or lower ecut)",
+                RuntimeWarning, stacklevel=2)
 
     states = []
     for key, masks, w, v in raw:
@@ -299,8 +357,10 @@ def soc_mo_operator(mol, C, P_ao, mode="somf", contract="auto"):
 def l_mo_operator(mol, C):
     """Orbital angular momentum in the MO basis, shape ``(3, nmo, nmo)``.
 
-    Raw ``int1e_cg_irxp`` (real antisymmetric); the caller applies
-    ``I_SOC`` to obtain the physical L.
+    Raw ``int1e_cg_irxp`` (real antisymmetric).  This tensor has the
+    opposite raw sign to ``int1e_pnucxp``; the physical operator is
+    ``L = I_L * l_mo_operator(...)`` with ``I_L = -1j``, which
+    :func:`spin_orbital_components` applies for ``kind='L'``.
     """
     C = np.asarray(C, dtype=float)
     l_ao = mol.intor("int1e_cg_irxp", 3)
@@ -311,9 +371,13 @@ def l_mo_operator(mol, C):
 def spin_orbital_components(h3, kind):
     """Three spin-orbital matrices, one per Cartesian component.
 
-    kind='L' : ``I_SOC * h3[k,p,q] * delta_{sigma sigma'}``
+    kind='L' : ``I_L * h3[k,p,q] * delta_{sigma sigma'}``
     kind='S' : ``delta_{pq} * (s_k)_{sigma sigma'}`` (h3 only sets the size)
     kind='soc': ``I_SOC * h3[k,p,q] * (s_k)_{sigma sigma'}`` per component
+
+    ``I_L = -I_SOC``: ``int1e_cg_irxp`` and ``int1e_pnucxp`` carry
+    opposite raw signs, so the orbital Zeeman operator must use the
+    opposite phase to the SOC orbital part (see the module docstring).
     """
     n = h3.shape[1]
     out = []
@@ -322,17 +386,17 @@ def spin_orbital_components(h3, kind):
         if kind == "S":
             for p in range(n):
                 mat[2 * p:2 * p + 2, 2 * p:2 * p + 2] += SPIN_HALF[k]
-        else:
+        elif kind == "L":
+            blk = I_L * np.asarray(h3[k], dtype=float)
+            for a in range(2):
+                mat[a::2, a::2] += blk
+        elif kind == "soc":
             blk = I_SOC * np.asarray(h3[k], dtype=float)
-            if kind == "L":
-                for a in range(2):
-                    mat[a::2, a::2] += blk
-            elif kind == "soc":
-                for a in range(2):
-                    for b in range(2):
-                        mat[a::2, b::2] += blk * SPIN_HALF[k][a, b]
-            else:
-                raise ValueError(f"unknown kind: {kind!r}")
+            for a in range(2):
+                for b in range(2):
+                    mat[a::2, b::2] += blk * SPIN_HALF[k][a, b]
+        else:
+            raise ValueError(f"unknown kind: {kind!r}")
         out.append(mat)
     return out
 
@@ -502,21 +566,72 @@ def si_diagonalize(states, hso_state):
     return vals, vecs, herm
 
 
-def g_tensor_doublet(vecs, mats, ndoublet=2):
-    """g-tensor of the lowest ``ndoublet`` SO levels.
+def g_tensor_doublet(vecs, mats, ndoublet=2, trace_tol=1e-6):
+    """Pseudo-spin-1/2 g-tensor of the lowest Kramers doublet.
 
-    EXPERIMENTAL AND UNVALIDATED.  The projection and the operator
-    construction behind this function have not been pinned down; see the
-    module docstring.  It is kept for the development record only.
+    The Zeeman operator ``M_k = L_k + g_e S_k`` (``mats[k]`` in the
+    scalar-state basis) is projected onto the two lowest eigenvectors of
+    the state-interaction matrix and expanded in Pauli matrices,
 
-    ``mats[k]`` is the matrix of ``M_k = L_k + g_e S_k`` in the scalar
-    state basis.  Returns the 3x3 matrix ``g[field, spin]`` and its
-    principal values.
+        ``P^T M_k P = sum_j (g[k, j] / 2) sigma_j``,
+        ``g[k, j] = Tr(sigma_j P^T M_k P)``,
+
+    so that the doublet Zeeman matrix is ``(mu_B/2) B . g . sigma``.
+    Only the singular values of ``g`` are invariant under a change of
+    basis inside the doublet; the matrix is tied to the pseudo-spin
+    frame returned by the SI diagonalization.
+
+    Parameters
+    ----------
+    vecs : (n, n) ndarray
+        Eigenvectors of the SI matrix, columns ordered by energy.
+    mats : sequence of three (n, n) ndarrays
+        ``M_x, M_y, M_z`` in the same scalar-state basis.
+    ndoublet : int
+        Must be 2; a pseudo-spin-1/2 representation exists only for a
+        Kramers doublet.
+    trace_tol : float
+        Relative tolerance for the tracelessness of the projected
+        operator.  A time-odd Hermitian operator has zero trace in a
+        Kramers pair, so a non-zero trace means the two states are not a
+        Kramers pair.
+
+    Returns
+    -------
+    g : (3, 3) ndarray
+        ``g[field, spin]``.
+    sv : (3,) ndarray
+        Principal values (singular values of ``g``), descending.
+
+    Raises
+    ------
+    ValueError
+        If ``ndoublet != 2``, if the projected states are not
+        orthonormal, if an operator is not Hermitian in the doublet, or
+        if the projected operator has a non-zero trace.
     """
+    if ndoublet != 2:
+        raise ValueError("a pseudo-spin-1/2 g-tensor needs ndoublet=2, "
+                         f"got {ndoublet}")
+    vecs = np.asarray(vecs, dtype=complex)
+    if vecs.shape[0] < ndoublet or vecs.shape[1] < ndoublet:
+        raise ValueError(f"vecs must have at least {ndoublet} columns")
     psi = vecs[:, :ndoublet]
+    overlap = psi.conj().T @ psi
+    if np.abs(overlap - np.eye(ndoublet)).max() > 1e-8:
+        raise ValueError("the two doublet states are not orthonormal")
+
     g = np.zeros((3, 3))
     for k in range(3):
-        meff = psi.conj().T @ mats[k] @ psi
+        meff = psi.conj().T @ np.asarray(mats[k]) @ psi
+        scale = max(1.0, float(np.abs(meff).max()))
+        if np.abs(meff - meff.conj().T).max() > 1e-8 * scale:
+            raise ValueError(f"M_{'xyz'[k]} is not Hermitian in the doublet")
+        trace = abs(float(np.trace(meff).real))
+        if trace > trace_tol * scale:
+            raise ValueError(
+                "the two states are not a Kramers pair: "
+                f"|Tr M_{'xyz'[k]}| = {trace:.3e}")
         for j in range(3):
             g[k, j] = np.trace(PAULI[j] @ meff).real
     sv = np.linalg.svd(g, compute_uv=False)

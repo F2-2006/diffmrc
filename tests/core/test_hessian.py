@@ -230,7 +230,45 @@ def test_hvp_route_reproduces_the_analytic_hessian():
 
     assert res.H_total[0, 0] == pytest.approx(2.0, abs=1e-9)
     assert res.H_tt_diagonal[0] == pytest.approx(2.0, abs=1e-12)
-    assert res.lsmr_istop[0] in (0, 1, 2)
+    # 1 = relative residual, 2 = normal equations, 4 = machine floor.
+    # On a one-dimensional operator the first iterate is already at the
+    # floor, so 4 is the expected code here.
+    assert res.lsmr_istop[0] in (0, 1, 2, 4)
+    assert res.maxiter is None           # no cap by default
+    assert res.deflation['certified'] in (True, False)
+
+
+def test_the_hvp_route_reports_its_deflation_decision():
+    """A reader must be able to see whether the small block was deflated.
+
+    The scalar surrogate has one parameter and one eigenvalue, far above
+    any deflation threshold relative to itself, so nothing is wanted and
+    the solve must fall back to the full operator without claiming a
+    deflation it did not make.
+    """
+    th = jnp.asarray([3.0])
+    x0 = _ScalarMole(3.0)
+    res = implicit_hessian_hvp(
+        x0, th, _E_scalar_mole,
+        tangent_fn=lambda m, v: _ScalarMole(float(v[0])),
+        atol=1e-13, btol=1e-13)
+    info = res.deflation
+    assert info is not None
+    assert info['n_wanted'] == 0
+    assert info['certified'] is False
+    assert res.solver_reason[0] in ('relative_residual', 'machine_residual',
+                                    'normal_equations', 'stagnation')
+
+
+def test_the_deflated_route_matches_the_plain_route_on_a_surrogate():
+    """Turning deflation on must not change the answer."""
+    th = jnp.asarray([3.0])
+    x0 = _ScalarMole(3.0)
+    kw = dict(tangent_fn=lambda m, v: _ScalarMole(float(v[0])),
+              atol=1e-13, btol=1e-13)
+    a = implicit_hessian_hvp(x0, th, _E_scalar_mole, deflate=False, **kw)
+    b = implicit_hessian_hvp(x0, th, _E_scalar_mole, deflate=True, **kw)
+    assert np.abs(a.H_total - b.H_total).max() < 1e-12
 
 
 def _lih_sto3g():

@@ -21,11 +21,11 @@ pyscf 2.14.0) and are checked, not merely printed:
 * HCI returns determinants and coefficients in matching order, which is
   not the enumeration order; elementwise comparison without alignment
   through ``dets`` is invalid.
-* N2/6-31G CAS(6,6) reproduces the 1% stopping-rule defect: at
-  eps1 = 1e-4 the default ``new_fraction=0.01`` stops after 103
-  determinants and misses a determinant with coefficient 1.725e-2,
-  leaving a 6.330e-4 Eh deviation; ``new_fraction=0`` reaches 104
-  determinants and the exact energy.
+* N2/6-31G CAS(6,6) at eps1 = 1e-4 selects 104 determinants with the
+  default ``new_fraction=0.01`` and reaches the CASCI energy to
+  1e-10 Eh: the sweep that adds one determinant to a 103-determinant
+  space is below the fractional resolution floor and does not stop the
+  run, and the following zero-growth sweep does.
 """
 import numpy as np
 import pytest
@@ -175,13 +175,16 @@ def test_hci_eps_scan(h2o_cas86, eps1, expected_ndet, expected_dev, tol):
 
 
 def test_hci_full_space_matches_casci(h2o_cas86):
-    """eps1 = 0 with the strict stop rule covers the full space."""
+    """eps1 = 0 with new_fraction = 0 covers the full space."""
     system = h2o_cas86
     hci = HCI(system["ham"], system["nelecas"][0], system["nelecas"][1],
               eps1=0.0, new_fraction=0.0).run()
     assert len(hci.dets) == len(system["dets"])
     assert set(hci.dets) == set(system["dets"])
     assert abs(hci.energy - system["reference"]) <= 1e-12
+    # Without the fractional rule the zero-growth sweep still exits.
+    assert hci.history[-1]["num_new"] == 0
+    assert len(hci.history) < hci.max_iter
 
 
 def test_hci_and_asci_pt2_match_bruteforce(h2o_cas44):
@@ -305,24 +308,29 @@ def test_nevpt2_bridge_matches_pyscf(h2o_cas86_canonical):
 # ---------------------------------------------------------------------------
 # N2 stopping-rule regression
 # ---------------------------------------------------------------------------
-def test_n2_stopping_rule_defect(n2_cas66):
-    """The 1% rule stops one determinant early; strict mode is exact.
+def test_n2_stopping_rule_continues_below_resolution(n2_cas66):
+    """One added determinant at a 103-determinant space does not stop.
 
-    At eps1 = 1e-4 the second iteration holds 103 determinants and adds
-    one; 1% of 103 is 1.03, so the single addition triggers the stop.
-    The missing determinant has coefficient 1.725e-2 in the FCI vector,
-    which costs 6.330e-4 Eh.  The defect is a resolution limit of the
-    published rule, not an implementation deviation.
+    At eps1 = 1e-4 the third sweep holds 103 determinants and adds one;
+    1% of 103 is 1.03, below the ``abs_min`` floor of two determinants,
+    so the fractional rule stays inactive and the sweep continues to
+    104.  The next sweep adds nothing and ends the run.  Stopping at 103
+    would drop a determinant whose FCI coefficient is 1.725e-2 and cost
+    6.330e-4 Eh.
     """
     system = n2_cas66
     ham, neleca, nelecb = system["ham"], system["nelecas"][0], system["nelecas"][1]
 
     default = HCI(ham, neleca, nelecb, eps1=1e-4).run()
-    assert len(default.dets) == 103
-    deviation = default.energy - system["reference"]
-    assert abs(deviation - 6.330e-4) <= 1e-6
-    assert deviation > 5e-4
+    assert len(default.dets) == 104
+    assert abs(default.energy - system["reference"]) <= 1e-10
+    assert [row["num_dets"] for row in default.history] == [1, 48, 103, 104]
+    assert default.history[2]["num_new"] == 1
+    assert default.history[-1]["num_new"] == 0
 
     strict = HCI(ham, neleca, nelecb, eps1=1e-4, new_fraction=0.0).run()
     assert len(strict.dets) == 104
     assert abs(strict.energy - system["reference"]) <= 1e-10
+    trajectory = [(row["num_dets"], row["num_new"]) for row in default.history]
+    assert [(row["num_dets"], row["num_new"]) for row in strict.history] \
+        == trajectory

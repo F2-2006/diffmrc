@@ -1,5 +1,108 @@
 # Changelog
 
+## 0.3.6 (unreleased)
+
+### Added
+
+- `core.lsmr`: the response solve as a first-class solver rather than a
+  scipy call with a hand-set cap. `lsmr_solve` implements the Fong-Saunders
+  recurrences (iterate-for-iterate identical to `scipy.sparse.linalg.lsmr`,
+  verified to 1e-13) but stops on the relative residual or on the
+  normal-equation criterion, with a wall-clock guard and a stagnation guard,
+  and `maxiter=None` means no cap -- scipy silently caps at `min(m, n)`,
+  which is below what these systems need. Storage is six vectors of length
+  `n` regardless of the iteration count.
+- `core.lsmr.near_null_basis`: matrix-free basis of the smallest-`|lambda|`
+  directions. Diagonal-seeded, grown by adding the coordinates that carry
+  the largest Ritz residual, Rayleigh-Ritz at each round, and *certified*
+  against `||A v - theta v|| / lambda_max` before any caller may deflate
+  with it. An uncertified basis is reported as such.
+- `core.lsmr.deflated_solve`: block pseudo-inverse (same `rcond` rule as
+  `numpy.linalg.pinv`) + LSMR on the projected complement + residual
+  correction rounds, with a fallback to the plain solve when the deflated
+  route has not converged.
+- `tests/core/test_lsmr.py`: 11 tests, including the no-cap behaviour, the
+  stagnation guard, the pseudo-inverse agreement on a soft-mode operator and
+  the refusal to certify a delocalized basis.
+- `core.hessian.implicit_hessian_hvp` gained `deflate`,
+  `deflate_cond_target`, `deflate_tol_rel`, `deflate_max_size`,
+  `deflate_max_rounds`, `stall_iters`, `time_limit` and `fallback`; the
+  result reports `deflation`, `solver_reason`, `total_iterations`,
+  `relative_residual` and `total_residual`.
+- `core.zfs`: the orbital Zeeman operator used the SOC phase. The raw
+  `int1e_cg_irxp` matrix elements are opposite in sign to `int1e_pnucxp`
+  (`<2p_x|irxp_z|2p_y> = +1.000000` against `-7.690728` on B/6-31G), so the
+  shared `+1j` made `L` enter the g tensor as `-L`. `spin_orbital_components`
+  now uses `I_L = -1j` for the orbital part. The analytic ²P₁/₂ Landé factor
+  `1-(g_e-1)/3 = 0.665893565` is reproduced to 1e-11 (2.00077 before), and
+  OH ²Π₃/₂ gives `g_parallel = 4.0023195` against `2+g_e = 4.0023193`. The
+  old "strong anisotropy" on ⁶Σ⁺ was a truncation artifact of `nkeep`, not a
+  window effect: with `nkeep=400` the converged values are
+  (6.00777, 6.00777, 2.00221) for the A branch and
+  (8.06279, 3.66620, 1.71751) for H, and the analytic pure-spin value for a
+  |M_S|=1/2 Kramers pair is `(3g_e, 3g_e, g_e)`, not isotropic `g_e`.
+  Runtime checks now reject a non-isolated multiplet.
+- `core.mscaspt2`: the Shiozaki-2013 reference-space coupling (Eqs. 1-3,
+  5-7, checked against the Sciverse text) is implemented as union
+  function vectors with the full model-space Fock matrix, a Sylvester solve
+  and `H_eff = H_ref + (cross + cross^T)/2`; `solve_ms` defaults to
+  `reference_coupling=True`. The MS-MR rotation spread drops from
+  0.277-1.307 eV to 2.7e-12 eV, and the single-state limit still matches the
+  released CASPT2 bit for bit.
+- `core.caspt2`: `frozen_core` restricts the class index pools to the
+  correlated core orbitals, `three_active` selects the diagonal or exact
+  class-block reading, and `v0_ia='class_ordered'` uses ORCA's ordered
+  active-pair union. The ORCA 192-function count is the frozen-core count
+  (`m = ncore - nfrozen = 2`, `IJTA = m^2 nact nvir = 192`). With
+  `frozen_core=2, class_diagonal='block', v0_ia='class_ordered',
+  three_active='block'` the N2/6-31G CAS(6,6) class table closes to
+  0.9995-1.0001 of ORCA CASPT2-D and the total to 0.999971; the defaults
+  (core-free pools, diagonal three-active reading) are unchanged bitwise.
+- `core.selected_ci`: the fractional stopping rule now has an `abs_min=2`
+  resolution floor: it applies only when `new_fraction * ndet >= abs_min`,
+  and a sweep that adds nothing always stops. N2/6-31G CAS(6,6) at
+  `eps1=1e-4` selects 104 determinants and reaches the CASCI energy to
+  5.5e-14 Eh (103 and 6.3e-4 before); the H2O/cc-pVDZ scan points are
+  unchanged.
+- `core.crossing` and `driver.crossing`: crossing location from two-state
+  scans, bracket and uncertainty, gradient difference, and a branch-jump
+  certificate driven by the overlap between adjacent points (overlap < 0.90
+  refuses the crossing). The core module is pure NumPy; the pyscf evaluator
+  is a lazy import in the driver.
+- `core.nevpt2`: `impl.ci_ab_from_flat` selects the occupied M_S sector and
+  transposes the coefficient matrix when the partner sector carries the CI
+  vector. An odd active-electron count has two exactly degenerate lowest
+  sectors and the blocked solver may return either, so the fixed projection
+  could be empty and the renormalization 0/0 -- the source of the Wave 11
+  NaN. Both sectors now reproduce the eight class energies to 6e-16.
+- `core.ci_second_deriv`: `mf_eigenpair_hessian` implements the matrix-free
+  eigenpair second derivative from the response and integral-curvature
+  terms. Prototype only; not wired into `hessian.py`.
+- `core.casci`: the `pyscfad` SCF import moved into
+  `casci_energy_from_mol`, so the determinant-space kernels load on a
+  machine without pyscfad.
+
+### Changed
+
+- The matrix-free Hessian route no longer caps the LSMR iteration count.
+  `maxiter=None` now means no cap; to reproduce the previous behaviour pass
+  `maxiter=8 * n_par, deflate=False`.
+- The deflation basis costs `n_par` products for the diagonal (already paid
+  by `with_ht_diagonal`) plus the expansion, and is shared by every
+  geometric column.
+
+### Measured
+
+- Local Windows replica, H2O/6-31G CAS(2,2): the deflated solve reproduces
+  the dense pseudo-inverse route to 7.7e-17 in 901 LSMR iterations plus a
+  256-product basis, against 1.2e-10 in 2192 iterations without deflation.
+- CO/6-31G CAS(2,2), whose orbital Hessian carries an exact null direction:
+  2.2e-15 in 1720 iterations plus 774 products, against 1.5e-11 in 3439
+  iterations. Deflation buys accuracy, not only speed.
+- Constructed stress (five near-null directions at 1e-9 to 1e-7 of
+  `lambda_max` on the H2O operator): the plain solve satisfies its residual
+  test and is wrong by 6.4e-4 relative; the deflated solve reaches 1.5e-12.
+
 ## 0.3.5 (2026-11-03)
 
 ### Added

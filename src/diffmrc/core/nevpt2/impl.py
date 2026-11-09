@@ -115,6 +115,52 @@ def _nele_act_from_dets(dets, ncore):
     return bin(dets[0]).count('1') - 2 * ncore
 
 
+def ci_ab_from_flat(c_ci, ncore, nact, nele_act):
+    """Flat CI vector to the alpha-beta layout, in whichever M_S sector it occupies.
+
+    An odd active-electron count has two exactly degenerate M_S
+    components, ``(nele//2, nele - nele//2)`` and its spin-flipped
+    partner.  ``cs_casci_blocked`` keeps the lower of the two by a strict
+    comparison on energies that differ only by roundoff, so which sector
+    comes back is not fixed by the physics.  The NEVPT2 core classes,
+    however, are assembled from the alpha-beta coefficient matrix, and an
+    empty projection makes the renormalization 0/0.
+
+    The fix is to project onto the sector that carries the vector: build
+    both maps, keep the one with the larger norm and, when the partner
+    sector wins, transpose the coefficient matrix.  The transpose is the
+    spin flip of the coefficient tensor; the spin-free one-, two- and
+    three-particle densities and the ``f3ca``/``f3ac`` intermediates are
+    invariant under the exchange, so the correlation energy is unchanged.
+    The selection is a ``where`` on the two norms, hence differentiable
+    away from an exact tie.
+
+    Measured on OH/6-31G CAS(5,4) at theta*: the base vector lies wholly
+    in (2, 3); the (3, 2) partner of the same doublet returns NaN for the
+    Sr and Si classes through the fixed projection and the same eight
+    class energies (to 1e-12) through this one.
+    """
+    if c_ci.ndim != 1:
+        return c_ci
+    from .f3ca import ab_index_map
+
+    na = nele_act // 2
+    nb = nele_act - na
+    idx, phase = ab_index_map(ncore, nact, nele_act, na, nb)
+    c1 = c_ci[idx] * phase
+    if na == nb:
+        return c1 / jnp.linalg.norm(c1)
+    idx2, phase2 = ab_index_map(ncore, nact, nele_act, nb, na)
+    c2 = c_ci[idx2] * phase2
+    n1 = jnp.linalg.norm(c1)
+    n2 = jnp.linalg.norm(c2)
+    use2 = n2 > n1
+    # c2 carries the (nb, na) layout; transpose it so every caller sees
+    # the (na, nb) shape of the links and of the reference contraction.
+    c = jnp.where(use2, c2.T, c1)
+    return c / jnp.linalg.norm(c)
+
+
 def make_a16_simple(h1e, h2e, dm3):
     """The make_a16 contraction for a two-electron system, where the
     fourth-order density terms vanish and only the h1e and h2e contractions
@@ -249,31 +295,25 @@ def nevpt2_e2_full2(h1e_mo, eri_mo, c_ci, dets, E0_elec, mo_energy=None,
     eps = mo_energy if mo_energy is not None else make_gfock_mo_energy(h1e_mo, eri_mo, dm1, ncore, nact)
     if links_a is not None and c_ci is not None:
         if c_ci.ndim == 1:
-            # Full-determinant 1D CI vector to (na, nb) form, by a static
-            # index gather and a fermionic phase, both differentiable
-            from .f3ca import ab_index_map
+            # Full-determinant 1D CI vector to the alpha-beta layout.
+            #
+            # The determinant list of the CI solver spans every S_z
+            # component.  For CAS(4,4) with four core orbitals that is 70
+            # determinants of which 36 have S_z = 0; for CAS(6,6) it is 924
+            # against 400.  The projection keeps one sector and is
+            # renormalized: a vector spread over several sectors (C2, weight
+            # distribution 0.25, 0.5, 0.25) otherwise gives a prefactor of
+            # 0.7071 that scales every density matrix and the fourth-order
+            # contraction, producing 1e-2 deviations in the single- and
+            # double-external classes.  Renormalizing brought C2 into exact
+            # agreement with the reference root.
+            #
+            # For an odd electron count the two lowest sectors are exactly
+            # degenerate and the blocked solver may return either one (see
+            # ``ci_ab_from_flat``); the helper restores the fixed (na, nb)
+            # layout from whichever sector carries the vector.
             nele_act = _nele_act_from_dets(dets, ncore)
-            idx_ab, phase_ab = ab_index_map(ncore, nact, nele_act)
-            ci_ab = c_ci[idx_ab] * phase_ab
-            # The projection onto S_z = 0 must be renormalized.
-            #
-            # The determinant list of the CI solver is generated over spin
-            # orbitals without fixing the alpha and beta counts, so the basis
-            # spans every S_z component. For CAS(4,4) with four core orbitals
-            # that is 70 determinants of which 36 have S_z = 0; for CAS(6,6)
-            # it is 924 against 400. This step keeps only the S_z = 0 subset.
-            #
-            # When the ground-state vector has weight in other S_z sectors - 
-            # for C2 the projected norm came out at 0.7071 with a weight
-            # distribution of 0.25, 0.5, 0.25 - the projection gives a norm
-            # below one, which scales down every density matrix and the
-            # fourth-order contraction and produces deviations of order 1e-2
-            # in the single- and double-external classes. Renormalizing brings
-            # C2 into exact agreement with the reference root, the prefactor
-            # going from 0.7071 to 1,
-            # which served as the cross-check that identified the problem.
-            _n = jnp.linalg.norm(ci_ab)
-            ci_ab = ci_ab / _n
+            ci_ab = ci_ab_from_flat(c_ci, ncore, nact, nele_act)
         else:
             ci_ab = c_ci
         na, nb = ci_ab.shape

@@ -199,8 +199,9 @@ def _core_blocks(h1e_mo, eri_mo, c_ci, dets, ncore, nact, nocc, eps,
     """
     from jax import numpy as jnp
 
-    from ..core.nevpt2.f3ca import ab_index_map, fdm2fdm3_jax
-    from ..core.nevpt2.impl import _nele_act_from_dets, make_dm123_sf
+    from ..core.nevpt2.f3ca import fdm2fdm3_jax
+    from ..core.nevpt2.impl import (_nele_act_from_dets, ci_ab_from_flat,
+                                    make_dm123_sf)
 
     if ncore > 0:
         vhf = (2.0 * jnp.einsum('pqcc->pq', eri_mo[:, :, :ncore, :ncore])
@@ -216,9 +217,7 @@ def _core_blocks(h1e_mo, eri_mo, c_ci, dets, ncore, nact, nocc, eps,
     ci_ab = c_ci
     if c_ci.ndim == 1:
         nele_act = _nele_act_from_dets(dets, ncore)
-        idx_ab, phase_ab = ab_index_map(ncore, nact, nele_act)
-        ci_ab = c_ci[idx_ab] * phase_ab
-        ci_ab = ci_ab / jnp.linalg.norm(ci_ab)
+        ci_ab = ci_ab_from_flat(c_ci, ncore, nact, nele_act)
     eri_t = eri_act.transpose(0, 2, 1, 3)
     na, nb = ci_ab.shape
     _, f3ca = fdm2fdm3_jax(eri_t, ci_ab, range(na), 0, nb, nact, links_a,

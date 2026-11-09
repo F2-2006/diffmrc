@@ -27,20 +27,28 @@ import numpy as np
 _AB_MAP_CACHE = {}
 
 
-def ab_index_map(ncore=0, nact=2, nele_act=2):
+def ab_index_map(ncore=0, nact=2, nele_act=2, na=None, nb=None):
     """Static index map: ci_ab[i, j] = ci_flat[idx_ab[i, j]].
 
     The gather is differentiable and works under JAX. The map is cached at
     module level and reused while ncore, nact, and nele_act are unchanged.
+
+    ``na``/``nb`` select the spin orientation explicitly.  The default is
+    the alpha-rich one (``na = nele_act // 2``); an odd electron count has
+    a second, exactly degenerate partner sector that the blocked CI solver
+    can return instead, and callers that must accept either orientation
+    ask for both maps (see ``impl.ci_ab_from_flat``).
     """
-    key = (ncore, nact, nele_act)
+    neleca = nele_act // 2 if na is None else int(na)
+    nelecb = nele_act - neleca if nb is None else int(nb)
+    if neleca + nelecb != nele_act:
+        raise ValueError('na + nb must equal nele_act')
+    key = (ncore, nact, nele_act, neleca, nelecb)
     if key in _AB_MAP_CACHE:
         return _AB_MAP_CACHE[key]
     from itertools import combinations
     nso = 2 * (ncore + nact)
     act_so = list(range(2 * ncore, nso))
-    neleca = nele_act // 2
-    nelecb = nele_act - neleca
     ab_of_det = []
     for comb in combinations(act_so, nele_act):
         det = 0

@@ -39,11 +39,22 @@ manual/         Tutorial and Manual (LaTeX sources and built PDFs)
 
 ## What is new in 0.3.x
 
+- CI spin-sector projection: the NEVPT2 core classes project the determinant
+  CI vector onto the alpha-beta layout of one M_S sector. An odd
+  active-electron count has two exactly degenerate lowest sectors and the
+  blocked solver may return either, so the fixed projection could be empty and
+  the renormalization 0/0 (measured on OH/6-31G CAS(5,4): NaN for the Sr and
+  Si classes from the partner sector). `impl.ci_ab_from_flat` now selects the
+  occupied sector and transposes the coefficient matrix when the partner
+  carries the vector; both sectors reproduce the eight class energies to
+  6e-16 and the base value is unchanged.
 - CASPT2 TUVA/ITUV classes (0.3.2): `Vm1_a` and `V1_i` are three-active-index
   functions with an orthonormal class basis; N2/6-31G CAS(6,6) default ratio
   reaches 0.983 against ORCA CASPT2-D for the release reference
-  (OMP_NUM_THREADS=1; the Wave 12 frozen reference gives 0.989). Remaining
-  class-space residuals are documented in the Open problems section.
+  (OMP_NUM_THREADS=1; the Wave 12 frozen reference gives 0.989). The remaining
+  class-space residual is the frozen-core setting: ORCA freezes the two N 1s
+  orbitals, and `frozen_core=2` with the exact class-block solve reproduces
+  the ORCA class table (see Open problems).
 - `core.caspt2_three_center` (0.3.1): three-center contracted CASPT2 using the
   same `cross - direct` VM convention as the materialized path. The release
   test compares the two paths on deterministic exact factor tensors and
@@ -330,9 +341,22 @@ size. `cs_casci_blocked` now takes `eig_solver='davidson'`, which applies the
 matrix-free operator of `core.ci_matvec` through the Davidson kernel and uses
 the implicit-function reverse of `core.iterative_ci`; the determinant space is
 then limited by working memory rather than by the $O(\mathrm{dim}^2)$ block
-matrix. The first-order derivative of this route is validated against finite
-differences through a rotated-MO chain. A second-order derivative for the
-matrix-free route and a benchmark above CAS(8,8) remain open. (Branch
+matrix. On the local Windows replica the memory crossover lies between
+CAS(6,6) (dense 0.50 GiB, matrix-free 1.66 GiB) and CAS(8,8) (dense exceeds
+8 GiB, matrix-free 2.18 GiB); CAS(10,10) runs on the matrix-free route with
+184,756 determinants at 2.0 GiB peak and 552 s per energy. The first-order
+derivative is validated against finite differences through a rotated-MO chain
+(relative 1.4e-9 at CAS(6,6), 3.2e-9 at CAS(8,8)). `core.ci_second_deriv`
+carries the matrix-free eigenpair second derivative as a prototype:
+`mf_eigenpair_hessian` reproduces the dense AD Hessian to 1.07e-10 at CAS(6,6)
+and the finite-difference of the first derivative to 3.3e-8 / 2.4e-7 at
+CAS(6,6) / CAS(8,8). It is not wired into `hessian.py` yet: the four blocks
+there sit on the `custom_vjp` path, where forward-over-reverse is silently
+wrong and reverse-over-reverse raises inside the MINRES `while_loop`, so they
+need explicit response rules, and the adjoint response solve is not
+implemented. A definition that carries both the response and the integral
+curvature term is required -- the response term alone has the wrong sign (the
+CAS(6,6) (0,0) element is -3.12 without it against +63.29 with it). (Branch
 `wave14/eigensolver`, commit `99d0cfb`.)
 
 *Degenerate pairs at a stationary point.* The cluster tolerance of the
@@ -393,15 +417,37 @@ $5\times10^{-15}$ on H2O/6-31G and $3\times10^{-15}$ on CO/6-31G while using
 32% and 35% less peak memory; the matrix-free route solves the response
 equation with LSMR, never forms $H_{\theta\theta}$, $M$ or $H_{RR}$, and
 reproduces the same Hessian to $6\times10^{-12}$ and $8\times10^{-12}$ while
-using 34% and 40% less memory. The matrix-free route is 1.6 times slower than
-the vectorized one, and its LSMR solve has to run past the previous iteration
-cap to converge (the cap is now $8n_\mathrm{par}$). The unrolled route with
-three Newton steps matches the implicit route to $6\times10^{-14}$ on
-LiH/STO-3G ($n_\mathrm{par}=11$, 3.05 GiB) but exceeds 20 GiB on H2O/6-31G
-CAS(2,2) ($n_\mathrm{par}=50$) and did not produce a Hessian. Analytic second
-derivatives for the single-reference RIJONX surface, and a matrix-free solver
-that deflates the near-null orbital direction without an iteration cap, remain
-open. (Branch `wave14/ri-hessian`, commit `5024db7`.)
+using 34% and 40% less memory. The unrolled route with three Newton steps
+matches the implicit route to $6\times10^{-14}$ on LiH/STO-3G
+($n_\mathrm{par}=11$, 3.05 GiB) but exceeds 20 GiB on H2O/6-31G CAS(2,2)
+($n_\mathrm{par}=50$) and did not produce a Hessian.
+
+The matrix-free response solve no longer carries an iteration cap. It stops on
+the relative residual $\lVert r\rVert/\lVert b\rVert$ (or on the
+normal-equation criterion when the right-hand side has a null-space
+component), with a wall-clock guard and a stagnation guard; storage is six
+vectors of length $n_\mathrm{par}$ regardless of the iteration count, so
+memory is bounded by construction. `core.lsmr.near_null_basis` builds a basis
+of the smallest-$|\lambda|$ orbital directions matrix-free -- diagonal-seeded,
+grown by coordinate expansion, Rayleigh-Ritz at each round -- and certifies it
+against $\lVert H v-\theta v\rVert/\lambda_\mathrm{max}$ before it is used;
+`core.lsmr.deflated_solve` inverts that block with the same relative cutoff
+the dense pseudo-inverse applies and hands the complement to LSMR, with
+residual-correction rounds and a fallback to the plain solve when the
+deflated route has not converged. On the local Windows replica (pyscfad is
+unavailable there, so $M$ and $H_{RR}$ are central differences shared by both
+routes while $H_{\theta\theta}$ is exact AD) the deflated solve reproduces the
+dense route to $8\times10^{-17}$ on H2O/6-31G in 901 LSMR iterations plus a
+256-product basis, against $1.2\times10^{-10}$ in 2192 iterations without
+deflation, and to $2\times10^{-15}$ on CO/6-31G in 1720 iterations plus 774
+products, against $1.5\times10^{-11}$ in 3439 iterations. The accuracy gain,
+not only the iteration count, is the point: with five constructed near-null
+directions at $10^{-9}$ to $10^{-7}$ of $\lambda_\mathrm{max}$ the plain solve
+satisfies its residual test and is still wrong by $6\times10^{-4}$ relative,
+while the deflated solve reaches $1.5\times10^{-12}$. Analytic second
+derivatives for the single-reference RIJONX surface remain open. (Branches
+`wave14/ri-hessian`, commit `5024db7`, and the second-derivative cost work,
+2026-11-09.)
 
 *Relaxed NEVPT2 gradient scope.* The relaxed-path nuclear gradient is validated
 on two closed-shell, frozen-core systems (H2O/6-31G and LiH/6-31G) and on two
@@ -409,9 +455,32 @@ scalar-relativistic ECP systems (HI/def2-SVP with ncore=12 and HI/LANL2DZ with
 ncore=3; the ECP core-Hamiltonian derivative test now runs in the suite). For
 the open-shell doublet OH/6-31G CAS(3,2) the CASSCF stationary point coincides
 with the ROHF orbitals at every geometry, so the response term vanishes
-identically and only the frozen gradient is testable; a non-trivial open-shell
-response (OH CAS(5,4)) remains blocked by a 19.4% discrepancy in the frozen e2
-nuclear derivative. f-block and large-basis relaxed gradients are memory-bound,
+identically and only the frozen gradient is testable. The non-trivial
+open-shell case, OH/6-31G CAS(5,4) with ncore=2 at theta* = -75.387977003714
+Eh, carries an 18.5% discrepancy in the frozen e2 nuclear derivative along the
+O-H stretch (release AD +1.9137e-3 Eh/bohr against +2.3471e-3; the reported
+19.4% used a 3e-4 finite difference of +2.3746e-3, which the M_S sector fix
+shows to be 1.2% high -- the clean 3e-4 value is +2.3472183e-3, and the 1e-3
+and 5e-3 values extrapolate to the same limit). The contraction is not
+responsible: contracting the reverse-mode partials
+d e2/d(C, h1, eri) with finite-difference tangents of the same inputs
+reproduces the finite difference to 7.3e-7 on 2.35e-3 (3.1e-4 relative), and
+each of the eight classes agrees with its own finite difference to 1e-9..7e-7.
+The derivative is a cancellation of three channels, C -2.0011e-2,
+h -4.5755e-2 and eri +6.8113e-2, summed to +2.3471e-3. Splitting the orbital
+tangent by the overlap metric into a rotation and a symmetric part gives the
+discriminating number: the CASSCF energy's rotational contraction is 2.5e-14
+-- it is stationary under every orbital rotation, so its 6.6e-6 closure
+validates only the symmetric part -- while e2's is +4.176e-3, 1.8 times the
+total. The cosine between the two orbital gradients is 0.093. A 10.4% error in
+the rotational response accounts for the whole discrepancy, and the release
+builder differentiates pyscfad's ROHF through the default unrolled iteration,
+the failure mode documented in driver/scf_ad.py.
+The contract (enable ``config.scf_implicit_diff`` for open-shell references) is
+now recorded in ``make_nevpt2_joint_fn`` and
+``nevpt2_relaxed_nuclear_gradient``; the implicit-differentiation rerun that
+would close the number runs on the server and remains open. f-block and
+large-basis relaxed gradients are memory-bound,
 measured on LrF at 109 spherical basis functions with a 78-core Stuttgart RLC
 ECP (CAS(8,6), 13 frozen core orbitals, one thread): the pinned NEVPT2 energy
 forward peaks at 12.1 GB and the displaced-geometry SCF plus NEVPT2 chain at
@@ -445,15 +514,61 @@ default total's
 apparent agreement is a cancellation between `V1_ija` (+55%), `V2_ij` (-77%),
 `V0_ia` (+10%) and `Vm2_ab` (+12%). The diagonal-to-full coupling ratio of the
 two paths, 0.9795831, matches the ORCA CASPT2-D/full-FIC ratio 0.9795829 to
-2e-7 relative: the coupling is right and the remaining offset is a class-space
-factor. `V1_ija` is 1.553 in every basis because the diagonal approximation of
-that class is gauge dependent (random gauges inside the degenerate overlap
-blocks span 0.88 to 1.29 of the reference) while its exact class-block value is
-gauge invariant at 1.553; ORCA prints 192 functions for the class against the
-768 of the plain-product basis, so the residual is a class-space definition
-difference. Closing it requires the reference contraction rule; extending the
-coupled path to the differentiable layer remains open. (Branch
-`wave14/caspt2-nevpt2`, commits `ea26401` and `339e480`.)
+2e-7 relative: the coupling is right.
+
+The class-space residual is the frozen-core setting, not a contraction rule.
+ORCA prints one function count per class; the counts of the archived N2/6-31G
+CAS(6,6), H2O/6-31G CAS(2,2) and CO/6-31G CAS(2,2) runs are reproduced by the
+plain-product cardinalities on the correlated internal orbitals,
+`m = ncore - nfrozen` (`nfrozen` from the log's `Last frozen orbital` line;
+N2, H2O and CO have nfrozen 2, 1 and 2):
+
+| class | rule | N2 | H2O | CO |
+|---|---|---:|---:|---:|
+| ITAB (`Vm1_iab`) | `m*nact*nvir**2` | 768 | 294 | 800 |
+| TUAB (`Vm2_ab`) | `nact**2*nvir**2` | 2304 | 196 | 400 |
+| IJTA (`V1_ija`) | `m**2*nact*nvir` | 192 | 126 | 320 |
+| IJTU (`V2_ij`) | `m*(m+1)/2*nact**2` | 108 | 24 | 40 |
+| ITUA (`V0_ia`) | `2*m*nact**2*nvir` | 1152 | 168 | 320 |
+| TUVA (`Vm1_a`) | `nact**3*nvir` | 1728 | 56 | 80 |
+| ITUV (`V1_i`) | `m*nact**3` | 432 | 24 | 32 |
+
+All 21 entries match. The N2 `IJTA` count of 192 is therefore the frozen-core
+plain-product count (`m = 2`), not evidence of a reduced class space: the two
+N 1s orbitals are frozen in ORCA, while the release reference and its class
+table correlate all four core orbitals.
+
+`caspt2_contracted_e2(..., frozen_core=2)` restricts the class index pools to
+the correlated core orbitals (the reference, E0 and the denominators are
+unchanged). With `class_diagonal='block', v0_ia='class', frozen_core=2` the
+exact class-block solve reproduces the ORCA CASPT2-D table: `V1_ija`
+-0.001224022 against -0.001224040 and `V2_ij` -0.007510716 against
+-0.007510645 (both 1.0000 in ratio), and `V0_ijab`/`Vm1_iab`/`Vm2_ab` at
+1.0001/1.0000/1.0000. The full-core values (`V1_ija` 1.5529, `V2_ij` 1.0542,
+total 1.0232) compare a full-core CASPT2 with a frozen-core ORCA CASPT2. The
+exact class-block reading is gauge invariant in both pools (function-order
+permutation spread 4e-19); the diagonal approximation is gauge dependent in
+the full-core pool (8 random gauges inside the degenerate overlap blocks span
+0.879-0.895 of ORCA, the raw LAPACK basis 1.293, the production block-A gauge
+1.553) and nearly gauge-free in the frozen-core pool (random gauges
+0.978-0.994, production gauge 1.0000).
+
+The two remaining readings are exposed by opt-in switches and close as well.
+`v0_ia='class_ordered'` builds ORCA's ITUA/ITAU class from both operator types
+over ordered active pairs (1152 functions at N2/6-31G, ORCA's cardinality) and
+solves it exactly: -0.020417988 against -0.020418190 (1.0000), against 0.9804
+for the unordered `'class'` construction. `three_active='block'` uses the
+exact class-block reading of Vm1_a and V1_i: 0.9995 (-0.003607008) and 0.9998
+(-0.001610267), against 1.0108 and 0.9409 with the orthonormal-diagonal
+default. With `class_diagonal='block', v0_ia='class_ordered',
+three_active='block', frozen_core=2` the complete eight-class table is within
+6e-4 of ORCA CASPT2-D in every class and the total is -0.071518650 against
+-0.071520733 (0.999971). The release defaults keep `frozen_core=0`,
+`v0_ia='block'` and `three_active='diagonal'` because the reference and its
+pins were generated with those settings; the ORCA-compatible setting is
+opt-in. Extending the coupled path to the differentiable layer remains open.
+(Branch `wave14/caspt2-nevpt2`, commits `ea26401` and `339e480`; frozen-core
+investigation 2026-11-09.)
 
 *ECP SOMF.* The valence-level ECP SOMF operator is a prototype, and no unique
 ECP SOMF definition exists: the split between the ECP spin-orbit operator and

@@ -38,9 +38,9 @@ VALIDATED SCOPE
 H2O/cc-pVDZ CAS(8,6) and N2/6-31G CAS(6,6): full-space HCI and ASCI
 return the CASCI energy to 1e-12 Eh, the HCI eps1 scan reproduces the
 frozen prototype selection counts and energy deviations, the pyscf
-NEVPT2 bridge matches the native call to 1e-12 Eh, and the documented 1%
-stopping-rule defect on N2 is reproduced exactly
-(tests/core/test_selected_ci.py).
+NEVPT2 bridge matches the native call to 1e-12 Eh, and HCI at
+eps1=1e-4 on N2 selects 104 determinants and reaches the CASCI energy
+to 1e-10 Eh (tests/core/test_selected_ci.py).
 
 BOUNDARIES
 ----------
@@ -48,8 +48,8 @@ BOUNDARIES
   degeneracy handling.
 * Dense diagonalization limits the selected space to a few thousand
   determinants.
-* Selection counts depend on the orbital basis; use ``new_fraction=0``
-  for limit checks.
+* Selection counts depend on the orbital basis; ``new_fraction=0``
+  removes the fractional early stop and leaves the zero-growth exit.
 """
 from .asci import ASCI
 from .determinants import ActiveSpaceHamiltonian, enumerate_determinants

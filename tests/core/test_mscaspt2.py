@@ -103,8 +103,14 @@ def test_single_state_matches_release_solver(small_system):
                       small_system['casci_energies'][0] + ref, atol=1e-10)
 
 
-def test_xms_invariant_ms_not(small_system):
-    """XMS energies are invariant under a unitary rotation of the references."""
+def test_rotation_invariance_ms_and_xms(small_system):
+    """MS-MR with the S13 eq. 1 coupling and XMS are both rotation invariant.
+
+    The coupled MS-MR spectrum and the XMS spectrum must be unchanged
+    under a unitary rotation of the reference states.  The legacy
+    diagonal-projection MS-MR and the SS-SR path stay non-invariant and
+    are kept as the contrast.
+    """
     from diffmrc.core.mscaspt2.ms import random_unitary, solve_ms, solve_xms
     common = dict(ncore=small_system['ncore'], nact=small_system['nact'],
                   nele=small_system['nele'],
@@ -123,7 +129,54 @@ def test_xms_invariant_ms_not(small_system):
                   small_system['dets'], **common)
     ms_r = solve_ms(small_system['h1_mo'], small_system['eri_mo'],
                     Q.T @ civs, small_system['dets'], **common)
-    assert not np.allclose(ms['energies'], ms_r['energies'], atol=1e-9)
+    assert np.allclose(ms['energies'], ms_r['energies'], atol=1e-9)
+
+    legacy = solve_ms(small_system['h1_mo'], small_system['eri_mo'], civs,
+                      small_system['dets'], reference_coupling=False,
+                      **common)
+    legacy_r = solve_ms(small_system['h1_mo'], small_system['eri_mo'],
+                        Q.T @ civs, small_system['dets'],
+                        reference_coupling=False, **common)
+    assert not np.allclose(legacy['energies'], legacy_r['energies'],
+                           atol=1e-9)
+
+    ss = solve_ms(small_system['h1_mo'], small_system['eri_mo'], civs,
+                  small_system['dets'], fock_mode='state',
+                  reference_coupling=False, **common)
+    ss_r = solve_ms(small_system['h1_mo'], small_system['eri_mo'],
+                    Q.T @ civs, small_system['dets'], fock_mode='state',
+                    reference_coupling=False, **common)
+    assert not np.allclose(ss['energies'], ss_r['energies'], atol=1e-9)
+
+
+def test_coupled_ms_equals_rotated_xms(small_system):
+    """The S13 eq. 1 system is the same in the original and Fock bases."""
+    from diffmrc.core.mscaspt2.ms import solve_ms, solve_xms
+    common = dict(ncore=small_system['ncore'], nact=small_system['nact'],
+                  nele=small_system['nele'],
+                  H_model=small_system['H_model'],
+                  det_index=small_system['det_index'])
+    ms = solve_ms(small_system['h1_mo'], small_system['eri_mo'],
+                  small_system['civs'], small_system['dets'], **common)
+    xms = solve_xms(small_system['h1_mo'], small_system['eri_mo'],
+                    small_system['civs'], small_system['dets'],
+                    reference_coupling=True, **common)
+    assert np.allclose(ms['energies'], xms['energies'], atol=1e-9)
+
+
+def test_coupled_cross_matches_psis(small_system):
+    """``cross`` from the Sylvester solve equals the psi contraction."""
+    from diffmrc.core.mscaspt2.ms import coupling_matrix, solve_ms
+    common = dict(ncore=small_system['ncore'], nact=small_system['nact'],
+                  nele=small_system['nele'],
+                  H_model=small_system['H_model'],
+                  det_index=small_system['det_index'])
+    out = solve_ms(small_system['h1_mo'], small_system['eri_mo'],
+                   small_system['civs'], small_system['dets'], **common)
+    cross = coupling_matrix(out['psis'], small_system['civs'],
+                            small_system['h1_mo'], small_system['eri_mo'],
+                            small_system['dets'])
+    assert np.allclose(out['cross'], cross, atol=1e-10)
 
 
 def test_heff_symmetric(small_system):

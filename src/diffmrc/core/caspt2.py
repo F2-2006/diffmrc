@@ -490,7 +490,8 @@ def _plain_class_ops(name, core, act, vir):
 
 def caspt2_contracted_e2(h1e_mo, eri_mo, ci, dets, *, ncore, nact, nele, eps,
                          nthresh=1e-6, active_row='replica',
-                         class_diagonal='function', v0_ia='block'):
+                         class_diagonal='function', v0_ia='block',
+                         frozen_core=0, three_active='diagonal'):
     """Contracted (internally contracted) CASPT2, diagonal-complete scheme.
 
     Follows the OpenMolcas conventions established by line-by-line source
@@ -604,8 +605,35 @@ def caspt2_contracted_e2(h1e_mo, eri_mo, ci, dets, *, ncore, nact, nele, eps,
     solves the whole class as one projected system in the same
     cross/direct basis (``solve=True`` in
     :func:`_orthonormal_class_diagonal`); the class then carries the
-    inter-block coupling the per-block solve drops.  The three-active-
-    index classes keep the orthonormalized diagonal in every setting.
+    inter-block coupling the per-block solve drops.  ``'class_ordered'``
+    is the ORCA-shaped class: the two operator types E(a,j)E(v,u) and
+    E(v,j)E(a,u) are both enumerated over *ordered* active pairs
+    (``2 * m * nact**2 * nvir`` functions, the ITUA/ITAU count of the
+    ORCA logs), and the class is solved exactly.  On N2/6-31G CAS(6,6)
+    with ``frozen_core=2`` it moves V0_ia from 0.9804 to 1.0000 of ORCA
+    CASPT2-D (-0.020417988 against -0.020418190); the ``'class'``
+    construction uses unordered active pairs and has half that
+    cardinality.
+
+    ``three_active`` selects the reading of the TUVA (Vm1_a) and ITUV
+    (V1_i) classes.  ``'diagonal'`` (default) is the orthonormalized
+    diagonal (H1); ``'block'`` solves the projected class system exactly
+    (H2), the gauge-invariant reading.  On N2/6-31G CAS(6,6) with
+    ``frozen_core=2`` the exact reading moves V1_i from 0.9409 to 0.9998
+    and Vm1_a from 1.0108 to 0.9995 of ORCA CASPT2-D.
+
+    ``frozen_core`` is the number of lowest core orbitals kept out of the
+    class index pools (the frozen-core approximation).  The reference,
+    its Fock expectation E0 and the denominators are unchanged; only the
+    inactive indices of the excitation classes are restricted to the
+    correlated core orbitals ``core[frozen_core:]``.  This is the setting
+    the ORCA CASPT2 class table refers to: ORCA prints the frozen-core
+    counts (N2/6-31G CAS(6,6) has two frozen 1s orbitals, so the plain
+    V1_ija class has ``m**2 * nact * nvir = 192`` functions with
+    ``m = 2``; the full-core count is 768).  On N2 the frozen-core class
+    block reproduces the ORCA CASPT2-D V1_ija and V2_ij classes to
+    better than 2e-5 relative, against 1.55 and 1.05 for the full-core
+    pool.
 
     Returns (e2_total, breakdown) with breakdown keyed by class name.
     """
@@ -615,6 +643,14 @@ def caspt2_contracted_e2(h1e_mo, eri_mo, ci, dets, *, ncore, nact, nele, eps,
     eps = np.asarray(eps, dtype=float)
     nmo = h1e_mo.shape[0]
     nocc = ncore + nact
+    if (int(frozen_core) != frozen_core or frozen_core < 0
+            or (ncore > 0 and frozen_core >= ncore)):
+        raise ValueError('frozen_core must be an integer in [0, ncore), or 0 '
+                         'when the reference has no core: {!r}'.format(
+                             frozen_core))
+    frozen_core = int(frozen_core)
+    if three_active not in ('diagonal', 'block'):
+        raise ValueError('unknown three_active: {!r}'.format(three_active))
 
     ref_pairs = [(int(d), float(c)) for d, c in zip(dets, ci)
                  if abs(c) > 1e-14]
@@ -662,7 +698,7 @@ def caspt2_contracted_e2(h1e_mo, eri_mo, ci, dets, *, ncore, nact, nele, eps,
             n0[so // 2] += c * c
     e0_zero = float(eps @ n0)
 
-    core = list(range(ncore))
+    core_pool = list(range(frozen_core, ncore))
     act = list(range(ncore, nocc))
     vir = list(range(nocc, nmo))
 
@@ -684,11 +720,11 @@ def caspt2_contracted_e2(h1e_mo, eri_mo, ci, dets, *, ncore, nact, nele, eps,
         return _de_cache[dd]
 
     classes = [
-        ('V0_ijab', core, core, vir, vir),
-        ('Vm1_iab', act, core, vir, vir),
+        ('V0_ijab', core_pool, core_pool, vir, vir),
+        ('Vm1_iab', act, core_pool, vir, vir),
         ('Vm2_ab', act, act, vir, vir),
-        ('V1_ija', core, core, act, vir),
-        ('V2_ij', core, core, act, act),
+        ('V1_ija', core_pool, core_pool, act, vir),
+        ('V2_ij', core_pool, core_pool, act, act),
     ]
     breakdown = {}
     total = 0.0
@@ -729,7 +765,7 @@ def caspt2_contracted_e2(h1e_mo, eri_mo, ci, dets, *, ncore, nact, nele, eps,
             total += acc
     elif class_diagonal in ('ortho', 'block'):
         for name in _PLAIN_CLASSES:
-            ops_list = _plain_class_ops(name, core, act, vir)
+            ops_list = _plain_class_ops(name, core_pool, act, vir)
             vecs = [_apply_chain(ref_pairs, ops) for ops in ops_list]
             w = np.asarray([sum(cc * g_of(dd) for dd, cc in vec.items())
                             for vec in vecs])
@@ -750,12 +786,14 @@ def caspt2_contracted_e2(h1e_mo, eri_mo, ci, dets, *, ncore, nact, nele, eps,
     for name, ops_list in (
             ('Vm1_a', [[(p, t), (u, v)] for p in vir for t in act
                        for u in act for v in act]),
-            ('V1_i', [[(t, i), (u, v)] for i in core for t in act
+            ('V1_i', [[(t, i), (u, v)] for i in core_pool for t in act
                       for u in act for v in act])):
         vecs = [_apply_chain(ref_pairs, ops) for ops in ops_list]
         w = np.asarray([sum(cc * g_of(dd) for dd, cc in vec.items())
                         for vec in vecs])
-        acc = _orthonormal_class_diagonal(vecs, w, de_of, e0_zero, nthresh)
+        acc = _orthonormal_class_diagonal(
+            vecs, w, de_of, e0_zero, nthresh,
+            solve=(three_active == 'block'))
         breakdown[name] = acc
         total += acc
 
@@ -793,9 +831,28 @@ def caspt2_contracted_e2(h1e_mo, eri_mo, ci, dets, *, ncore, nact, nele, eps,
                 kacc[d2] += cI * cc
         return kacc
 
-    if v0_ia not in ('block', 'class'):
+    if v0_ia not in ('block', 'class', 'class_ordered'):
         raise ValueError('unknown v0_ia: {!r}'.format(v0_ia))
-    if v0_ia == 'class':
+    if v0_ia == 'class_ordered':
+        # ORCA-shaped ITUA/ITAU class: both operator types over *ordered*
+        # active pairs, solved as one projected system.  The cardinality
+        # is 2 * m * nact**2 * nvir, the count ORCA prints for the class.
+        vecs = []
+        for j in core_pool:
+            for a in vir:
+                for u in act:
+                    for v in act:
+                        vecs.append(dict(kacc_of('cross', u, j, a, v)))
+        for j in core_pool:
+            for a in vir:
+                for u in act:
+                    for v in act:
+                        vecs.append(dict(kacc_of('direct', u, j, a, v)))
+        w_ia = np.asarray([sum(cc * g_of(dd) for dd, cc in k.items())
+                           for k in vecs])
+        acc_ia = _orthonormal_class_diagonal(vecs, w_ia, de_of, e0_zero,
+                                             nthresh, solve=True)
+    elif v0_ia == 'class':
         # Whole-class projection: every (u, v, j, a, mode) component is
         # one row, and the projected system is solved once for the class
         # instead of once per (u, v, j, a) block.  The cross/direct
@@ -805,7 +862,7 @@ def caspt2_contracted_e2(h1e_mo, eri_mo, ci, dets, *, ncore, nact, nele, eps,
         for iu, u in enumerate(act):
             for v in act[iu:]:
                 modes = ('cross',) if v == u else ('cross', 'direct')
-                for j in core:
+                for j in core_pool:
                     for a in vir:
                         for m in modes:
                             vecs.append(dict(kacc_of(m, u, j, a, v)))
@@ -818,7 +875,7 @@ def caspt2_contracted_e2(h1e_mo, eri_mo, ci, dets, *, ncore, nact, nele, eps,
         for iu, u in enumerate(act):
             for v in act[iu:]:
                 modes = ('cross',) if v == u else ('cross', 'direct')
-                for j in core:
+                for j in core_pool:
                     for a in vir:
                         ks = [kacc_of(m, u, j, a, v) for m in modes]
                         ws = [sum(cc * g_of(dd) for dd, cc in k.items())

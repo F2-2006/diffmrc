@@ -718,3 +718,202 @@ def test_the_replica_rule_warns_above_two_active_orbitals():
         warnings.simplefilter("error")
         caspt2_contracted_e2(h1, e4, ci, dets, ncore=2, nact=2, nele=2,
                              eps=eps)
+
+
+def test_frozen_core_class_counts_match_the_orca_counting_rule():
+    """The ORCA class function counts are the plain-product cardinalities
+    on the correlated internal orbitals, m = ncore - nfrozen.
+
+    Archived ORCA CASPT2 runs (``Last frozen orbital`` fixes nfrozen):
+
+        system  ncore nact nvir nfrozen  ITAB TUAB IJTA IJTU ITUA TUVA ITUV
+        N2       4     6    8    2        768 2304  192  108 1152 1728  432
+        H2O      4     2    7    1        294  196  126   24  168   56   24
+        CO       6     2   10    2        800  400  320   40  320   80   32
+
+    The rule (all index ranges ordered unless stated) is
+    ITAB = m*nact*nvir**2, TUAB = nact**2*nvir**2,
+    IJTA = m**2*nact*nvir, IJTU = m*(m+1)/2*nact**2,
+    ITUA = 2*m*nact**2*nvir, TUVA = nact**3*nvir, ITUV = m*nact**3.
+    The counts that differ from the full-core plain products are exactly
+    the classes carrying internal indices; the apparent 192-vs-768
+    "class-space" gap on N2 is the frozen-core restriction, not a
+    contraction rule.  The raw ``_plain_class_ops`` cardinalities cover
+    the four classes that enumerate ordered products directly; the
+    three-active and ITUA counts are checked against the same formula.
+    """
+    from diffmrc.core.caspt2 import _plain_class_ops
+
+    cases = [
+        # ncore, nact, nvir, nfrozen, expected dict
+        (4, 6, 8, 2, dict(ITAB=768, TUAB=2304, IJTA=192, IJTU=108,
+                          ITUA=1152, TUVA=1728, ITUV=432)),
+        (4, 2, 7, 1, dict(ITAB=294, TUAB=196, IJTA=126, IJTU=24,
+                          ITUA=168, TUVA=56, ITUV=24)),
+        (6, 2, 10, 2, dict(ITAB=800, TUAB=400, IJTA=320, IJTU=40,
+                           ITUA=320, TUVA=80, ITUV=32)),
+    ]
+    for ncore, nact, nvir, nfrozen, expected in cases:
+        m = ncore - nfrozen
+        core = list(range(nfrozen, ncore))
+        act = list(range(ncore, ncore + nact))
+        vir = list(range(ncore + nact, ncore + nact + nvir))
+        got = dict(
+            ITAB=len(_plain_class_ops('Vm1_iab', core, act, vir)),
+            TUAB=len(_plain_class_ops('Vm2_ab', core, act, vir)),
+            IJTA=len(_plain_class_ops('V1_ija', core, act, vir)),
+            TUVA=nact ** 3 * nvir,
+            ITUV=m * nact ** 3,
+            ITUA=2 * m * nact ** 2 * nvir,
+            IJTU=m * (m + 1) // 2 * nact ** 2)
+        assert got == expected, (ncore, nact, nvir, nfrozen, got)
+        # The plain V2_ij enumeration is ordered over the core pair; the
+        # ORCA count uses the weak pair i <= j, which spans the same
+        # space (measured on N2: both readings give -0.007510716).
+        assert (len(_plain_class_ops('V2_ij', core, act, vir))
+                == m * m * nact ** 2)
+
+
+def test_frozen_core_option_is_validated_and_zero_is_bitwise_neutral():
+    """``frozen_core=0`` reproduces the default path bitwise; the flag is
+    validated against the core size."""
+    from diffmrc.core.caspt2 import caspt2_contracted_e2
+
+    h1, e4, eps, dets, ci = _synthetic_case(ncore=2, nact=2, nele=2, nmo=6)
+    kw = dict(ncore=2, nact=2, nele=2, eps=eps)
+    e0, bd0 = caspt2_contracted_e2(h1, e4, ci, dets, **kw)
+    e1, bd1 = caspt2_contracted_e2(h1, e4, ci, dets, frozen_core=0, **kw)
+    assert e1 == e0
+    for name in bd0:
+        assert bd1[name] == bd0[name]
+    e2, bd2 = caspt2_contracted_e2(h1, e4, ci, dets, frozen_core=1, **kw)
+    assert np.isfinite(e2)
+    assert set(bd2) == set(bd0)
+    with pytest.raises(ValueError):
+        caspt2_contracted_e2(h1, e4, ci, dets, frozen_core=2, **kw)
+    with pytest.raises(ValueError):
+        caspt2_contracted_e2(h1, e4, ci, dets, frozen_core=-1, **kw)
+
+
+def test_n2_frozen_core_reproduces_the_orca_class_table():
+    """N2/6-31G CAS(6,6): ORCA freezes the two N 1s orbitals.
+
+    The archived ORCA log prints ``Last frozen orbital ... 1`` (orbitals
+    0 and 1 frozen) and the class counts of the frozen-core plain-product
+    basis (ITAB 768, IJTA 192, IJTU 108, ITUV 432 with m = 2).  The
+    release reference was generated without a frozen core, so its class
+    table carries the two 1s holes: V1_ija 1.5529 and V2_ij 1.0542 of
+    ORCA.  With ``frozen_core=2`` and the exact class-block solve the
+    five classes that carry internal indices move to 1.0000-1.0001 of
+    ORCA CASPT2-D; V1_ija is -0.001224022 against -0.001224040 and
+    V2_ij -0.007510716 against -0.007510645.  The two remaining classes
+    (V0_ia, V1_i) are pinned at their current H1 / case-D readings; they
+    are not part of the frozen-core count rule.
+
+    Requires DIFFMRC_N2_REF; the numbers are pinned from the Wave 19
+    frozen-core run.
+    """
+    ref_path = os.environ.get('DIFFMRC_N2_REF')
+    if not ref_path or not os.path.exists(ref_path):
+        pytest.skip('DIFFMRC_N2_REF does not point at n2_ref.npz')
+    from diffmrc.core.caspt2 import caspt2_contracted_e2
+
+    z = np.load(ref_path)
+    e2, bd = caspt2_contracted_e2(
+        np.asarray(z['h1_mo']), np.asarray(z['eri_mo']),
+        np.asarray(z['ci']).ravel(), [int(x) for x in z['dets']],
+        ncore=int(z['ncore']), nact=int(z['nact']), nele=int(z['nele']),
+        eps=np.asarray(z['eps'], dtype=float),
+        class_diagonal='block', v0_ia='class', frozen_core=2)
+    pins = {'V0_ijab': -0.008033038871, 'Vm1_iab': -0.016383404825,
+            'Vm2_ab': -0.012732204562, 'V1_ija': -0.001224022012,
+            'V2_ij': -0.007510716283, 'V0_ia': -0.020018147901,
+            'Vm1_a': -0.003648003576, 'V1_i': -0.001515363081}
+    for name, value in pins.items():
+        assert bd[name] == pytest.approx(value, abs=1e-8), name
+    orca = {'V0_ijab': -0.008032535, 'Vm1_iab': -0.016383398,
+            'Vm2_ab': -0.012732384, 'V1_ija': -0.001224040,
+            'V2_ij': -0.007510645}
+    for name, target in orca.items():
+        assert bd[name] / target == pytest.approx(1.0, abs=2e-4), name
+    ratio = e2 / -0.071520733
+    assert 0.985 <= ratio <= 1.005, ratio
+
+
+def test_v0_ia_class_ordered_and_three_active_block_are_opt_in():
+    """The ORCA-shaped V0_ia class (two operator types over ordered
+    active pairs) and the exact three-active reading are opt-in; each
+    changes only its own classes.
+
+    On the synthetic case the three-active classes are non-zero (the
+    integrals are random), so both switches are observable.  The
+    production defaults keep the historical readings bitwise.
+    """
+    from diffmrc.core.caspt2 import caspt2_contracted_e2
+
+    h1, e4, eps, dets, ci = _synthetic_case(ncore=2, nact=2, nele=2, nmo=6)
+    kw = dict(ncore=2, nact=2, nele=2, eps=eps)
+    e0, bd0 = caspt2_contracted_e2(h1, e4, ci, dets, **kw)
+
+    e1, bd1 = caspt2_contracted_e2(h1, e4, ci, dets,
+                                   v0_ia='class_ordered', **kw)
+    for name in ('V0_ijab', 'Vm1_iab', 'Vm2_ab', 'V1_ija', 'V2_ij',
+                 'Vm1_a', 'V1_i'):
+        assert bd1[name] == bd0[name], name
+    assert abs(bd1['V0_ia'] - bd0['V0_ia']) > 1e-6
+    assert e1 != e0
+
+    e2, bd2 = caspt2_contracted_e2(h1, e4, ci, dets,
+                                   three_active='block', **kw)
+    for name in ('V0_ijab', 'Vm1_iab', 'Vm2_ab', 'V1_ija', 'V2_ij',
+                 'V0_ia'):
+        assert bd2[name] == bd0[name], name
+    assert abs(bd2['Vm1_a'] - bd0['Vm1_a']) > 1e-6
+    assert abs(bd2['V1_i'] - bd0['V1_i']) > 1e-6
+
+    with pytest.raises(ValueError):
+        caspt2_contracted_e2(h1, e4, ci, dets, three_active='x', **kw)
+
+
+def test_n2_orca_compatible_class_table_closes():
+    """N2/6-31G CAS(6,6): the complete ORCA-compatible class table.
+
+    ORCA freezes the two N 1s orbitals (``Last frozen orbital = 1``) and
+    prints the class cardinalities of the frozen-core plain-product
+    basis, including the two operator types of ITUA/ITAU over ordered
+    active pairs.  With ``frozen_core=2``, the exact class-block solve,
+    the ORCA-shaped ``v0_ia='class_ordered'`` class and the exact
+    three-active reading, every class lands within 6e-4 of the ORCA
+    CASPT2-D table and the total is -0.071518650 against -0.071520733
+    (0.999971).  The release defaults keep the historical readings; this
+    setting is opt-in.
+
+    Requires DIFFMRC_N2_REF; the numbers are pinned from the 2026-11-09
+    frozen-core run.
+    """
+    ref_path = os.environ.get('DIFFMRC_N2_REF')
+    if not ref_path or not os.path.exists(ref_path):
+        pytest.skip('DIFFMRC_N2_REF does not point at n2_ref.npz')
+    from diffmrc.core.caspt2 import caspt2_contracted_e2
+
+    z = np.load(ref_path)
+    e2, bd = caspt2_contracted_e2(
+        np.asarray(z['h1_mo']), np.asarray(z['eri_mo']),
+        np.asarray(z['ci']).ravel(), [int(x) for x in z['dets']],
+        ncore=int(z['ncore']), nact=int(z['nact']), nele=int(z['nele']),
+        eps=np.asarray(z['eps'], dtype=float),
+        class_diagonal='block', v0_ia='class_ordered',
+        three_active='block', frozen_core=2)
+    pins = {'V0_ijab': -0.008033038871, 'Vm1_iab': -0.016383404825,
+            'Vm2_ab': -0.012732204562, 'V1_ija': -0.001224022012,
+            'V2_ij': -0.007510716283, 'V0_ia': -0.020417987570,
+            'Vm1_a': -0.003607008073, 'V1_i': -0.001610267489}
+    orca = {'V0_ijab': -0.008032535, 'Vm1_iab': -0.016383398,
+            'Vm2_ab': -0.012732384, 'V1_ija': -0.001224040,
+            'V2_ij': -0.007510645, 'V0_ia': -0.020418190,
+            'Vm1_a': -0.003608944, 'V1_i': -0.001610598}
+    for name, value in pins.items():
+        assert bd[name] == pytest.approx(value, abs=1e-8), name
+        assert bd[name] / orca[name] == pytest.approx(1.0, abs=6e-4), name
+    ratio = e2 / -0.071520733
+    assert 0.999 <= ratio <= 1.001, ratio

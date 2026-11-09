@@ -6,30 +6,49 @@ Implements the MS-CASPT2 and XMS-CASPT2 effective Hamiltonians on a
 determinant model space whose zeroth-order operator can be chosen as the
 state-averaged or the state-specific generalized Fock matrix.
 
-The two zeroth-order choices follow Park et al., Chem. Rev. 2020, 120,
+The zeroth-order choices follow Park et al., Chem. Rev. 2020, 120,
 5878, eqs 11/16 (MS-CASPT2, diagonal projection of the Fock operator in
-the reference space) and eq 17 (XMS-CASPT2, full ``P f P + Q f Q``).  The
-effective Hamiltonian is the symmetrized form of Shiozaki, Woywod,
-Werner, Phys. Chem. Chem. Phys. 2013, 15, 262, eq 2 (equivalently Park
-and Shiozaki, J. Chem. Theory Comput. 2017, 13, 3643, eq 8) with the
-level shift set to zero:
+the reference space) and eq 17 (XMS-CASPT2, full ``P f P + Q f Q``).
+The default MS-CASPT2 path also includes the reference-space coupling
+term of Shiozaki, Woywod, Werner, Phys. Chem. Chem. Phys. 2013, 15, 262,
+eq 1,
+
+    <Omega|H0 + E_shift|Psi_N^(1)>
+        - sum_M <Omega|Psi_M^(1)> <M|H0|N> + <Omega|H|N> = 0,
+
+with the full reference-space projection ``H0 = P f P + Q f Q`` (S13
+eq 3) and the first-order wave function of every state expanded in the
+union of the contracted functions generated from all references (the
+MS-MR contraction of S13 Section 2.1).  In the Fock eigenbasis the
+off-diagonal ``<M|H0|N>`` vanish and the equations decouple (S13
+eqs 5-7); in the original reference basis they are solved as one
+Sylvester system.  The effective Hamiltonian is the symmetrized form of
+S13 eq 2 (equivalently Park and Shiozaki, J. Chem. Theory Comput. 2017,
+13, 3643, eq 8) with the level shift set to zero:
 
     H^eff_MN = <M|H|N> + 1/2 [ <Psi_M^(1)|H|N> + <M|H|Psi_N^(1)> ].
 
-The first-order amplitudes are those of the contracted solver
-``diffmrc.core.caspt2.caspt2_contracted_e2_coupled`` with the Fock matrix
-supplied explicitly; the solver itself is not modified.  The solver and
-the Slater-Condon kernel are imported lazily so that importing this
-subpackage stays numpy-only.
+The coupled system is assembled with the release CASPT2 kernels
+``_class_function_vectors``, ``_h0_action`` and ``_sc_kernel``.  The
+union functions are held as sparse rows over their determinant support,
+so ``S = V V^T`` and ``A = V H0 V^T`` come from sparse algebra instead
+of a dense ``n_fn^2`` function-pair loop.  The single-state limit
+reduces exactly to the release contracted solver.  Setting
+``reference_coupling=False`` retains the legacy diagonal-projection
+scheme (CR20 eq 16), kept for the rotation-invariance contrast.
+
+The solver and the Slater-Condon kernel are imported lazily so that
+importing this subpackage stays numpy-only.
 
 PUBLIC INTERFACE
 ----------------
 Densities and Fock matrices in the model space:
     ``state_averaged_density``, ``state_focks``, ``averaged_fock``,
     ``reference_fock_matrix``.
-Amplitude solve and effective Hamiltonian:
-    ``solve_states``, ``first_order_vectors``, ``coupling_matrix``,
-    ``build_heff``.
+Contracted space and amplitudes:
+    ``union_function_vectors``, ``coupled_reference_system``,
+    ``solve_coupled_amplitudes``, ``solve_states``,
+    ``first_order_vectors``, ``coupling_matrix``, ``build_heff``.
 Scheme entry points:
     ``solve_ms``, ``solve_xms``.
 Utility: ``random_unitary``.
@@ -43,6 +62,11 @@ CONVENTIONS
 -----------
 * ``H_eff`` is built from the reference-space Hamiltonian
   ``H_ref = C H_model C^T`` plus the symmetrized first-order coupling.
+* With ``reference_coupling=True`` the amplitudes solve
+  ``A C - S C F = -W`` over the union contraction basis and ``F`` is the
+  full reference-space Fock matrix, not only its diagonal.  With
+  ``reference_coupling=False`` the legacy per-state equations
+  ``(A_M - F_MM S_M) x_M = -W_M`` are used instead.
 * ``reference_fock_matrix`` returns ``F_MN = <M|f|N>`` in the reference
   basis; ``solve_xms`` diagonalizes it and rotates the references onto
   its eigenbasis (Chem. Rev. 2020 eq 18).
@@ -56,41 +80,42 @@ VALIDATED SCOPE
 H2O CAS(2,2)/6-31G, 13 basis functions, 4 determinants, three equally
 weighted singlet SA-CASSCF references at r_OH = 0.96, 1.30, 1.80 A:
 
-* single-state limit: every scheme collapses onto the contracted solver
-  and reproduces it bitwise (difference 0.0 Eh at all three geometries,
-  against a 1e-8 Eh target);
-* XMS rotation invariance: in the development run the eigenvalue
-  spectrum changed by 3.9e-13 to 4.1e-11 eV over four random reference
-  rotations (seeds 7/11/23/37), while the MS and SS-SR spectra moved by
-  0.3 to 1.3 eV.  The residual is a few units in the last place of the
-  total energy (order 1e-14 Eh) and moves within that floor between
-  platforms; it is not a physical symmetry breaking;
-* Hermiticity: ``max|H_eff - H_eff^T|`` between 5.1e-28 and 6.1e-15 Eh;
-* the diagonal identity ``diag(H_eff) = E_CASCI + E2`` holds to at most
-  1.4e-14 Eh.
+* single-state limit: every scheme collapses onto the contracted solver;
+  the returned E2 is bitwise identical (difference 0.0 Eh at all three
+  geometries) and the assembled H_eff diagonal differs by at most
+  2.8e-14 Eh from the Rayleigh-quotient round-off;
+* reference-space coupling (S13 eq 1): over four random reference
+  rotations (seeds 7/11/23/37) the coupled MS-MR spectrum moves by at
+  most 3e-12 eV at all three geometries, the same round-off floor as
+  XMS, whereas the legacy diagonal-projection MS-MR spectrum moves by
+  0.28 to 1.31 eV.  The sparse union assembly and a dense function-pair
+  assembly of the same system give identical spectra and the same
+  regularized rank (2006 at r_OH = 0.96 A);
+* Hermiticity: ``max|H_eff - H_eff^T|`` at or below 6.1e-15 Eh;
+* the diagonal identity ``diag(H_eff) = diag(H_ref) + E2`` holds to at
+  most 1.4e-14 Eh.
 
 The CH2/STO-3G CAS(2,2) two-state case is the unit-test fixture.
 
 BOUNDARIES
 ----------
-* The MS-MR implementation is a state-averaged-Fock zeroth order with a
-  per-state contraction; the reference-space coupling term of Shiozaki
-  et al. 2013 eq 1 is not included, and the first-order space is not
-  generated from all reference functions jointly.  It therefore
-  implements the zeroth-order operator of Chem. Rev. 2020 eq 16, not the
-  full MS-MR contraction of eq 15.
-* SS-SR is not invariant under a rotation of the reference states; this
-  is a property of the state-specific zeroth order, not an implementation
-  defect.  The SS-SR-XMS diagnostic variant is likewise not invariant in
-  this implementation because the state-specific Fock operator is
-  rebuilt from the rotated densities.
-* The amplitude solver assembles the function-pair matrices in
-  ``O(n_fn^2)``; N2 CAS(6,6)/6-31G (n_fn = 8052) exceeded the 20 min job
-  limit and was not run.  The validated systems have n_fn = 1363 (H2O)
-  and smaller.
-* No IPEA shift, no real or imaginary level shift (E_shift = 0), no
-  gradients, no spin-orbit coupling.  The model space is ``S_z = 0``
-  only.
+* The reference-space coupling is implemented for the state-averaged
+  Fock operator only (S13 eq 3 uses one ``f``).  The state-specific
+  (SS-SR) path keeps the legacy diagonal projection and is not
+  rotation invariant; that is a property of the state-specific zeroth
+  order, not an implementation defect.
+* ``E_shift = 0``.  The level-shift terms of S13 eqs 1-2 and the
+  invariant overlap correction ``-E_shift <Psi_M^(1)|Psi_N^(1)>`` are
+  not implemented.
+* The union contraction has ``n_fn = n_state * n_fn_state`` functions
+  and a singular overlap.  ``S`` is diagonalized densely, so the
+  regularized rank is limited by memory; the determinant representation
+  of ``V`` and ``H0`` is sparse and scales with the number of
+  determinants reached by the contraction, not with ``n_fn^2``.
+  N2 CAS(6,6)/6-31G (n_fn = 8052 per state) is assessed in the
+  development report; it is not part of the validated scope.
+* No IPEA shift, no real or imaginary level shift, no gradients, no
+  spin-orbit coupling.  The model space is ``S_z = 0`` only.
 * Equal state-averaging weights only; a weight scan was not performed.
 * The literature formulas were used through the secondary presentations
   CR20, S13, PS17 and the P19 Supporting Information; the original XMS
@@ -107,6 +132,153 @@ def _contracted_solver():
     """The release contracted CASPT2 solver (lazy, keeps imports light)."""
     from ..caspt2 import caspt2_contracted_e2_coupled
     return caspt2_contracted_e2_coupled
+
+
+def _reference_pairs(civs, dets):
+    """Per-state determinant/coefficient lists, truncated at 1e-14."""
+    civs = np.asarray(civs, dtype=float)
+    return [[(int(d), float(c)) for d, c in zip(dets, ci) if abs(c) > 1e-14]
+            for ci in civs]
+
+
+def union_function_vectors(civs, dets, ncore, nact, nmo):
+    """Union of the release contracted functions over all references.
+
+    Shiozaki, Woywod and Werner, Phys. Chem. Chem. Phys. 2013, 15, 262,
+    Section 2.1: with internally contracted functions the first-order
+    wave function of every state is expanded in the union of the
+    functions generated from all references (the MS-MR contraction).
+    The per-reference lists come from the release kernel
+    ``_class_function_vectors``; no operator or class rule is
+    reimplemented here.
+    """
+    from ..caspt2 import _class_function_vectors
+
+    functions = []
+    for ref in _reference_pairs(civs, dets):
+        functions.extend(_class_function_vectors(ref, ncore, nact, nmo))
+    return functions
+
+
+def coupled_reference_system(h1e_mo, eri_mo, civs, dets, *, ncore, nact,
+                             nmo=None, fock=None, rtol=1e-8):
+    """Assemble the S13 eq. 1 system over the union contraction basis.
+
+    The amplitude equation of Shiozaki et al. 2013, eq 1 (E_shift = 0),
+
+        <Omega|H0|Psi_N^(1)> - sum_M <Omega|Psi_M^(1)> <M|H0|N>
+            + <Omega|H|N> = 0,
+
+    is projected on the union of the contracted functions of all
+    references.  With ``A[i, j] = <Omega_i|H0|Omega_j>``,
+    ``S[i, j] = <Omega_i|Omega_j>``, ``W[i, N] = <Omega_i|H|N>`` and
+    ``F[M, N] = <M|H0|N>`` the projected equations are
+
+        A C - S C F = -W.
+
+    ``S`` is singular.  Its eigenpairs below ``rtol * max(ev_max, 1)``
+    are dropped, the same regularization as the release contracted
+    solver, and ``T`` maps the regularized amplitudes onto the union
+    coefficients, ``T^T S T = 1``:
+
+        (T^T A T) Y - Y F = -T^T W,    C = T Y.
+
+    The union functions are rows of the sparse matrix ``V`` over their
+    determinant support, so ``S = V V^T`` and ``A = V H0 V^T`` are
+    assembled by sparse algebra.  The two-body Hamiltonian elements come
+    from the release Slater-Condon kernel ``_sc_kernel`` and the
+    one-body zeroth-order action from ``_h0_action``.
+
+    ``fock`` is the full ``nmo x nmo`` generalized Fock matrix used for
+    both ``H0`` and ``F``.  Returns a dict with ``functions``,
+    ``index`` (determinant -> column), ``V``, ``S``, ``A``, ``W``,
+    ``T``, ``h0q``, ``wq``, ``ev``, ``keep`` and ``nd``.
+    """
+    import scipy.sparse as sp
+
+    from ..caspt2 import _h0_action, _sc_kernel
+
+    civs = np.asarray(civs, dtype=float)
+    if nmo is None:
+        nmo = np.asarray(h1e_mo).shape[0]
+    if fock is None:
+        raise ValueError('the reference-space coupling requires a Fock '
+                         'matrix')
+    functions = union_function_vectors(civs, dets, ncore, nact, nmo)
+
+    index = {}
+    for _, vec in functions:
+        for dd in vec:
+            if dd not in index:
+                index[dd] = len(index)
+    nd = len(index)
+    rows, cols, vals = [], [], []
+    for i, (_, vec) in enumerate(functions):
+        for dd, c in vec.items():
+            rows.append(i)
+            cols.append(index[dd])
+            vals.append(c)
+    V = sp.csr_matrix((vals, (rows, cols)), shape=(len(functions), nd))
+
+    h0_rows, h0_cols, h0_vals = [], [], []
+    cache = {}
+    for dd, ddi in index.items():
+        for tgt, val in _h0_action({dd: 1.0}, fock, nmo, cache).items():
+            j = index.get(tgt)
+            if j is not None:
+                h0_rows.append(ddi)
+                h0_cols.append(j)
+                h0_vals.append(val)
+    H0 = sp.csr_matrix((h0_vals, (h0_rows, h0_cols)), shape=(nd, nd))
+
+    S = np.asarray((V @ V.T).toarray())
+    S = 0.5 * (S + S.T)
+    A = V @ H0 @ V.T
+
+    h_elem, _ = _sc_kernel(h1e_mo, eri_mo)
+    refs = _reference_pairs(civs, dets)
+    Wd = np.zeros((nd, civs.shape[0]))
+    for N, ref in enumerate(refs):
+        for dd, ddi in index.items():
+            Wd[ddi, N] = sum(c * h_elem(J, dd) for J, c in ref
+                             if (J ^ dd).bit_count() <= 4)
+    W = np.asarray(V @ Wd)
+
+    ev, evec = np.linalg.eigh(S)
+    ev_max = max(float(ev.max()), 1.0)
+    keep = ev > rtol * ev_max
+    if not np.any(keep):
+        raise np.linalg.LinAlgError('empty overlap spectrum')
+    T = evec[:, keep] / np.sqrt(ev[keep])
+    h0q = T.T @ np.asarray(A @ T)
+    wq = T.T @ W
+    return {'functions': functions, 'index': index, 'V': V, 'S': S,
+            'A': A, 'W': W, 'T': T, 'h0q': h0q, 'wq': wq,
+            'ev': ev, 'keep': keep, 'nd': nd}
+
+
+def solve_coupled_amplitudes(h0q, wq, reference_fock):
+    """Solve ``h0q Y - Y F = -wq`` for the coupled amplitudes.
+
+    ``F`` is real symmetric and is diagonalized, which turns the
+    Sylvester equation into one shifted linear solve per reference.
+    Returns ``(Y, cross, overlap)`` with
+    ``cross = Y^T wq = <Psi_M^(1)|H|N>`` and
+    ``overlap = Y^T Y = <Psi_M^(1)|Psi_N^(1)>``.
+    """
+    reference_fock = np.asarray(reference_fock, dtype=float)
+    ef, U = np.linalg.eigh(0.5 * (reference_fock + reference_fock.T))
+    wp = wq @ U
+    yp = np.zeros_like(wp)
+    eye = np.eye(h0q.shape[0])
+    for j in range(wp.shape[1]):
+        matrix = h0q - ef[j] * eye
+        try:
+            yp[:, j] = np.linalg.solve(matrix, -wp[:, j])
+        except np.linalg.LinAlgError:
+            yp[:, j] = np.linalg.lstsq(matrix, -wp[:, j], rcond=1e-12)[0]
+    Y = yp @ U.T
+    return Y, Y.T @ wq, Y.T @ Y
 
 
 def state_averaged_density(civs, dets, norb):
@@ -244,12 +416,20 @@ def coupling_matrix(psis, civs, h1e_mo, eri_mo, dets):
 
 def build_heff(h1e_mo, eri_mo, civs, dets, *, ncore, nact, nele,
                H_model=None, det_index=None, fock_mode='sa', focks=None,
-               symmetrize_fock=False, rtol=1e-8):
+               symmetrize_fock=False, reference_coupling=False, rtol=1e-8):
     """Build and diagonalize the symmetrized effective Hamiltonian.
 
     ``fock_mode='sa'`` uses one state-averaged Fock operator for every
     state (the MS-MR and XMS choice); ``fock_mode='state'`` uses the
     state-specific operator of each reference (the SS-SR choice).
+
+    ``reference_coupling=True`` adds the reference-space coupling term
+    of Shiozaki et al. 2013, eq 1, and expands the first-order space in
+    the union of the contracted functions of all references.  It
+    requires ``fock_mode='sa'`` (S13 eq 3 defines a single Fock
+    operator).  With one reference state the coupling term is empty and
+    the release solver is used unchanged, so the single-state limit stays
+    bitwise identical.
     """
     civs = np.asarray(civs, dtype=float)
     n = civs.shape[0]
@@ -259,6 +439,46 @@ def build_heff(h1e_mo, eri_mo, civs, dets, *, ncore, nact, nele,
         H_model = model_hamiltonian(h1e_mo, eri_mo, dets, ncore, nact, nele)
     if det_index is None:
         det_index = {d: i for i, d in enumerate(dets)}
+
+    if reference_coupling and fock_mode != 'sa':
+        raise ValueError("reference_coupling requires fock_mode='sa'")
+
+    if reference_coupling and n > 1:
+        f = averaged_fock(h1e_mo, eri_mo, civs, dets, norb)
+        if focks is not None:
+            if np.ndim(focks) != 2:
+                raise ValueError('reference_coupling requires one shared '
+                                 'Fock matrix')
+            f = np.asarray(focks, dtype=float)
+        system = coupled_reference_system(
+            h1e_mo, eri_mo, civs, dets, ncore=ncore, nact=nact,
+            nmo=np.asarray(h1e_mo).shape[0], fock=f, rtol=rtol)
+        F = reference_fock_matrix(f, civs, dets, norb)
+        Y, cross, overlap = solve_coupled_amplitudes(system['h0q'],
+                                                     system['wq'], F)
+        amplitudes = system['T'] @ Y
+        records = [{'x': amplitudes[:, N].copy(),
+                    'functions': system['functions'],
+                    'E0': float(F[N, N])} for N in range(n)]
+        psis = first_order_vectors(records)
+        Href = civs @ H_model @ civs.T
+        H_eff = Href + 0.5 * (cross + cross.T)
+        energies = np.linalg.eigvalsh(H_eff)
+        return {
+            'H_eff': H_eff,
+            'H_ref': Href,
+            'cross': cross,
+            'energies': energies,
+            'e2': np.diag(cross).copy(),
+            'E0': np.diag(F).copy(),
+            'reference_fock': F,
+            'civs': civs,
+            'records': records,
+            'psis': psis,
+            'amplitudes': amplitudes,
+            'overlap': overlap,
+            'coupled_system': system,
+        }
 
     if fock_mode == 'sa':
         f = averaged_fock(h1e_mo, eri_mo, civs, dets, norb)
@@ -299,20 +519,40 @@ def build_heff(h1e_mo, eri_mo, civs, dets, *, ncore, nact, nele,
     }
 
 
-def solve_ms(h1e_mo, eri_mo, civs, dets, **kwargs):
-    """MS-CASPT2: diagonal Fock projection, no rotation of the references."""
-    out = build_heff(h1e_mo, eri_mo, civs, dets, **kwargs)
-    out['scheme'] = 'MS-CASPT2'
+def solve_ms(h1e_mo, eri_mo, civs, dets, *, reference_coupling=True,
+             **kwargs):
+    """MS-CASPT2.
+
+    With the default ``reference_coupling=True`` the amplitudes include
+    the S13 eq. 1 reference-space coupling term and the first-order
+    space is the union of the contracted functions of all references;
+    the eigenvalue spectrum is then invariant under unitary rotations of
+    the reference states.  ``reference_coupling=False`` reproduces the
+    legacy CR20 eq. 16 diagonal-projection scheme, which is not
+    invariant and is kept for the contrast in the rotation test.
+    """
+    out = build_heff(h1e_mo, eri_mo, civs, dets,
+                     reference_coupling=reference_coupling, **kwargs)
+    out['scheme'] = ('MS-CASPT2 (S13 eq. 1)' if reference_coupling
+                     else 'MS-CASPT2 (diagonal projection)')
     return out
 
 
 def solve_xms(h1e_mo, eri_mo, civs, dets, *, ncore, nact, nele,
-              fock_mode='sa', rtol=1e-8, **kwargs):
+              fock_mode='sa', rtol=1e-8, reference_coupling=False,
+              **kwargs):
     """XMS-CASPT2: rotate the references onto the Fock eigenbasis first.
 
     The rotation is the ``P f P`` diagonalization of Chem. Rev. 2020 eq
     18.  With ``fock_mode='state'`` the state-specific Fock elements are
     symmetrized first (Park 2019 Supporting Information eq S4).
+
+    ``reference_coupling=True`` additionally expands the first-order
+    space in the union of the contracted functions of all references
+    (the S13 eq. 1 MS-MR contraction).  The rotated reference basis
+    makes ``F`` diagonal, so the coupled equations decouple; the
+    resulting spectrum coincides with ``solve_ms`` with the coupling
+    term, which is the basis-rotation invariance of the method.
     """
     civs = np.asarray(civs, dtype=float)
     n = civs.shape[0]
@@ -330,7 +570,8 @@ def solve_xms(h1e_mo, eri_mo, civs, dets, *, ncore, nact, nele,
     civs_rot = U.T @ civs
     out = build_heff(h1e_mo, eri_mo, civs_rot, dets, ncore=ncore,
                      nact=nact, nele=nele, fock_mode=fock_mode,
-                     symmetrize_fock=(fock_mode == 'state'), rtol=rtol,
+                     symmetrize_fock=(fock_mode == 'state'),
+                     reference_coupling=reference_coupling, rtol=rtol,
                      **kwargs)
     out['scheme'] = 'XMS-CASPT2'
     out['rotation'] = U
