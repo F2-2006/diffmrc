@@ -485,6 +485,12 @@ def qdpt_levels(space, h, prefactor, states=None, diagonal=None):
         H[2 * a + 1, 2 * a + 1] = e[a]
     H = H + Hso
     herm = float(np.abs(H - H.conj().T).max())
+    # ``eigh`` assumes a Hermitian matrix and reads one triangle; feeding the
+    # raw assembly would let a small non-Hermitian residual leak into the
+    # spectrum (observed at 5e-10 in a long full-suite run, which split the
+    # Kramers pairs by 1e-4 cm^-1).  Symmetrize before diagonalizing and keep
+    # the pre-symmetrization residual as the diagnostic reported above.
+    H = 0.5 * (H + H.conj().T)
     w, u = np.linalg.eigh(H)
     w = w - w[0]
     # Kramers: every level must be at least doubly degenerate.
