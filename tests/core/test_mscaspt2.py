@@ -188,3 +188,155 @@ def test_heff_symmetric(small_system):
     out = solve_ms(small_system['h1_mo'], small_system['eri_mo'],
                    small_system['civs'], small_system['dets'], **common)
     assert np.allclose(out['H_eff'], out['H_eff'].T, atol=1e-12)
+
+
+def test_h0_matrix_matches_reference_assembly(small_system):
+    """The vectorized H0 equals the per-determinant release assembly."""
+    from diffmrc.core.caspt2 import _h0_action
+    from diffmrc.core.mscaspt2.matrix_free import (
+        determinant_support, h0_determinant_matrix)
+    from diffmrc.core.mscaspt2.ms import averaged_fock, union_function_vectors
+
+    ncore, nact = small_system['ncore'], small_system['nact']
+    nmo = small_system['nmo']
+    funcs = union_function_vectors(small_system['civs'],
+                                   small_system['dets'], ncore, nact, nmo)
+    dets = determinant_support(funcs)
+    f = averaged_fock(small_system['h1_mo'], small_system['eri_mo'],
+                      small_system['civs'], small_system['dets'],
+                      ncore + nact)
+    H0 = h0_determinant_matrix(f, dets)
+    index = {int(d): i for i, d in enumerate(dets)}
+    cache = {}
+    for dd, i in index.items():
+        ref = {index[t]: v for t, v in
+               _h0_action({dd: 1.0}, f, nmo, cache).items() if t in index}
+        lo, hi = H0.indptr[i], H0.indptr[i + 1]
+        new = dict(zip(H0.indices[lo:hi].tolist(), H0.data[lo:hi]))
+        assert set(ref) == set(new)
+        for j, v in ref.items():
+            assert abs(v - new[j]) < 1e-11
+
+
+def test_projected_coupling_matches_scan(small_system):
+    """The enumerated Slater-Condon coupling equals the direct scan."""
+    from diffmrc.core.caspt2 import _sc_kernel
+    from diffmrc.core.mscaspt2.matrix_free import (
+        determinant_support, projected_coupling)
+    from diffmrc.core.mscaspt2.ms import (_reference_pairs,
+                                          union_function_vectors)
+
+    ncore, nact = small_system['ncore'], small_system['nact']
+    nmo = small_system['nmo']
+    funcs = union_function_vectors(small_system['civs'],
+                                   small_system['dets'], ncore, nact, nmo)
+    dets = determinant_support(funcs)
+    refs = _reference_pairs(small_system['civs'], small_system['dets'])
+    Wd = projected_coupling(small_system['h1_mo'], small_system['eri_mo'],
+                            refs, dets)
+    h_elem, _ = _sc_kernel(small_system['h1_mo'], small_system['eri_mo'])
+    index = {int(d): i for i, d in enumerate(dets)}
+    Wd_ref = np.zeros_like(Wd)
+    for N, ref in enumerate(refs):
+        for dd, ddi in index.items():
+            Wd_ref[ddi, N] = sum(c * h_elem(J, dd) for J, c in ref
+                                 if (J ^ dd).bit_count() <= 4)
+    assert np.allclose(Wd, Wd_ref, atol=1e-12)
+
+
+def test_matrix_free_matches_dense_coupled(small_system):
+    """The matrix-free solve reproduces the dense coupled system."""
+    from diffmrc.core.mscaspt2.ms import solve_ms
+    common = dict(ncore=small_system['ncore'], nact=small_system['nact'],
+                  nele=small_system['nele'],
+                  H_model=small_system['H_model'],
+                  det_index=small_system['det_index'])
+    dense = solve_ms(small_system['h1_mo'], small_system['eri_mo'],
+                     small_system['civs'], small_system['dets'], **common)
+    mf = solve_ms(small_system['h1_mo'], small_system['eri_mo'],
+                  small_system['civs'], small_system['dets'],
+                  matrix_free=True, matrix_free_rtol=1e-12, **common)
+    assert mf['matrix_free'] is True
+    assert np.allclose(mf['energies'], dense['energies'], atol=1e-9)
+    assert np.allclose(mf['cross'], dense['cross'], atol=1e-9)
+    assert np.allclose(mf['overlap'], dense['overlap'], atol=1e-9)
+
+
+def test_matrix_free_is_rotation_invariant(small_system):
+    """The matrix-free coupled spectrum does not depend on the basis."""
+    from diffmrc.core.mscaspt2.ms import random_unitary, solve_ms
+    common = dict(ncore=small_system['ncore'], nact=small_system['nact'],
+                  nele=small_system['nele'],
+                  H_model=small_system['H_model'],
+                  det_index=small_system['det_index'])
+    civs = small_system['civs']
+    Q = random_unitary(civs.shape[0], seed=11)
+    base = solve_ms(small_system['h1_mo'], small_system['eri_mo'], civs,
+                    small_system['dets'], matrix_free=True,
+                    matrix_free_rtol=1e-12, **common)
+    rot = solve_ms(small_system['h1_mo'], small_system['eri_mo'],
+                   Q.T @ civs, small_system['dets'], matrix_free=True,
+                   matrix_free_rtol=1e-12, **common)
+    assert np.allclose(base['energies'], rot['energies'], atol=1e-9)
+
+
+def test_matrix_free_requires_coupling(small_system):
+    """``matrix_free`` is only defined on the coupled union path."""
+    from diffmrc.core.mscaspt2.ms import solve_ms
+    common = dict(ncore=small_system['ncore'], nact=small_system['nact'],
+                  nele=small_system['nele'],
+                  H_model=small_system['H_model'],
+                  det_index=small_system['det_index'])
+    with pytest.raises(ValueError):
+        solve_ms(small_system['h1_mo'], small_system['eri_mo'],
+                 small_system['civs'], small_system['dets'],
+                 reference_coupling=False, matrix_free=True, **common)
+    with pytest.raises(ValueError):
+        solve_ms(small_system['h1_mo'], small_system['eri_mo'],
+                 small_system['civs'][:1], small_system['dets'],
+                 matrix_free=True, **common)
+
+
+def test_operator_diagonal_matches_dense(small_system):
+    """``diag(V H0 V^T)`` from the determinant diagonal is exact here."""
+    from diffmrc.core.mscaspt2.matrix_free import (
+        coupled_reference_system_mf, operator_diagonal)
+    from diffmrc.core.mscaspt2.ms import averaged_fock
+
+    ncore, nact = small_system['ncore'], small_system['nact']
+    f = averaged_fock(small_system['h1_mo'], small_system['eri_mo'],
+                      small_system['civs'], small_system['dets'],
+                      ncore + nact)
+    system = coupled_reference_system_mf(
+        small_system['h1_mo'], small_system['eri_mo'],
+        small_system['civs'], small_system['dets'],
+        ncore=ncore, nact=nact, nmo=small_system['nmo'], fock=f)
+    V, H0 = system['V'], system['H0']
+    A = (V @ H0 @ V.T).toarray()
+    for shift in (0.0, -0.7, 2.5):
+        diag, diag_s, diag_a = operator_diagonal(V, system['h0_diag'], shift)
+        assert np.allclose(diag, np.diag(A) - shift * diag_s, atol=1e-10)
+
+
+def test_matrix_free_preconditioning_matches_plain(small_system):
+    """The diagonal congruence does not change the converged spectrum."""
+    from diffmrc.core.mscaspt2.matrix_free import (
+        coupled_reference_system_mf, solve_coupled_amplitudes_mf)
+    from diffmrc.core.mscaspt2.ms import averaged_fock, reference_fock_matrix
+
+    civs = small_system['civs']
+    ncore, nact = small_system['ncore'], small_system['nact']
+    f = averaged_fock(small_system['h1_mo'], small_system['eri_mo'], civs,
+                      small_system['dets'], ncore + nact)
+    system = coupled_reference_system_mf(
+        small_system['h1_mo'], small_system['eri_mo'], civs,
+        small_system['dets'], ncore=ncore, nact=nact,
+        nmo=small_system['nmo'], fock=f)
+    F = reference_fock_matrix(f, civs, small_system['dets'], ncore + nact)
+    args = (system['V'], system['H0'], system['W'], F)
+    C0, cross0, _, info0 = solve_coupled_amplitudes_mf(
+        *args, rtol=1e-12, precondition=False, h0_diag=None)
+    C1, cross1, _, info1 = solve_coupled_amplitudes_mf(
+        *args, rtol=1e-12, precondition=True, h0_diag=system['h0_diag'])
+    assert np.allclose(cross1, cross0, atol=1e-9)
+    assert info1['iterations'] <= info0['iterations']

@@ -39,6 +39,26 @@ manual/         Tutorial and Manual (LaTeX sources and built PDFs)
 
 ## What is new in 0.3.x
 
+- Multistate CASPT2 without the dense union matrices: `build_heff(...,
+  matrix_free=True)` (and `solve_ms` / `solve_xms`) applies
+  `S c = V (V^T c)` and `A c = V (H0 (V^T c))` through the sparse union
+  function matrix and solves the shifted Sylvester columns with LSMR stopped
+  on the relative residual. A diagonal congruence with `|diag(A - E S)|`,
+  built from the determinant diagonal of `H0`, takes H2O CAS(2,2)/6-31G from
+  3697 to 155 iterations while the coupled spectrum stays within 7.7e-12 eV
+  of the dense route and the rotation spread at or below 1.4e-11 eV. The
+  determinant-basis `H0` and the projected coupling `W` are assembled with
+  vectorized bit operations (N2 CAS(6,6)/6-31G, 8052 functions and 922000
+  determinants: 45 to 61 s and 3.2 s, against 636 s and 41.4 s for the
+  per-element reference loops). The three-state union of the same molecule
+  (24156 functions, 943760 determinants) builds in 138 s at a 1848 MB peak;
+  the coupled solve itself is the remaining cost: the single-state diagonal
+  solve takes 6531 LSMR iterations and does not reach 1e-8 within a 30 minute
+  job, and one three-state column runs 3834 iterations to a 7.9e-4 relative
+  residual in 901 s (0.233 s per iteration, 1092 MB), while the regularized
+  dense system it replaces would need 4.35 GiB for `S` alone. The gap is the
+  scaling of the union basis, not the physical spectrum: the regularized
+  N2 single-state denominators span 0.764 to 35.31 Eh (condition number 46).
 - CI spin-sector projection: the NEVPT2 core classes project the determinant
   CI vector onto the alpha-beta layout of one M_S sector. An odd
   active-electron count has two exactly degenerate lowest sectors and the

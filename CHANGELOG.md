@@ -163,6 +163,44 @@
 - `core.casci`: the `pyscfad` SCF import moved into
   `casci_energy_from_mol`, so the determinant-space kernels load on a
   machine without pyscfad.
+- `core.mscaspt2`: the S13 eq. 1 reference-space coupling no longer needs the
+  `n_fn x n_fn` overlap and zeroth-order matrices. `build_heff(...,
+  matrix_free=True)` and the `solve_ms`/`solve_xms` entry points apply
+  `S c = V (V^T c)` and `A c = V (H0 (V^T c))` through the sparse union
+  function matrix and solve the shifted Sylvester columns with
+  `core.lsmr.lsmr_solve`, stopped on the relative residual with no iteration
+  cap. The right-hand side is `V W_d`, so the iterates stay in the range of
+  `V` and the minimum-norm solution coincides with the regularized dense one
+  whenever the discarded overlap eigenvalues are exact zeros. A diagonal
+  congruence with `|diag(A - E S)|`, evaluated from the determinant diagonal
+  of `H0`, removes the spread of the eight contraction-class
+  normalizations: on H2O CAS(2,2)/6-31G the solve drops from 3697 to 155
+  iterations (three columns) and the coupled spectrum matches the dense
+  route to 7.7e-12 eV at r_OH = 0.96 A, 1.2e-12 at 1.30 A and 7.7e-12 at
+  1.80 A, with the four-seed rotation spread at or below 1.4e-11 eV and the
+  matrix-free MS / XMS difference at or below 6.6e-12 eV.
+- `core.mscaspt2.matrix_free`: vectorized determinant-basis `H0 = sum_pq
+  f[pq] E(pq)` from occupation bits and fermionic phases (`h0_diagonal`,
+  `h0_determinant_matrix`), element-for-element identical to the
+  per-determinant `caspt2._h0_action` assembly (2.1e-14 on H2O). On the N2
+  CAS(6,6)/6-31G single-state support (8052 functions, 922000 determinants)
+  it builds 5.33e7 nonzeros in 45 to 61 s against 636 s for the
+  per-determinant loop, and the whole coupled-system build (V, H0, W) runs
+  in 71 s at a 1789 MB peak. The three-state union (24156 functions,
+  943760 determinants, 1.29e7 V nonzeros, 5.52e7 H0 nonzeros) builds in
+  138 s at a 1848 MB peak, where the dense `S` alone would need 4.35 GiB.
+  The remaining cost is the iteration count: the N2 single-state solve needs
+  6531 LSMR iterations (1190 s) to a 1.28e-4 relative residual and one
+  three-state column 3834 iterations (901 s) to 7.94e-4, against a
+  regularized system whose N2 denominators span 0.764 to 35.31 Eh
+  (condition number 46) -- the union basis, not the physics, sets the
+  conditioning.
+- `core.mscaspt2.matrix_free.projected_coupling`: the projected coupling
+  `W = V W_d` from the singles and doubles of every reference determinant
+  with the release Slater-Condon phases, instead of evaluating the kernel on
+  every (reference, determinant) pair. Identical to the scan
+  element-for-element (3.6e-16 on H2O; 3.9e-16 on the full N2 single-state
+  support) at 3.2 s against 41.4 s for the scan there.
 
 ### Changed
 

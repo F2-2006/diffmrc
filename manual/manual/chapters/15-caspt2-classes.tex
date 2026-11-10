@@ -238,14 +238,22 @@ default-path ratio is $0.983$; the difference between the two reference
 sets is a property of the reference calculation, not of the class
 treatment.
 
-A residual remains, and it is a class-space difference rather than a
-numerical one.  \texttt{V1\_ija} stands at $1.553$ of the ORCA
-CASPT2-D value in every basis, because the diagonal approximation of
-that class is gauge dependent (random gauges inside the degenerate
-overlap blocks span $0.88$ to $1.29$ of the reference) while its exact
-class-block value is gauge invariant at $1.553$.  ORCA prints 192
-functions for the class against the 768 of the plain-product basis, so
-the two programs are contracting different class spaces.
+A residual remains, and it is a class-pool definition difference rather
+than a numerical one.  Read at full core, \texttt{V1\_ija} stands at
+$1.553$ of the ORCA CASPT2-D value in every basis.  The diagonal
+approximation of that class is gauge dependent in the full-core pool
+(random gauges inside the degenerate overlap blocks span $0.879$ to
+$0.895$ of the reference, the raw LAPACK basis $1.293$), while its
+exact class-block value is gauge invariant at $1.553$.  The ORCA count
+of 192 functions is the frozen-core plain-product count,
+$m^{2}n_{\mathrm{act}}n_{\mathrm{vir}}=192$ with
+$m=n_{\mathrm{core}}-n_{\mathrm{frozen}}=2$; the four-core
+plain-product basis of the release reference has 768 functions.  ORCA
+freezes the two N $1s$ orbitals, while the release reference and its
+class table correlate all four core orbitals, so the two programs count
+the same class under different frozen-core settings.  The worked
+example below shows that matching the frozen-core setting closes the
+class table.
 
 \subsection{The coupled full-Fock system}
 
@@ -400,8 +408,8 @@ Path & Total ratio & Class evidence \\
 default (\texttt{function}) &
   $0.989$ (Wave~12 frozen), $0.983$ (release, one BLAS thread) &
   apparent agreement is a cancellation: \texttt{V1\_ija} $1.553$
-  ($+55\%$), \texttt{V2\_ij} $0.24$ ($-76\%$), \texttt{V0\_ia} $+10\%$,
-  \texttt{Vm2\_ab} $+12\%$ \\
+  ($+55\%$, full core against ORCA's frozen core), \texttt{V2\_ij}
+  $0.24$ ($-76\%$), \texttt{V0\_ia} $+10\%$, \texttt{Vm2\_ab} $+12\%$ \\
 class-block &
   $1.0232$ &
   \texttt{Vm2\_ab} $1.0000$, \texttt{V0\_ia} $0.9970$; the class
@@ -427,6 +435,19 @@ reading and the coupled path agree on the total because both include
 the intra-class coupling; they differ in what they keep beyond that,
 and the agreement is the diagnostic that the class-space projection is
 the missing piece of the default path.
+
+{\sloppy
+The class table closes once the class pools match ORCA's frozen-core
+setting.  With \texttt{frozen\_core}$=2$,
+\texttt{class\_diagonal='block'}, \texttt{v0\_ia='class\_ordered'} and
+\texttt{three\_active='block'}, all eight classes are within $0.9995$ to
+$1.0001$ of the ORCA CASPT2-D values and the total is $-0.071518650$~Eh
+against $-0.071520733$~Eh ($0.999971$).  The release defaults keep
+\texttt{frozen\_core}$=0$, \texttt{v0\_ia='block'} and
+\texttt{three\_active='diagonal'} because the reference and its pins
+were generated with those settings; the ORCA-compatible setting is
+opt-in.  The default-path total of $0.989$ is therefore a cancellation
+between class errors, not an accuracy statement.\par}
 
 \subsection{H\texorpdfstring{$_2$}{2}O/6-31G and CO/6-31G: the
 CAS(2,2) class table}
@@ -558,11 +579,15 @@ without \texttt{factors.jhalf} changes the energy by the metric factor.
   \texttt{'replica'} drops $(u,u)$ rows beyond the first active orbital.
   It is exact only for a two-orbital active space; on larger spaces the
   rows are not replicas unless the block projection is used.
-\item \emph{The \texttt{V1\_ija} class-space residual.}  It stands at
-  $1.553$ of the ORCA value in every basis and does not shrink with the
-  basis set.  This is a definition difference (ORCA prints 192
-  functions for the class against 768 in the plain-product basis), not
-  a convergence artifact.
+\item \emph{The \texttt{V1\_ija} class-space residual.}  Read at full
+  core it stands at $1.553$ of the ORCA value in every basis and does
+  not shrink with the basis set.  This is a frozen-core definition
+  difference, not a convergence artifact: the ORCA count of 192
+  functions is the frozen-core plain-product count
+  ($m^{2}n_{\mathrm{act}}n_{\mathrm{vir}}=192$ with
+  $m=n_{\mathrm{core}}-n_{\mathrm{frozen}}=2$), against $768$ for the
+  four-core pool.  Pass \texttt{frozen\_core}$=2$ with
+  \texttt{class\_diagonal='block'} to compare this class against ORCA.
 \item \emph{Using the three-center path as a different method.}  It is
   the same CASPT2-D energy with RI integrals; the RI fitting error
   enters through \texttt{u\_mo}.
@@ -600,7 +625,12 @@ Three paths &
   N$_2$/6-31G CAS(6,6) &
   default $0.989$, class-block $1.0232$, coupled $1.0232$;
   \texttt{Vm2\_ab} $1.0000$, \texttt{V0\_ia} $0.9970$,
-  \texttt{V1\_ija} $1.553$, \texttt{V2\_ij} $0.24$ \\
+  \texttt{V1\_ija} $1.553$ (full core), \texttt{V2\_ij} $0.24$ \\
+Frozen-core class table &
+  N$_2$/6-31G CAS(6,6) &
+  \texttt{frozen\_core}$=2$ with the exact class-block reading: eight
+  classes $0.9995$-$1.0001$ of ORCA CASPT2-D, total $-0.071518650$~Eh
+  against $-0.071520733$~Eh ($0.999971$) \\
 Coupled path &
   H$_2$O, CO CAS(2,2) &
   totals $1.0081$, $1.0100$; N$_2$ diagonal/full ratio $0.9795831$

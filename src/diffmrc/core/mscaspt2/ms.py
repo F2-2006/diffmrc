@@ -141,7 +141,8 @@ def _reference_pairs(civs, dets):
             for ci in civs]
 
 
-def union_function_vectors(civs, dets, ncore, nact, nmo):
+def union_function_vectors(civs, dets, ncore, nact, nmo,
+                           with_labels=False):
     """Union of the release contracted functions over all references.
 
     Shiozaki, Woywod and Werner, Phys. Chem. Chem. Phys. 2013, 15, 262,
@@ -151,12 +152,21 @@ def union_function_vectors(civs, dets, ncore, nact, nmo):
     The per-reference lists come from the release kernel
     ``_class_function_vectors``; no operator or class rule is
     reimplemented here.
+
+    ``with_labels=True`` also returns one ``(reference, class)`` label per
+    function, which is what the block preconditioner of the matrix-free
+    path groups on.
     """
     from ..caspt2 import _class_function_vectors
 
     functions = []
-    for ref in _reference_pairs(civs, dets):
-        functions.extend(_class_function_vectors(ref, ncore, nact, nmo))
+    labels = []
+    for iref, ref in enumerate(_reference_pairs(civs, dets)):
+        for name, vec in _class_function_vectors(ref, ncore, nact, nmo):
+            functions.append((name, vec))
+            labels.append((iref, name))
+    if with_labels:
+        return functions, labels
     return functions
 
 
@@ -253,8 +263,8 @@ def coupled_reference_system(h1e_mo, eri_mo, civs, dets, *, ncore, nact,
     h0q = T.T @ np.asarray(A @ T)
     wq = T.T @ W
     return {'functions': functions, 'index': index, 'V': V, 'S': S,
-            'A': A, 'W': W, 'T': T, 'h0q': h0q, 'wq': wq,
-            'ev': ev, 'keep': keep, 'nd': nd}
+            'A': A, 'H0': H0, 'W': W, 'Wd': Wd, 'T': T, 'h0q': h0q,
+            'wq': wq, 'ev': ev, 'keep': keep, 'nd': nd}
 
 
 def solve_coupled_amplitudes(h0q, wq, reference_fock):
@@ -414,9 +424,55 @@ def coupling_matrix(psis, civs, h1e_mo, eri_mo, dets):
     return cross
 
 
+def _build_heff_matrix_free(h1e_mo, eri_mo, civs, dets, *, H_model, f,
+                            ncore, nact, norb, rtol, time_limit,
+                            return_psis):
+    """The coupled union path without the dense overlap and H0 matrices."""
+    from .matrix_free import (coupled_reference_system_mf,
+                              solve_coupled_amplitudes_mf)
+
+    civs = np.asarray(civs, dtype=float)
+    n = civs.shape[0]
+    nmo = np.asarray(h1e_mo).shape[0]
+    system = coupled_reference_system_mf(
+        h1e_mo, eri_mo, civs, dets, ncore=ncore, nact=nact, nmo=nmo,
+        fock=f)
+    F = reference_fock_matrix(f, civs, dets, norb)
+    amplitudes, cross, overlap, info = solve_coupled_amplitudes_mf(
+        system['V'], system['H0'], system['W'], F, rtol=rtol,
+        time_limit=time_limit, h0_diag=system['h0_diag'],
+        labels=system['labels'])
+    records = [{'x': amplitudes[:, N].copy(),
+                'functions': system['functions'],
+                'E0': float(F[N, N])} for N in range(n)]
+    psis = first_order_vectors(records) if return_psis else None
+    Href = civs @ H_model @ civs.T
+    H_eff = Href + 0.5 * (cross + cross.T)
+    energies = np.linalg.eigvalsh(H_eff)
+    return {
+        'H_eff': H_eff,
+        'H_ref': Href,
+        'cross': cross,
+        'energies': energies,
+        'e2': np.diag(cross).copy(),
+        'E0': np.diag(F).copy(),
+        'reference_fock': F,
+        'civs': civs,
+        'records': records,
+        'psis': psis,
+        'amplitudes': amplitudes,
+        'overlap': overlap,
+        'coupled_system': system,
+        'matrix_free': True,
+        'mf_info': info,
+    }
+
+
 def build_heff(h1e_mo, eri_mo, civs, dets, *, ncore, nact, nele,
                H_model=None, det_index=None, fock_mode='sa', focks=None,
-               symmetrize_fock=False, reference_coupling=False, rtol=1e-8):
+               symmetrize_fock=False, reference_coupling=False, rtol=1e-8,
+               matrix_free=False, matrix_free_rtol=1e-10,
+               matrix_free_time_limit=None, return_psis=True):
     """Build and diagonalize the symmetrized effective Hamiltonian.
 
     ``fock_mode='sa'`` uses one state-averaged Fock operator for every
@@ -430,6 +486,18 @@ def build_heff(h1e_mo, eri_mo, civs, dets, *, ncore, nact, nele,
     operator).  With one reference state the coupling term is empty and
     the release solver is used unchanged, so the single-state limit stays
     bitwise identical.
+
+    ``matrix_free=True`` solves the same coupled system without forming
+    the ``n_fn x n_fn`` overlap and zeroth-order matrices: the shifted
+    systems ``(A - E_j S) c_j = -W_j`` are handed to LSMR with the
+    operator actions ``S c = V (V^T c)`` and ``A c = V (H0 (V^T c))``
+    (see :mod:`diffmrc.core.mscaspt2.matrix_free`).  ``rtol`` keeps its
+    meaning as the overlap-regularization threshold of the dense route
+    and is not used on this path; ``matrix_free_rtol`` is the relative
+    residual the iterative solve is driven to and
+    ``matrix_free_time_limit`` its wall-clock guard.  ``return_psis``
+    costs one determinant dictionary per state over the union support
+    and can be switched off on systems where that does not fit.
     """
     civs = np.asarray(civs, dtype=float)
     n = civs.shape[0]
@@ -442,6 +510,10 @@ def build_heff(h1e_mo, eri_mo, civs, dets, *, ncore, nact, nele,
 
     if reference_coupling and fock_mode != 'sa':
         raise ValueError("reference_coupling requires fock_mode='sa'")
+    if matrix_free and not (reference_coupling and n > 1):
+        raise ValueError('matrix_free requires the coupled union path '
+                         '(reference_coupling=True and at least two '
+                         'reference states)')
 
     if reference_coupling and n > 1:
         f = averaged_fock(h1e_mo, eri_mo, civs, dets, norb)
@@ -450,6 +522,12 @@ def build_heff(h1e_mo, eri_mo, civs, dets, *, ncore, nact, nele,
                 raise ValueError('reference_coupling requires one shared '
                                  'Fock matrix')
             f = np.asarray(focks, dtype=float)
+        if matrix_free:
+            return _build_heff_matrix_free(
+                h1e_mo, eri_mo, civs, dets, H_model=H_model, f=f,
+                ncore=ncore, nact=nact, norb=norb,
+                rtol=matrix_free_rtol, time_limit=matrix_free_time_limit,
+                return_psis=return_psis)
         system = coupled_reference_system(
             h1e_mo, eri_mo, civs, dets, ncore=ncore, nact=nact,
             nmo=np.asarray(h1e_mo).shape[0], fock=f, rtol=rtol)
