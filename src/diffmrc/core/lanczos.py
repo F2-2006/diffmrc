@@ -135,11 +135,24 @@ _FINE_EPS = 1e-9
 _RIDGE = 1e-8
 
 
-def _generic_start(n):
+def _generic_start(n, seed=_FILL_SEED, seed2=_FILL_SEED2):
     """A deterministic, structure-free vector (no random state)."""
     idx = jnp.arange(1.0, n + 1.0)
-    v = jnp.sin(_FILL_SEED * idx + 0.4) + 0.35 * jnp.cos(_FILL_SEED2 * idx)
+    v = jnp.sin(seed * idx + 0.4) + 0.35 * jnp.cos(seed2 * idx)
     return v / jnp.linalg.norm(v)
+
+
+# Refill candidates for a Krylov space that has closed before depth m. A
+# single fixed candidate is not enough: measured on the CO/6-31G active
+# 1-RDM block (n = 6, m = 5), the old refill vector lay inside the span of
+# the four existing columns (orthogonalized norm 3.6e-17), so the fifth
+# column carried no new direction, Q lost orthonormality, the forward
+# vector collapsed to norm 1e-17, and the IFT polish -- whose bordered
+# system divides by (u^T u - 1) -- returned 2.55e6 against a lowest
+# eigenvalue of 3.52e-3. Four independent deterministic candidates are
+# orthogonalized and the largest-norm one is kept; the same block then
+# returns the exact value (1.5e-16).
+_FILL_CANDIDATES = ((1.7, 2.9), (3.1, 5.3), (7.9, 11.3), (13.7, 17.9))
 
 
 def _lowest_pair_solve(t, n_deep=60, n_fine=4):
@@ -208,7 +221,7 @@ def _lanczos_forward(a, m=None, v0=None):
     a = 0.5 * (a + a.T)
     q = _generic_start(n) if v0 is None else v0 / jnp.linalg.norm(v0)
     Q = q[:, None]
-    fill0 = _generic_start(n + 1)[: n]
+    fills = [_generic_start(n, s1, s2) for s1, s2 in _FILL_CANDIDATES]
     for _ in range(m - 1):
         w = a @ q
         # Full reorthogonalization, twice (the second pass removes the
@@ -217,10 +230,19 @@ def _lanczos_forward(a, m=None, v0=None):
         w = w - Q @ (Q.T @ w)
         beta = jnp.linalg.norm(w)
         alive = beta > _BETA_FLOOR
-        fill = fill0 - Q @ (Q.T @ fill0)
-        fill = fill - Q @ (Q.T @ fill)
-        fnorm = jnp.linalg.norm(fill)
-        fill = fill / jnp.where(fnorm > _BETA_FLOOR, fnorm, 1.0)
+        # Largest-norm refill over the candidate set (see _FILL_CANDIDATES:
+        # one fixed vector can lie inside the span and leave a zero column).
+        fill = jnp.zeros(n)
+        best = -1.0
+        for cand in fills:
+            f = cand - Q @ (Q.T @ cand)
+            f = f - Q @ (Q.T @ f)
+            fnorm = jnp.linalg.norm(f)
+            better = fnorm > best
+            fill = jnp.where(better,
+                             f / jnp.where(fnorm > _BETA_FLOOR, fnorm, 1.0),
+                             fill)
+            best = jnp.where(better, fnorm, best)
         q = jnp.where(alive, w / jnp.where(alive, beta, 1.0), fill)
         Q = jnp.concatenate([Q, q[:, None]], axis=1)
     T = Q.T @ (a @ Q)

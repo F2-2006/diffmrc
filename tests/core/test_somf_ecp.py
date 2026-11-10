@@ -162,6 +162,9 @@ def test_valence_somf_linear_in_density(gef):
 
 
 def test_valence_somf_explicit_matches_direct(gef):
+    pytest.importorskip('pyscf.prop.gtensor.uhf',
+                        reason='the direct route needs pyscf.prop, which '
+                               'some pyscf builds do not ship')
     mol, p = gef
     h_exp = dsomf.somf_two_electron(mol, p, contract='explicit')
     h_dir = dsomf.somf_two_electron(mol, p, contract='direct')

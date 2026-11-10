@@ -32,8 +32,11 @@ import jax
 
 __all__ = ['StationaryPoint', 'StopReason', 'CurvatureReport',
            'StationaryCandidate', 'SelectionResult',
+           'SpectrumPoint', 'StationarySpectrum', 'BasinHoppingStep',
+           'BasinHoppingResult',
            'refine_stationary_point', 'curvature_report',
-           'select_stationary_point']
+           'select_stationary_point', 'cluster_stationary_points',
+           'basin_hopping_search']
 
 # The energy test is a guard against divergence, not a measure of
 # progress, so it allows a step that leaves the energy unchanged to
@@ -274,8 +277,11 @@ def select_stationary_point(candidates, target=1e-11, energy_tol=1e-6):
        is the next distinct energy among *all* stationary candidates (a
        lower saddle is useful context) for the caller to report.
 
-    This is a selection rule, not a search strategy: generating the
-    starting points and running the refinements remain the caller's job.
+    This is a selection rule, not a search strategy. The candidate set is
+    built by :func:`cluster_stationary_points` from runs the caller
+    refined; :func:`basin_hopping_search` is the search over starting
+    points, and it remains a heuristic that supplies no global-minimum
+    guarantee.
     """
     candidates = list(candidates)
     n_candidates = len(candidates)
@@ -402,13 +408,25 @@ def refine_stationary_point(E_theta, theta0, max_iter=80, target=1e-11,
     """
     import jax.numpy as jnp
 
-    grad_plain = jax.grad(E_theta)
-    grad = jax.jit(grad_plain)
+    from .jit_cache import cached_jit
 
-    def _hvp_raw(theta, v, *arr):
-        return jax.jvp(lambda t: grad_plain(t, *arr), (theta,), (v,))[1]
+    def _build_grad(fn):
+        return jax.jit(jax.grad(fn))
 
-    hvp = jax.jit(_hvp_raw)
+    def _build_hvp(fn):
+        plain = jax.grad(fn)
+
+        def raw(theta, v, *arr):
+            return jax.jvp(lambda t: plain(t, *arr), (theta,), (v,))[1]
+
+        return jax.jit(raw)
+
+    # A refinement called once per start would otherwise rebuild and
+    # recompile both graphs on every call; the cache lives on E_theta, so
+    # the cost is paid once per energy function (core.jit_cache records the
+    # measurement).
+    grad = cached_jit(E_theta, 'grad', _build_grad)
+    hvp = cached_jit(E_theta, 'hvp', _build_hvp)
 
     theta = jnp.asarray(np.asarray(theta0, dtype=float))
     energy = float(E_theta(theta, *arrays))
@@ -531,3 +549,496 @@ def curvature_from_gradient(grad_fn, theta, step=1e-5, max_parameters=None):
         minus = np.asarray(grad_fn(theta - shift), dtype=float).reshape(-1)
         H[:, j] = (plus - minus) / (2.0 * step)
     return 0.5 * (H + H.T)
+
+
+# ---------------------------------------------------------------------------
+# Multistart spectra and a basin-hopping search.
+#
+# The functions above refine one point and select among candidates the caller
+# supplied. The functions below build the candidate set. The search is a
+# heuristic: it samples the basins and reports what it found with the evidence
+# it has. It does not prove that the lowest point in the spectrum is the
+# global minimum, and no stopping rule below may be read as such a proof.
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class SpectrumPoint:
+    """One distinct stationary point, with the runs that reached it.
+
+    ``representative`` is the lowest-energy member of the cluster. Every
+    property forwards to it, so a spectrum point can be consumed wherever a
+    :class:`StationaryCandidate` is expected. ``strict`` records whether the
+    representative reached the strict gradient target; a point that did not
+    can still be a usable stationary point in a flat direction, but it must
+    not be called strictly stationary.
+    """
+
+    representative: StationaryCandidate
+    n_members: int = 1
+    labels: tuple = ()
+    strict: bool = False
+
+    @property
+    def theta(self):
+        return self.representative.theta
+
+    @property
+    def energy(self):
+        return float(self.representative.energy)
+
+    @property
+    def grad_norm(self):
+        return float(self.representative.grad_norm)
+
+    @property
+    def curvature(self):
+        return self.representative.curvature
+
+    @property
+    def label(self):
+        return str(self.representative.label)
+
+    @property
+    def is_minimum(self):
+        return self.representative.is_minimum
+
+    @property
+    def has_curvature(self):
+        return self.curvature is not None
+
+
+@dataclass
+class StationarySpectrum:
+    """The distinct stationary points reached by a set of refined runs.
+
+    ``points`` is ordered by ``(energy, gradient, label, theta)``, the same
+    order :func:`select_stationary_point` uses, so two spectra built from the
+    same candidates in a different completion order are identical.
+    """
+
+    points: tuple
+    n_candidates: int
+    n_stationary: int
+    n_distinct: int
+    target: float
+    energy_tol: float = 1e-6
+    strict_target: float = 1e-11
+
+    @property
+    def best(self):
+        """The lowest-energy distinct point, or None for an empty spectrum."""
+        return self.points[0] if self.points else None
+
+    @property
+    def n_energy_levels(self):
+        """Distinct energies, merging orbital orientations of one level.
+
+        ``n_distinct`` counts (energy, orbital) points; on a degenerate
+        manifold the two differ. Measured on N2/6-31G CAS(2,2): one energy
+        and six active-space orientations.
+        """
+        levels = []
+        for point in sorted(self.points, key=lambda p: p.energy):
+            if not any(_same_energy(point.energy, level, self.energy_tol)
+                       for level in levels):
+                levels.append(point.energy)
+        return len(levels)
+
+    @property
+    def n_minima(self):
+        return sum(1 for p in self.points if p.is_minimum)
+
+    @property
+    def n_certified(self):
+        return sum(1 for p in self.points if p.has_curvature)
+
+    @property
+    def certificate_coverage(self):
+        """Fraction of distinct points that carry a curvature report."""
+        if not self.points:
+            return 0.0
+        return float(self.n_certified) / len(self.points)
+
+    @property
+    def spread(self):
+        """Energy range across distinct points, in Hartree."""
+        if not self.points:
+            return 0.0
+        energies = [p.energy for p in self.points]
+        return float(max(energies) - min(energies))
+
+    @property
+    def selection(self):
+        """The deterministic selection over the distinct representatives."""
+        return select_stationary_point(
+            [p.representative for p in self.points],
+            target=self.target, energy_tol=self.energy_tol)
+
+
+def _same_energy(a, b, energy_tol):
+    ea, eb = float(a), float(b)
+    return abs(ea - eb) <= float(energy_tol) * max(1.0, abs(ea), abs(eb))
+
+
+def cluster_stationary_points(candidates, target=1e-11, energy_tol=1e-6,
+                              same_point=None, strict_target=1e-11):
+    """Group refined candidates into distinct stationary points.
+
+    A candidate enters the spectrum only when its gradient reached
+    ``target``; the others are counted but not clustered, because a point
+    that is not stationary has no energy identity to compare.
+
+    Two candidates are the same point when their energies agree to
+    ``energy_tol`` (relative to ``max(1, |E|)``) **and** ``same_point``, when
+    given, returns True. The energy test alone is not sufficient: two
+    genuinely different solutions can lie within a millihartree of each
+    other, and a single point refined from two starts can differ by more
+    than floating-point noise. The orbital test belongs to the caller
+    because it needs the AO overlap matrix and the MO coefficients; the
+    experiment scripts pass ``core.crossing.orbital_space_overlap``, which
+    is invariant to rotations inside the active space.
+
+    The clustering is greedy against the cluster representative, and the
+    candidates are sorted by ``(energy, gradient, label, theta)`` before the
+    pass, so the result does not depend on the order the runs finished.
+
+    Parameters
+    ----------
+    candidates : iterable of StationaryCandidate
+    target : float
+        Gradient norm below which a candidate is called stationary.
+    energy_tol : float
+        Relative energy tolerance for the same-point test.
+    same_point : callable, optional
+        ``same_point(candidate_a, candidate_b) -> bool``. When omitted only
+        the energy test is applied.
+    strict_target : float
+        Gradient norm for the ``strict`` flag on each spectrum point.
+
+    Returns
+    -------
+    StationarySpectrum
+    """
+    candidates = list(candidates)
+    stationary = [c for c in candidates
+                  if float(c.grad_norm) < float(target)]
+
+    def key(c):
+        return (float(c.energy), float(c.grad_norm), str(c.label),
+                _canonical_theta(c.theta))
+
+    stationary.sort(key=key)
+    clusters = []
+    for candidate in stationary:
+        placed = False
+        for cluster in clusters:
+            representative = cluster[0]
+            if not _same_energy(candidate.energy, representative.energy,
+                                energy_tol):
+                continue
+            if same_point is not None and not same_point(candidate,
+                                                         representative):
+                continue
+            cluster.append(candidate)
+            placed = True
+            break
+        if not placed:
+            clusters.append([candidate])
+
+    points = []
+    for cluster in clusters:
+        representative = cluster[0]
+        points.append(SpectrumPoint(
+            representative=representative,
+            n_members=len(cluster),
+            labels=tuple(str(c.label) for c in cluster),
+            strict=bool(float(representative.grad_norm)
+                        < float(strict_target))))
+    points.sort(key=lambda p: (p.energy, p.grad_norm, p.label,
+                               _canonical_theta(p.theta)))
+    return StationarySpectrum(
+        points=tuple(points), n_candidates=len(candidates),
+        n_stationary=len(stationary), n_distinct=len(points),
+        target=float(target), energy_tol=float(energy_tol),
+        strict_target=float(strict_target))
+
+
+@dataclass
+class BasinHoppingStep:
+    """One move of a basin-hopping walk, recorded for the trace.
+
+    ``is_new`` means the move reached an energy not present among the
+    stationary points so far. It is deliberately an energy test rather
+    than an orbital test. The spectrum keeps the orbital identity, but a
+    search that counted a new orbital orientation of the same solution as
+    news would never stop on a degenerate manifold: measured on
+    N2/6-31G CAS(2,2), eight converged starts gave one energy and six
+    distinct active-space orientations (the two pi components are exactly
+    degenerate).
+    """
+
+    step: int
+    move: str
+    label: str
+    energy: float
+    grad_norm: float
+    is_stationary: bool
+    has_curvature: bool
+    is_minimum: bool
+    is_new: bool
+    accepted: bool
+    note: str = ''
+
+
+@dataclass
+class BasinHoppingResult:
+    """The outcome of :func:`basin_hopping_search`.
+
+    ``stop_reason`` is one of ``'step_budget'``, ``'time_budget'`` or
+    ``'no_new_points'``. Each is a decidable predicate on the run; none of
+    them says the global minimum was found.
+    """
+
+    best: object
+    spectrum: StationarySpectrum
+    trace: tuple
+    n_steps: int
+    n_accepted: int
+    n_new: int
+    stop_reason: str
+    seconds: float
+    initial: object = None
+
+    @property
+    def certificate_coverage(self):
+        return self.spectrum.certificate_coverage
+
+    @property
+    def certified(self):
+        """True when the reported best is a certified minimum."""
+        return self.best is not None and self.best.is_minimum
+
+
+def basin_hopping_search(converge, theta0, moves, same_point=None,
+                         target=1e-11, energy_tol=1e-6, strict_target=1e-11,
+                         max_steps=100, max_no_new=None, max_seconds=None,
+                         temperature=0.0, energy_slack=1e-8,
+                         require_curvature=True, coverage_gate=False,
+                         novelty_window=None,
+                         seed=0, initial_label='start'):
+    """Basin-hopping search over starting points for the orbital optimizer.
+
+    One move is: propose a starting point, converge it with the caller's
+    refinement, and decide whether the walker moves there. The proposal is a
+    callable supplied by the caller, so orbital rotations, geometry
+    displacements and reference-orbital permutations are all the same kind
+    of object to this function.
+
+    ACCEPTANCE
+
+    A move is eligible only when the refined point reached the gradient
+    target and, when ``require_curvature`` is True, carries a curvature
+    report. Without that gate a walker can drift onto a point whose
+    "minimum" status is unknown, and the search would then report an
+    uncertified point as its best. An eligible move is accepted when its
+    energy is at most ``energy_slack`` above the walker's current energy;
+    with ``temperature > 0`` an uphill eligible move is accepted with the
+    Metropolis probability ``exp(-dE / temperature)``. ``temperature = 0``
+    (the default) is a greedy walk: deterministic given the seed, and the
+    cheaper of the two.
+
+    STOPPING RULES
+
+    All three are decidable and are checked before each move:
+
+    ``step_budget``
+        ``max_steps`` moves have been made.
+    ``time_budget``
+        ``max_seconds`` of wall clock have elapsed. A single move can
+        overrun the budget; the check is per move, not inside one.
+    ``no_new_points``
+        ``max_no_new`` consecutive moves produced no new stationary
+        *energy* (the orbital identity is reported in the spectrum but
+        does not reset the counter: degenerate orientations of one
+        solution would otherwise keep the walk alive forever). When
+        ``coverage_gate`` is True this rule fires
+        only if every distinct point found so far carries a curvature
+        report; otherwise the walk continues to the step or time budget,
+        because a spectrum with uncertified points cannot support the
+        selection regardless of how long it has been stable.
+
+    The search does not guarantee the global minimum. It reports the
+    spectrum it reached, the best certified point, and the certificate
+    coverage, and the caller must state the budget alongside the result.
+
+    Parameters
+    ----------
+    converge : callable
+        ``converge(theta0, label) -> StationaryCandidate``. The caller owns
+        the optimizer and the refinement; this function only decides where
+        to start them.
+    theta0 : array_like
+        Starting point of the walk, already in the parameter space of
+        ``converge``.
+    moves : sequence of (str, callable)
+        Each callable is ``propose(rng, theta) -> theta_start``. They are
+        tried round-robin in the listed order, so the trace is reproducible.
+    same_point : callable, optional
+        Forwarded to :func:`cluster_stationary_points`.
+    target, energy_tol, strict_target : float
+        Forwarded to :func:`cluster_stationary_points`.
+    max_steps, max_no_new, max_seconds : int, int, float
+        Budgets; see the stopping rules.
+    temperature : float
+        Metropolis temperature in Hartree. Zero means greedy acceptance.
+    energy_slack : float
+        Energy increase (Hartree) tolerated for a greedy acceptance.
+    require_curvature : bool
+        Gate acceptance on a curvature report.
+    coverage_gate : bool
+        Require full certificate coverage before the no-new-points rule
+        may fire.
+    novelty_window : float, optional
+        Energy window (Hartree) above the lowest stationary point found.
+        A new point outside the window is still recorded in the spectrum
+        and still counts in ``n_new``, but it does not reset the
+        no-new-points counter. The window exists because the theta chart
+        contains high-energy stationary points in which a virtual orbital
+        occupies a core slot: measured on H2O/6-31G, a large orbital kick
+        reached a minimum 1.15 Ha above the ground state. Such a point is
+        stationary in the chart and useless as a search result, and
+        letting it reset the counter delays the stop without adding
+        information.
+    seed : int
+        Seed of the generator handed to the move callables.
+    initial_label : str
+        Label of the starting point.
+
+    Returns
+    -------
+    BasinHoppingResult
+    """
+    moves = list(moves)
+    if not moves:
+        raise ValueError('moves must contain at least one proposal')
+    for entry in moves:
+        if len(entry) != 2 or not callable(entry[1]):
+            raise ValueError(
+                'each move must be a (name, callable) pair, got %r'
+                % (entry,))
+    if max_steps < 0:
+        raise ValueError(f'max_steps must be non-negative, got {max_steps}')
+    if max_no_new is not None and max_no_new < 1:
+        raise ValueError(
+            f'max_no_new must be at least 1, got {max_no_new}')
+
+    import time
+
+    rng = np.random.default_rng(int(seed))
+    started = time.time()
+
+    def elapsed():
+        return time.time() - started
+
+    initial = converge(np.asarray(theta0, dtype=float), initial_label)
+    current = initial
+    candidates = [initial]
+    trace = []
+    n_accepted = 0
+    no_new = 0
+    n_new = 0
+    stop_reason = 'step_budget'
+    step = 0
+    while step < int(max_steps):
+        if max_seconds is not None and elapsed() >= float(max_seconds):
+            stop_reason = 'time_budget'
+            break
+        if max_no_new is not None and no_new >= int(max_no_new):
+            if coverage_gate:
+                coverage = cluster_stationary_points(
+                    candidates, target=target, energy_tol=energy_tol,
+                    same_point=same_point,
+                    strict_target=strict_target).certificate_coverage
+                if coverage >= 1.0:
+                    stop_reason = 'no_new_points'
+                    break
+            else:
+                stop_reason = 'no_new_points'
+                break
+
+        name, propose = moves[step % len(moves)]
+        label = '%s-%d' % (name, step)
+        start = propose(rng, np.asarray(current.theta, dtype=float))
+        candidate = converge(np.asarray(start, dtype=float), label)
+
+        # A point is new when it is not the same point as any representative
+        # already in the spectrum. Comparing cluster counts instead would be
+        # wrong in the rare case where a new point bridges two clusters and
+        # merges them: the count falls while a new point was in fact found.
+        is_new = False
+        if float(candidate.grad_norm) < float(target):
+            is_new = not any(
+                _same_energy(candidate.energy, other.energy, energy_tol)
+                for other in candidates
+                if float(other.grad_norm) < float(target))
+        candidates.append(candidate)
+        counts_as_new = is_new
+        if is_new and novelty_window is not None:
+            stationary = [other.energy for other in candidates
+                          if float(other.grad_norm) < float(target)]
+            if stationary:
+                lowest = min(stationary)
+                if float(candidate.energy) > lowest + float(novelty_window):
+                    counts_as_new = False
+        if counts_as_new:
+            n_new += 1
+            no_new = 0
+        else:
+            no_new += 1
+
+        is_stationary = bool(float(candidate.grad_norm) < float(target))
+        has_curvature = candidate.curvature is not None
+        usable = is_stationary and (has_curvature or not require_curvature)
+        accepted = False
+        note = ''
+        if not usable:
+            note = ('not stationary' if not is_stationary
+                    else 'no curvature report')
+        else:
+            delta = float(candidate.energy) - float(current.energy)
+            if delta <= float(energy_slack):
+                accepted = True
+            elif float(temperature) > 0.0:
+                probability = float(np.exp(-delta / float(temperature)))
+                if rng.random() < probability:
+                    accepted = True
+                else:
+                    note = 'metropolis reject'
+            else:
+                note = 'higher energy'
+        if accepted:
+            current = candidate
+            n_accepted += 1
+
+        trace.append(BasinHoppingStep(
+            step=step, move=str(name), label=label,
+            energy=float(candidate.energy),
+            grad_norm=float(candidate.grad_norm),
+            is_stationary=is_stationary, has_curvature=has_curvature,
+            is_minimum=bool(candidate.is_minimum),
+            is_new=is_new, accepted=accepted, note=note))
+        step += 1
+    else:
+        # The while loop ended because the step budget was reached.
+        stop_reason = 'step_budget'
+
+    spectrum = cluster_stationary_points(
+        candidates, target=target, energy_tol=energy_tol,
+        same_point=same_point, strict_target=strict_target)
+    selection = spectrum.selection
+    best = selection.chosen
+    return BasinHoppingResult(
+        best=best, spectrum=spectrum, trace=tuple(trace),
+        n_steps=len(trace), n_accepted=n_accepted, n_new=n_new,
+        stop_reason=stop_reason, seconds=float(elapsed()), initial=initial)

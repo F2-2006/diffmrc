@@ -1,69 +1,81 @@
-"""RI-J Coulomb inside the SCF iteration (the RIJONX route).
+"""RI-J Coulomb inside the SCF iteration (the RIJONX and RIJK routes).
 
 WHY THIS MODULE EXISTS
 
-``driver.ri_scf`` supplies the RI-J Coulomb matrix and its analytic
-fixed-coefficient nuclear gradient, and ``core.ri`` supplies the
-three-center factors and their geometry derivatives.  Neither module
-runs a self-consistent field: the energy and gradient are evaluated at a
-density handed in by the caller.  This module closes that gap by
-subclassing the pyscfad Hartree-Fock class and replacing the Coulomb
-half of ``get_jk`` with the RI-J contraction.  Exchange stays exact
-(four-center), so the method is RIJONX, not RI-JK and not RIJCOSX.
+``driver.ri_scf`` supplies the RI-J Coulomb matrix, the RI-K exchange
+matrix and their analytic fixed-coefficient nuclear gradients, and
+``core.ri`` supplies the three-center factors and their geometry
+derivatives.  Neither module runs a self-consistent field: the energy
+and gradient are evaluated at a density handed in by the caller.  This
+module closes that gap by subclassing the pyscfad Hartree-Fock class and
+replacing the Coulomb and, optionally, the exchange half of ``get_jk``.
 
 WHAT IS REPLACED AND WHAT IS NOT
 
-    get_jk(mol, dm) -> (vj_RI, vk_exact)
-    E = E_nuc + Tr(D h) + 1/2 Tr(D J_RI) - 1/4 Tr(D K_exact)
+    get_jk(mol, dm) -> (vj_RI, vk)
+    E = E_nuc + Tr(D h) + 1/2 Tr(D J_RI) - 1/4 Tr(D K)
 
-The exact-K branch is the pyscfad ``get_jk`` with ``with_j=False``.  It
-still forms and caches the dense ``nao**4`` ERI tensor and, under
-geometry differentiation, still goes through pyscfad's dense
-``_fill_grad0`` derivative path.  That is the boundary of this route:
-the RI-J approximation removes the Coulomb four-center work, not the
-exchange four-center work.  RI-JK (no analytic gradient) and RIJCOSX
-(fixed-grid prototype only) are out of scope.
+``K`` is the dense exact four-center exchange by default (the RIJONX
+route).  With ``ri_k=True`` it is the RI-K exchange of
+``ri_scf.ri_k_fock``, built from the same three-center factors as the
+Coulomb term (the RIJK route).  The exact-K branch is the pyscfad
+``get_jk`` with ``with_j=False``: it still forms and caches the dense
+``nao**4`` ERI tensor and, under geometry differentiation, still goes
+through pyscfad's dense ``_fill_grad0`` derivative path.  RIJCOSX
+(fixed-grid prototype only) remains out of scope.
 
 DIFFERENTIABILITY
 
 pyscfad differentiates the SCF energy through the implicit function
-theorem.  A Coulomb matrix built from host numpy factors would have a
-zero tangent with respect to the nuclear coordinates, and the resulting
-gradient would silently miss every RI-factor derivative.  The Fock
-assembly is therefore wrapped in a ``jax.custom_jvp`` whose coordinate
-tangent is the analytic RI derivative of ``core.ri`` (``dB``, ``dS``,
-``dS^{-1/2}``).  The tangent with respect to the density is the linear
-RI-J map.  With this JVP, ``mf.energy_grad()`` reproduces central
-differences of the converged RIJONX energy; see the tests.
+theorem.  A Coulomb or exchange matrix built from host numpy factors
+would have a zero tangent with respect to the nuclear coordinates, and
+the resulting gradient would silently miss every RI-factor derivative.
+Both Fock assemblies are therefore wrapped in ``jax.custom_jvp`` whose
+coordinate tangent is the analytic RI derivative of ``core.ri``
+(``dB``, ``dS``, ``dS^{-1/2}``).  The tangent with respect to the
+density is the same linear map in both cases.  With these JVPs,
+``mf.energy_grad()`` reproduces central differences of the converged
+energy; see the tests.
 
 The fixed-coefficient gradient of ``driver.ri_scf`` is *not* the SCF
 gradient even at a converged density.  The full gradient carries the
 orbital-response term, which for a converged RHF density reduces to the
 overlap-derivative (energy-weighted density) term.  That term is
 supplied here by :func:`rijonx_scf_gradient`, which combines the
-skeleton gradient of ``ri_scf.rijonx_gradient`` with the overlap term
-in the same way pyscf's ``grad.rhf`` does.
+skeleton gradient of ``ri_scf.rijonx_gradient`` or
+``ri_scf.rijk_gradient`` with the overlap term in the same way pyscf's
+``grad.rhf`` does.
 
 OPEN SHELL AND ECP
 
 ``RIJONX_RHF`` handles closed-shell densities.  ``RIJONX_ROHF`` and
 ``RIJONX_UHF`` reuse the same ``get_jk``; the pyscfad open-shell layer
-calls it with a ``(2, nao, nao)`` density and the RI-J map is applied
+calls it with a ``(2, nao, nao)`` density and both RI maps are applied
 spin by spin.  Both open-shell layouts have an explicit analytic
 gradient: the skeleton part sees the total density for the RI-J and
-core terms and the spin densities for exact exchange, and the response
-term is the energy-weighted density built from the RIJONX Fock.  The
-explicit routes are checked against ``mf.energy_grad()`` and central
-differences in the tests.  ECP molecules work as long as the caller
-builds the molecule with an explicit ``ecp`` argument; the auxiliary
-basis is built from the same atom list.
+core terms and the spin densities for exchange (exact or RI-K), and the
+response term is the energy-weighted density built from the RIJONX
+Fock.  The explicit routes are checked against ``mf.energy_grad()`` and
+central differences in the tests.  ECP molecules work as long as the
+caller builds the molecule with an explicit ``ecp`` argument; the
+auxiliary basis is built from the same atom list.
+
+PLAIN-PYSCF VARIANT
+
+``HostRIJK_RHF``/``ROHF``/``UHF`` run the same ``get_jk`` on plain
+pyscf (no pyscfad), with numpy maps instead of the custom-JVP ones.
+They exist so that the RI-K SCF loop can be exercised and validated
+where pyscfad is unavailable, and they are the reference the pyscfad
+classes are compared against.
 
 MEMORY
 
-The SCF working set is ``nao**2 * naux`` for the RI-J factors plus the
-dense ``nao**4`` exact-K tensor (owned by pyscfad).  The coordinate
-tangent materializes one ``(3, nao, nao, naux)`` factor-derivative array
-per atom, sequentially.
+The SCF working set is ``nao**2 * naux`` for the RI factors.  The RIJK
+route adds one more ``nao**2 * naux`` intermediate for the exchange
+half-transform and never allocates a ``nao**4`` array; the RIJONX route
+adds the dense ``nao**4`` exact-K tensor (owned by pyscfad).  The
+coordinate tangent materializes one ``(3, nao, nao, naux)``
+factor-derivative array per atom, sequentially.
 
 GEOMETRY CHANGES
 
@@ -93,12 +105,19 @@ except ImportError:  # pragma: no cover - exercised only without pyscfad
     _ad_rohf = None
     _ad_uhf = None
 
+from pyscf import scf as _host_scf
+
 __all__ = [
     'RIJONX_RHF',
     'RIJONX_ROHF',
     'RIJONX_UHF',
+    'HostRIJK_RHF',
+    'HostRIJK_ROHF',
+    'HostRIJK_UHF',
     'rijonx_scf',
+    'rijk_scf',
     'rijonx_scf_gradient',
+    'rijk_scf_gradient',
 ]
 
 
@@ -137,7 +156,10 @@ class _RIState:
         self.naux = int(factors.naux)
         self.natm = int(mol.natm)
         self._dw = {}
-        self.fock = self._make_fock()
+        # The custom-JVP maps exist only when JAX/pyscfad is importable;
+        # the plain-pyscf classes use the numpy maps below.
+        self.fock = self._make_fock() if jnp is not None else None
+        self.fock_k = self._make_fock_k() if jnp is not None else None
 
     def dw(self, atom):
         """``dW/dR_atom`` with ``W = B S^{-1/2}``, shape ``(3, nao, nao, naux)``."""
@@ -163,7 +185,7 @@ class _RIState:
             dJ = dW z + W dz,   z = W^T D,   dz = dW^T D.
         """
         nao, naux = self.nao, self.naux
-        w = np.asarray(self.factors.b @ self.factors.jhalf)
+        w = np.asarray(dri.ri_weight_matrix(self.factors))
         wf = jnp.asarray(w.reshape(nao * nao, naux))
         w3 = jnp.asarray(w)
 
@@ -199,18 +221,86 @@ class _RIState:
 
         return fock
 
+    def _make_fock_k(self):
+        """The RI-K exchange map with an analytic JVP.
+
+        The primal is ``K = sum_P W_P D W_P``, evaluated as two
+        half-transforms through the auxiliary index (``T = W D`` then
+        ``K = sum_P T_P W_P``).  The density tangent is the same linear
+        map; the coordinate tangent is
+
+            dK = sum_P (dW_P D W_P + W_P D dW_P),
+
+        which is assembled from the per-atom factor derivatives, one
+        atom at a time.
+        """
+        w = np.asarray(dri.ri_weight_matrix(self.factors))
+        wT = jnp.asarray(np.transpose(w, (2, 0, 1)))   # (naux, nao, nao)
+
+        def assemble(dm):
+            n = dm.shape[-1]
+            flat = jnp.reshape(dm, (-1, n, n))
+            t = jnp.matmul(wT[None], flat[:, None])    # W_P D, batched
+            k = jnp.matmul(t, wT[None]).sum(axis=1)    # sum_P W_P D W_P
+            k = 0.5 * (k + jnp.swapaxes(k, -1, -2))
+            return jnp.reshape(k, dm.shape)
+
+        @jax.custom_jvp
+        def fock_k(mol, dm):
+            return assemble(dm)
+
+        @fock_k.defjvp
+        def _fock_k_jvp(primals, tangents):
+            mol, dm = primals
+            mol_t, dm_t = tangents
+            primal = assemble(dm)
+            tangent = assemble(dm_t)
+            coords = getattr(mol_t, 'coords', None)
+            if coords is not None:
+                n = dm.shape[-1]
+                flat = jnp.reshape(dm, (-1, n, n))
+                z = jnp.matmul(flat[:, None], wT[None])   # D W_P, batched
+                for atom in range(self.natm):
+                    dT = jnp.asarray(
+                        np.transpose(self.dw(atom), (0, 3, 1, 2)))
+                    t1 = jnp.matmul(dT[:, None], z[None, :]).sum(axis=2)
+                    dk = t1 + jnp.swapaxes(t1, -1, -2)    # (3, batch, nao, nao)
+                    tangent = tangent + jnp.tensordot(
+                        coords[atom], dk, axes=(0, 0)).reshape(dm.shape)
+            return primal, tangent
+
+        return fock_k
+
+    def fock_np(self, dm):
+        """Host numpy RI-J matrix for this geometry (plain-pyscf path)."""
+        return ri_scf.ri_j_fock(self.mol, dm, factors=self.factors)
+
+    def fock_k_np(self, dm):
+        """Host numpy RI-K matrix for this geometry (plain-pyscf path)."""
+        return ri_scf.ri_k_fock(self.mol, dm, factors=self.factors)
+
 
 class _RIJONXMixin:
-    """``get_jk`` with RI-J Coulomb and exact exchange."""
+    """``get_jk`` with RI-J Coulomb and exact or RI-K exchange.
+
+    ``ri_k`` selects the exchange route: ``False`` keeps the dense exact
+    four-center exchange (RIJONX), ``True`` replaces it by the RI-K
+    contraction (RIJK).  ``_ri_host`` selects numpy maps instead of the
+    custom-JVP maps; it is set by the plain-pyscf subclasses only.
+    """
 
     _ignore_attr = ['_ri_state', '_ri_key', '_ri_jk_calls']
     auxbasis = ri_scf.RI_SCF_DEFAULT_AUX
     ri_rcond = dri.DEFAULT_RCOND
+    ri_k = False
+    _ri_host = False
 
-    def _init_rijonx(self, auxbasis=None, rcond=dri.DEFAULT_RCOND):
+    def _init_rijonx(self, auxbasis=None, rcond=dri.DEFAULT_RCOND,
+                     ri_k=False):
         if auxbasis is not None:
             self.auxbasis = auxbasis
         self.ri_rcond = float(rcond)
+        self.ri_k = bool(ri_k)
         self._ri_state = None
         self._ri_key = None
         self._ri_jk_calls = 0
@@ -231,12 +321,12 @@ class _RIJONXMixin:
 
     def get_jk(self, mol=None, dm=None, hermi=1, with_j=True, with_k=True,
                omega=None):
-        """J from RI factors, K from the dense exact four-center integrals.
+        """J from RI factors, K from exact four-center or RI-K integrals.
 
-        ``dm`` may carry a leading spin axis; the RI-J map is linear and
-        is applied to each density.  ``omega`` (range-separated Coulomb)
-        is refused: the RI-J factors here are built with the full
-        Coulomb operator.
+        ``dm`` may carry a leading spin axis; both RI maps are linear and
+        are applied to each density.  ``omega`` (range-separated Coulomb)
+        is refused: the RI factors here are built with the full Coulomb
+        operator.
         """
         if mol is None:
             mol = self.mol
@@ -248,36 +338,49 @@ class _RIJONXMixin:
                 'are built for the full Coulomb operator')
         self._ri_jk_calls += 1
         vj = vk = None
+        state = self.ri_state(mol) if (with_j or (with_k and self.ri_k)) \
+            else None
         if with_j:
-            vj = self.ri_state(mol).fock(mol, dm)
+            vj = state.fock_np(dm) if self._ri_host else state.fock(mol, dm)
         if with_k:
-            _, vk = super().get_jk(mol, dm, hermi=hermi, with_j=False,
-                                   with_k=True)
+            if not self.ri_k:
+                _, vk = super().get_jk(mol, dm, hermi=hermi, with_j=False,
+                                       with_k=True)
+            elif self._ri_host:
+                vk = state.fock_k_np(dm)
+            else:
+                vk = state.fock_k(mol, dm)
         return vj, vk
 
 
 if _ad_hf is not None:
 
     class RIJONX_RHF(_RIJONXMixin, _ad_hf.RHF):
-        """Restricted Hartree-Fock with the RIJONX Coulomb route."""
+        """Restricted Hartree-Fock with the RIJONX Coulomb route.
 
-        def __init__(self, mol, auxbasis=None, rcond=dri.DEFAULT_RCOND):
+        ``ri_k=True`` switches the exchange to RI-K (RIJK route).
+        """
+
+        def __init__(self, mol, auxbasis=None, rcond=dri.DEFAULT_RCOND,
+                     ri_k=False):
             _ad_hf.RHF.__init__(self, mol)
-            self._init_rijonx(auxbasis, rcond)
+            self._init_rijonx(auxbasis, rcond, ri_k=ri_k)
 
     class RIJONX_ROHF(_RIJONXMixin, _ad_rohf.ROHF):
         """Restricted open-shell Hartree-Fock with the RIJONX Coulomb route."""
 
-        def __init__(self, mol, auxbasis=None, rcond=dri.DEFAULT_RCOND):
+        def __init__(self, mol, auxbasis=None, rcond=dri.DEFAULT_RCOND,
+                     ri_k=False):
             _ad_rohf.ROHF.__init__(self, mol)
-            self._init_rijonx(auxbasis, rcond)
+            self._init_rijonx(auxbasis, rcond, ri_k=ri_k)
 
     class RIJONX_UHF(_RIJONXMixin, _ad_uhf.UHF):
         """Unrestricted Hartree-Fock with the RIJONX Coulomb route."""
 
-        def __init__(self, mol, auxbasis=None, rcond=dri.DEFAULT_RCOND):
+        def __init__(self, mol, auxbasis=None, rcond=dri.DEFAULT_RCOND,
+                     ri_k=False):
             _ad_uhf.UHF.__init__(self, mol)
-            self._init_rijonx(auxbasis, rcond)
+            self._init_rijonx(auxbasis, rcond, ri_k=ri_k)
 
 else:  # pragma: no cover - exercised only without pyscfad
 
@@ -286,12 +389,54 @@ else:  # pragma: no cover - exercised only without pyscfad
     RIJONX_UHF = None
 
 
+class HostRIJK_RHF(_RIJONXMixin, _host_scf.hf.RHF):
+    """Plain-pyscf RHF with RI-J Coulomb and RI-K exchange.
+
+    The numpy maps are used instead of the custom-JVP maps, so this class
+    runs without pyscfad.  It exists to exercise and validate the RI-K
+    SCF loop where pyscfad is unavailable and to serve as the numerical
+    reference for the pyscfad classes.  ``ri_k=False`` gives the
+    plain-pyscf RIJONX control.
+    """
+
+    _ri_host = True
+
+    def __init__(self, mol, auxbasis=None, rcond=dri.DEFAULT_RCOND,
+                 ri_k=True):
+        _host_scf.hf.RHF.__init__(self, mol)
+        self._init_rijonx(auxbasis, rcond, ri_k=ri_k)
+
+
+class HostRIJK_ROHF(_RIJONXMixin, _host_scf.rohf.ROHF):
+    """Plain-pyscf ROHF with RI-J Coulomb and RI-K exchange."""
+
+    _ri_host = True
+
+    def __init__(self, mol, auxbasis=None, rcond=dri.DEFAULT_RCOND,
+                 ri_k=True):
+        _host_scf.rohf.ROHF.__init__(self, mol)
+        self._init_rijonx(auxbasis, rcond, ri_k=ri_k)
+
+
+class HostRIJK_UHF(_RIJONXMixin, _host_scf.uhf.UHF):
+    """Plain-pyscf UHF with RI-J Coulomb and RI-K exchange."""
+
+    _ri_host = True
+
+    def __init__(self, mol, auxbasis=None, rcond=dri.DEFAULT_RCOND,
+                 ri_k=True):
+        _host_scf.uhf.UHF.__init__(self, mol)
+        self._init_rijonx(auxbasis, rcond, ri_k=ri_k)
+
+
 def rijonx_scf(mol, auxbasis=None, rcond=dri.DEFAULT_RCOND, uhf=False,
-               **kernel_kwargs):
-    """Run a converged RIJONX SCF and return the mean-field object.
+               ri_k=False, **kernel_kwargs):
+    """Run a converged RIJONX (or RIJK) SCF and return the mean-field object.
 
     The class is chosen from ``mol.spin`` (``RIJONX_ROHF`` for a
-    non-zero spin, or ``RIJONX_UHF`` when ``uhf`` is true).  A
+    non-zero spin, or ``RIJONX_UHF`` when ``uhf`` is true).  With
+    ``ri_k=True`` the exchange is the RI-K contraction instead of the
+    dense exact four-center exchange; the method is then RIJK.  A
     non-converged run raises instead of returning a reference every
     downstream number would rest on.
     """
@@ -302,13 +447,20 @@ def rijonx_scf(mol, auxbasis=None, rcond=dri.DEFAULT_RCOND, uhf=False,
         cls = RIJONX_RHF
     else:
         cls = RIJONX_UHF if uhf else RIJONX_ROHF
-    mf = cls(mol, auxbasis=auxbasis, rcond=rcond)
+    mf = cls(mol, auxbasis=auxbasis, rcond=rcond, ri_k=ri_k)
     mf.kernel(**kernel_kwargs)
     if not getattr(mf, 'converged', True):
         raise RuntimeError(
             'the RIJONX SCF did not converge; every number below would '
             'rest on an unconverged reference')
     return mf
+
+
+def rijk_scf(mol, auxbasis=None, rcond=dri.DEFAULT_RCOND, uhf=False,
+             **kernel_kwargs):
+    """Run a converged RIJK SCF (RI-J Coulomb plus RI-K exchange)."""
+    return rijonx_scf(mol, auxbasis=auxbasis, rcond=rcond, uhf=uhf,
+                      ri_k=True, **kernel_kwargs)
 
 
 def _spin_occupations(mf):
@@ -348,7 +500,7 @@ def _spin_occupations(mf):
     return c_a, c_b, occ_a, occ_b, dm, restricted
 
 
-def _rijonx_open_shell_gradient(mf, auxbasis=None, rcond=None):
+def _rijonx_open_shell_gradient(mf, auxbasis=None, rcond=None, ri_k=False):
     """Explicit gradient of a converged ROHF or UHF RIJONX energy.
 
     The skeleton part is assembled from the spin-summed energy
@@ -357,8 +509,9 @@ def _rijonx_open_shell_gradient(mf, auxbasis=None, rcond=None):
             - 1/2 sum_sigma Tr(D_sigma K[D_sigma]),
 
     so the RI-J term and the core Hamiltonian see the total density
-    while the exact exchange sees each spin density separately.  The
-    orbital-response completion is the overlap term
+    while the exchange (exact or RI-K, selected by ``ri_k``) sees each
+    spin density separately.  The orbital-response completion is the
+    overlap term
 
         -2 sum_{mu in atom} W_{mu nu} dS_{mu nu}/dR,
 
@@ -366,8 +519,8 @@ def _rijonx_open_shell_gradient(mf, auxbasis=None, rcond=None):
     modules use: ``P_a f_a P_a + P_b f_b P_b`` for ROHF and the
     occupation-weighted orbital-energy densities for UHF.  The Fock
     matrices come from ``mf.get_veff``, i.e. from the same RI-J plus
-    exact-K assembly the SCF converged on, so the response is taken on
-    the RIJONX energy surface rather than on the exact-Coulomb one.
+    exchange assembly the SCF converged on, so the response is taken on
+    the RIJONX/RIJK energy surface rather than on the exact-Coulomb one.
     """
     mol = mf.mol
     pmol = _pyscf_view(mol)
@@ -382,15 +535,21 @@ def _rijonx_open_shell_gradient(mf, auxbasis=None, rcond=None):
     rcond = dri.DEFAULT_RCOND if rcond is None else float(rcond)
 
     grad = ri_scf.ri_j_gradient(pmol, density=d_tot, aux=aux, rcond=rcond)
-    grad += ri_scf.exact_k_gradient_spin(
-        pmol, density_alpha=dm[0], density_beta=dm[1])
+    if ri_k:
+        grad += ri_scf.ri_k_gradient_spin(
+            pmol, density_alpha=dm[0], density_beta=dm[1], aux=aux,
+            rcond=rcond)
+    else:
+        grad += ri_scf.exact_k_gradient_spin(
+            pmol, density_alpha=dm[0], density_beta=dm[1])
     grad += ri_scf.core_hamiltonian_gradient(pmol, density=d_tot)
     grad += ri_scf.nuclear_repulsion_gradient(pmol)
 
     h = pmol.intor('int1e_kin') + pmol.intor('int1e_nuc')
     if pmol.has_ecp():
         h = h + pmol.intor('ECPscalar')
-    vhf = np.asarray(mf.get_veff(dm=jnp.asarray(dm)))
+    dm_arg = jnp.asarray(dm) if jnp is not None else np.asarray(dm)
+    vhf = np.asarray(mf.get_veff(dm=dm_arg))
     if vhf.shape != (2, nao, nao):
         raise RuntimeError(
             f'expected a spin-stacked RIJONX potential, got {vhf.shape}')
@@ -420,14 +579,18 @@ def _rijonx_open_shell_gradient(mf, auxbasis=None, rcond=None):
     return grad
 
 
-def rijonx_scf_gradient(mf, auxbasis=None, rcond=None):
-    """Full nuclear gradient of the converged RIJONX energy.
+def rijonx_scf_gradient(mf, auxbasis=None, rcond=None, ri_k=None):
+    """Full nuclear gradient of a converged RIJONX or RIJK energy.
 
     The fixed-coefficient (skeleton) part comes from
-    :func:`diffmrc.driver.ri_scf.rijonx_gradient`: the RI-J derivative
-    is analytic (three-center factors) and the exchange derivative is
-    the dense four-center ``int2e_ip1``/``ip2`` contraction.  The
-    orbital-response part is the overlap-derivative term
+    :func:`diffmrc.driver.ri_scf.rijonx_gradient` (exact four-center
+    exchange) or :func:`diffmrc.driver.ri_scf.rijk_gradient` (RI-K
+    exchange); ``ri_k=None`` takes the route the mean-field object
+    converged on.  In both cases the RI-J derivative is analytic
+    (three-center factors); the exact-exchange derivative is the dense
+    four-center ``int2e_ip1``/``ip2`` contraction, the RI-K derivative
+    uses only the three-center factor derivatives.  The orbital-response
+    part is the overlap-derivative term
 
         -2 sum_{mu in atom} W_{mu nu} dS_{mu nu}/dR,
 
@@ -443,9 +606,12 @@ def rijonx_scf_gradient(mf, auxbasis=None, rcond=None):
     Returns
     -------
     ndarray, (natm, 3)
-        Eh / Bohr.  The exchange derivative is validation scale (dense
-        ``nao**4`` tensors).
+        Eh / Bohr.  With exact exchange the derivative is validation
+        scale (dense ``nao**4`` tensors); with RI-K it is production
+        scale (``nao**2 * naux`` working set).
     """
+    if ri_k is None:
+        ri_k = bool(getattr(mf, 'ri_k', False))
     mol = mf.mol
     pmol = _pyscf_view(mol)
     c = np.asarray(mf.mo_coeff)
@@ -454,7 +620,7 @@ def rijonx_scf_gradient(mf, auxbasis=None, rcond=None):
                   and np.all((occ == 0.0) | (occ == 2.0)))
     if not closed:
         return _rijonx_open_shell_gradient(mf, auxbasis=auxbasis,
-                                           rcond=rcond)
+                                           rcond=rcond, ri_k=ri_k)
     if np.any((occ != 0.0) & (occ != 2.0)):
         raise NotImplementedError(
             'fractional or single occupations are not supported')
@@ -462,7 +628,11 @@ def rijonx_scf_gradient(mf, auxbasis=None, rcond=None):
     aux = auxbasis if auxbasis is not None else getattr(
         mf, 'auxbasis', ri_scf.RI_SCF_DEFAULT_AUX)
     rcond = dri.DEFAULT_RCOND if rcond is None else float(rcond)
-    grad = ri_scf.rijonx_gradient(pmol, c[:, :nocc], aux=aux, rcond=rcond)
+    if ri_k:
+        grad = ri_scf.rijk_gradient(pmol, c[:, :nocc], aux=aux, rcond=rcond)
+    else:
+        grad = ri_scf.rijonx_gradient(pmol, c[:, :nocc], aux=aux,
+                                      rcond=rcond)
 
     # pyscf.grad.rhf.get_ovlp returns -int1e_ipovlp; keep the same sign.
     s1 = -pmol.intor('int1e_ipovlp', comp=3)
@@ -476,3 +646,13 @@ def rijonx_scf_gradient(mf, auxbasis=None, rcond=None):
         grad[atom] -= 2.0 * np.einsum('xij,ij->x', s1[:, p0:p1],
                                       dm1e[p0:p1])
     return grad
+
+
+def rijk_scf_gradient(mf, auxbasis=None, rcond=None):
+    """Full nuclear gradient of a converged RIJK energy.
+
+    Convenience wrapper around :func:`rijonx_scf_gradient` with the
+    RI-K exchange route.  Only ``nao**2 * naux`` arrays are formed; the
+    dense ``nao**4`` exchange-derivative tensors are never allocated.
+    """
+    return rijonx_scf_gradient(mf, auxbasis=auxbasis, rcond=rcond, ri_k=True)

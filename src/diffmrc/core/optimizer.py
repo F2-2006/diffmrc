@@ -51,6 +51,7 @@ import jax
 jax.config.update("jax_enable_x64", True)
 from jax import numpy as jnp
 
+from .jit_cache import cached_jit
 from .trust_region import TrustRegionStop, trust_region_minimize
 
 logger = logging.getLogger(__name__)
@@ -61,6 +62,23 @@ __all__ = ['optimize_theta', 'optimize_theta_scipy', 'optimize_theta_hand',
 # Step-size floor for the handwritten fallback. The original used 1e-8, which
 # twenty halvings never reach; 1e-6 is attainable.
 _LR_FLOOR = 1e-6
+
+
+def _build_energy(fn):
+    return jax.jit(fn)
+
+
+def _build_grad(fn):
+    return jax.jit(jax.grad(fn))
+
+
+def _build_hvp(fn):
+    plain = jax.grad(fn)
+
+    def raw(x, v, *arr):
+        return jax.jvp(lambda t: plain(t, *arr), (x,), (v,))[1]
+
+    return jax.jit(raw)
 
 
 def optimize_theta_scipy(E_of, npar, steps=400, g_conv=1e-8,
@@ -78,8 +96,8 @@ def optimize_theta_scipy(E_of, npar, steps=400, g_conv=1e-8,
     """
     import scipy.optimize as sopt
 
-    E_jit = jax.jit(E_of)
-    g_jit = jax.jit(jax.grad(E_of))
+    E_jit = cached_jit(E_of, 'energy', _build_energy)
+    g_jit = cached_jit(E_of, 'grad', _build_grad)
 
     def fun(x):
         return float(E_jit(jnp.asarray(x), *arrays))
@@ -116,8 +134,8 @@ def optimize_theta_hand(E_of, npar, steps=400, g_conv=1e-9, theta0=None,
 
     Returns (E_jit, theta, gnorm, info).
     """
-    E_jit = jax.jit(E_of)
-    g_jit = jax.jit(jax.grad(E_of))
+    E_jit = cached_jit(E_of, 'energy', _build_energy)
+    g_jit = cached_jit(E_of, 'grad', _build_grad)
 
     theta = (jnp.zeros(npar) if theta0 is None else jnp.asarray(theta0))
     g = g_jit(theta, *arrays)
@@ -259,13 +277,13 @@ def optimize_theta_trust_region(E_of, npar, steps=400, g_conv=1e-8,
         the stage, ``E_jit`` is None and ``info['ok']`` is False, so the
         caller can fall back to the existing optimizer.
     """
-    E_jit = jax.jit(E_of)
-    g_plain = jax.grad(E_of)
-    g_jit = jax.jit(g_plain)
-
-    @jax.jit
-    def hvp_jit(x, v, *arr):
-        return jax.jvp(lambda t: g_plain(t, *arr), (x,), (v,))[1]
+    # The compiled forms are cached on E_of: a multistart driver calls this
+    # stage dozens of times on the same energy function, and a fresh
+    # jax.jit wrapper would recompile every time (core.jit_cache records
+    # the measurement).
+    E_jit = cached_jit(E_of, 'energy', _build_energy)
+    g_jit = cached_jit(E_of, 'grad', _build_grad)
+    hvp_jit = cached_jit(E_of, 'hvp', _build_hvp)
 
     def fun(x):
         return float(E_jit(jnp.asarray(x), *arrays))
@@ -319,7 +337,7 @@ def optimize_theta(mol, C0, E_of, npar, steps=400, g_conv=1e-8,
         _, theta, gnorm, info = optimize_theta_hand(
             E_of, npar, steps=steps, g_conv=g_conv, theta0=theta0,
             label=label, log_interval=log_interval)
-        E_jit = jax.jit(E_of)
+        E_jit = cached_jit(E_of, 'energy', _build_energy)
         return E_jit, theta, gnorm
 
     if gnorm > max(g_conv * 100, 1e-6) and theta0 is None:

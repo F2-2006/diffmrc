@@ -114,9 +114,11 @@ __all__ = [
     'ri_factors',
     'ri_eri_ao',
     'ri_eri_mo',
+    'ri_three_center_deriv_arrays',
     'ri_three_center_deriv',
     'ri_metric_deriv',
     'ri_factors_deriv',
+    'ri_weight_matrix',
     'ri_eri_deriv',
     'ri_eri_deriv_contract',
     'ri_eri_from_factors',
@@ -339,8 +341,15 @@ class RIFactorDerivs:
 
 
 def ri_factors(mol, auxmol, auxbasis=None, rcond=DEFAULT_RCOND):
-    """Assemble the host-side RI factors at the current geometry."""
-    b = ri_three_center(mol, auxmol)
+    """Assemble the host-side RI factors at the current geometry.
+
+    ``b`` is stored C-contiguous although ``aux_e2`` returns it
+    Fortran-ordered: a three-dimensional ``b @ jhalf`` on the
+    Fortran layout falls off the BLAS path and runs about fifty times
+    slower on this stack, while every downstream contraction reshapes
+    the pair index anyway.
+    """
+    b = np.ascontiguousarray(ri_three_center(mol, auxmol))
     s = ri_metric(auxmol)
     eig = metric_eig(s, rcond)
     jhalf = inv_sqrt_metric(s, rcond, eig=eig)
@@ -360,6 +369,20 @@ def _auxbasis_label(mol, auxmol):
 # ---------------------------------------------------------------------------
 # Four-center assembly
 # ---------------------------------------------------------------------------
+def ri_weight_matrix(factors):
+    """``W = B S^{-1/2}``, C-contiguous ``(nao, nao, naux)``.
+
+    The pair index is flattened before the GEMM.  A three-dimensional
+    ``b @ jhalf`` silently leaves the BLAS path when ``b`` is not
+    C-contiguous (measured 5.3 s against 0.10 s at ``nao = 96``,
+    ``naux = 452`` on this stack), and every contraction that consumes
+    ``W`` flattens the pair index anyway.
+    """
+    nao, naux = factors.nao, factors.naux
+    bf = factors.b.reshape(nao * nao, naux)
+    return np.ascontiguousarray(bf @ factors.jhalf).reshape(nao, nao, naux)
+
+
 def ri_eri_ao(mol, auxmol, factors=None, rcond=DEFAULT_RCOND):
     """RI approximation to the dense AO ERI, ``(nao, nao, nao, nao)``.
 
@@ -372,7 +395,7 @@ def ri_eri_ao(mol, auxmol, factors=None, rcond=DEFAULT_RCOND):
     Memory: the output alone is ``8 * nao**4`` bytes (7.5 GB at nao=175).
     """
     f = ri_factors(mol, auxmol, rcond=rcond) if factors is None else factors
-    w = np.matmul(f.b, f.jhalf)
+    w = ri_weight_matrix(f)
     wf = w.reshape(f.nao * f.nao, f.naux)
     eri = wf @ wf.T
     return eri.reshape(f.nao, f.nao, f.nao, f.nao)
@@ -434,15 +457,33 @@ def atom_ao_mask(mol, atom_idx):
     return mask
 
 
-def ri_three_center_deriv(mol, auxmol, atom_idx):
+def ri_three_center_deriv_arrays(mol, auxmol):
+    """The two three-center derivative arrays shared by every atom.
+
+    ``ri_three_center_deriv`` rebuilds both integrals for each atom,
+    which makes a full nuclear gradient cost ``natm`` derivative
+    integral evaluations.  A caller that walks over all atoms can hold
+    the two arrays once and pass them in; the result is identical.
+
+    Memory: ``2 * 3 * nao**2 * naux`` doubles, i.e. the same size as two
+    factor-derivative tensors.
+    """
+    ip1 = df.incore.aux_e2(mol, auxmol, intor='int3c2e_ip1', aosym='s1')
+    ip2 = df.incore.aux_e2(mol, auxmol, intor='int3c2e_ip2', aosym='s1')
+    return ip1, ip2
+
+
+def ri_three_center_deriv(mol, auxmol, atom_idx, arrays=None):
     """``d(mu nu | P) / dR_atom``, shape ``(3, nao, nao, naux)``.
 
     Contributions from the two AO centers and the auxiliary center are
     assembled separately; see the module docstring for the verified
-    conventions.
+    conventions.  ``arrays`` is the optional ``(ip1, ip2)`` pair from
+    :func:`ri_three_center_deriv_arrays`; supplying it avoids rebuilding
+    the integrals for every atom.
     """
-    ip1 = df.incore.aux_e2(mol, auxmol, intor='int3c2e_ip1', aosym='s1')
-    ip2 = df.incore.aux_e2(mol, auxmol, intor='int3c2e_ip2', aosym='s1')
+    ip1, ip2 = (ri_three_center_deriv_arrays(mol, auxmol)
+                if arrays is None else arrays)
     m_ao = atom_ao_mask(mol, atom_idx)
     m_aux = atom_ao_mask(auxmol, atom_idx)
     first = ip1 * m_ao[:, None, None]
@@ -460,9 +501,14 @@ def ri_metric_deriv(auxmol, atom_idx):
     return 0.5 * (out + out.transpose(0, 2, 1))
 
 
-def ri_factors_deriv(mol, auxmol, atom_idx, factors):
-    """Nuclear derivative of every RI factor for one atom."""
-    db = ri_three_center_deriv(mol, auxmol, atom_idx)
+def ri_factors_deriv(mol, auxmol, atom_idx, factors, arrays=None):
+    """Nuclear derivative of every RI factor for one atom.
+
+    ``arrays`` is the optional ``(ip1, ip2)`` pair from
+    :func:`ri_three_center_deriv_arrays`; a caller walking over all
+    atoms should build it once.
+    """
+    db = ri_three_center_deriv(mol, auxmol, atom_idx, arrays=arrays)
     ds = ri_metric_deriv(auxmol, atom_idx)
     dj = inv_sqrt_metric_jvp(factors.s, ds, eig=factors.eig)
     return RIFactorDerivs(db=db, ds=ds, djhalf=dj)
@@ -487,7 +533,7 @@ def ri_eri_deriv(mol, auxmol, atom_idx, factors=None, rcond=DEFAULT_RCOND,
             f'(3 x {nao}^4 doubles); use ri_factors_deriv with '
             'ri_eri_deriv_contract instead, or raise max_bytes explicitly')
     d = ri_factors_deriv(mol, auxmol, atom_idx, f)
-    w = np.matmul(f.b, f.jhalf)
+    w = ri_weight_matrix(f)
     wf = w.reshape(nao * nao, naux)
     dbj = np.matmul(d.db, f.jhalf)
     bdj = np.tensordot(f.b, d.djhalf, axes=([2], [1])).transpose(2, 0, 1, 3)
@@ -518,7 +564,7 @@ def ri_eri_deriv_contract(gamma, factors, derivs, per_axis=False,
     """
     nao, naux = factors.nao, factors.naux
     g = np.asarray(gamma).reshape(nao * nao, nao * nao)
-    w = np.matmul(factors.b, factors.jhalf)
+    w = ri_weight_matrix(factors)
     wf = w.reshape(nao * nao, naux)
     z = (g @ wf).reshape(nao, nao, naux)
     zf = z.reshape(nao * nao, naux)

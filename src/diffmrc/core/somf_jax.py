@@ -86,8 +86,11 @@ support on a single Cartesian component.
 
 BOUNDARIES
 
-* RI-SOMF is not implemented; the kernel is not a function of ``r_ij``
-  alone, so the Coulomb-metric factorization of ``core.ri`` does not apply.
+* RI-SOMF lives in ``core.somf_ri`` (value layer) and
+  ``core.somf_ri_jax`` (differentiable).  The raw ``g_K`` metric is
+  indefinite, but the derivative form is an ordinary Coulomb integral of
+  the differentiated bra pair, so the Coulomb metric applies to that
+  form.
 * ECP SOMF (``somf_ecp``) remains a numpy value layer.  The valence-level
   ECP operator has its own one-electron substitution and double-counting
   question; no differentiable version is claimed here.

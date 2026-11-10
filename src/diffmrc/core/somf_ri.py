@@ -69,18 +69,31 @@ ROUTES
 ``exchange='one_center'`` per-atom sub-molecule blocks.
 ``exchange='none'``  J only.
 
+DIFFERENTIABILITY
+
+``core.somf_ri_jax`` consumes the factors of this module and makes the
+RI-SOMF(1X) operator and the SI splitting differentiable in the reference
+density ``P``, with an exact JVP/VJP that never materializes a
+``nao**4`` tensor.  ``coulomb_ri_factor_derivs`` supplies the factor
+tangents for a nuclear direction: ``db`` and ``djhalf`` are analytic
+(``core.ri`` three-center and metric derivatives plus the ``S^{-1/2}``
+Fréchet derivative), while ``da`` is a central difference because
+libcint has no derivative of ``int3c2e_pvxp1``.
+
 NOT IMPLEMENTED
 
-* JAX differentiability.  The RI factors are exposed
-  (``coulomb_ri_factors`` / ``coulomb_ri_from_factors``) so that a
-  derivative layer can reuse the same contraction later.
+* Analytic ``da/dR``.  The three-center SOMF bra factor carries two
+  basis derivatives already; differentiating it needs third-derivative
+  integrals that libcint does not expose in this stack.
 * RI for the exchange term.  The exchange kernel carries the same
   derivative structure, but the reference 1X operator truncates the
   exchange to one center instead; fitting the exchange bra pair keeps
   both the operator index and a density index on the fitted object, a
   more complex contraction than the J term.
 * Response of ``P`` (the operator is density dependent) and nuclear
-  derivatives.
+  derivatives as a whole.  The density response lives in
+  ``core.somf_ri_jax``; a nuclear gradient still needs ``dP/dR`` and the
+  one-electron derivative from the driver.
 """
 from __future__ import annotations
 
@@ -90,16 +103,20 @@ import numpy as np
 from pyscf import df, gto
 
 from .somf import DEFAULT_MEMORY_LIMIT, SOMF_ALPHA2_HALF  # noqa: F401
-from .ri import (DEFAULT_RCOND, inv_sqrt_metric, make_auxmol,
-                 metric_eig)
+from .ri import (DEFAULT_RCOND, MetricEig, inv_sqrt_metric, make_auxmol,
+                 metric_eig, inv_sqrt_metric_jvp, ri_metric_deriv,
+                 ri_three_center_deriv)
 
 __all__ = [
     'SOMF_ALPHA2_HALF',
     'DEFAULT_MEMORY_LIMIT',
     'CoulombFactors',
+    'CoulombFactorDerivs',
     'orbital_blocks',
+    'exchange_one_center_kernels',
     'coulomb_exact',
     'coulomb_ri_factors',
+    'coulomb_ri_factor_derivs',
     'coulomb_ri_from_factors',
     'coulomb_ri',
     'coulomb_one_center',
@@ -277,6 +294,7 @@ class CoulombFactors:
     auxbasis: str
     cond: float
     n_dropped: int
+    eig: MetricEig | None = None
 
     @property
     def nao(self):
@@ -308,7 +326,7 @@ def coulomb_ri_factors(mol, auxmol=None, auxbasis=None,
     eig = metric_eig(s, rcond)
     jhalf = inv_sqrt_metric(s, rcond, eig=eig)
     return CoulombFactors(a=a, b=b, s=s, jhalf=jhalf, auxbasis=label,
-                          cond=eig.cond, n_dropped=eig.n_dropped)
+                          cond=eig.cond, n_dropped=eig.n_dropped, eig=eig)
 
 
 def coulomb_ri_from_factors(factors, P):
@@ -331,6 +349,94 @@ def coulomb_ri(mol, P, auxmol=None, auxbasis=None, rcond=DEFAULT_RCOND):
     factors = coulomb_ri_factors(mol, auxmol=auxmol, auxbasis=auxbasis,
                                  rcond=rcond)
     return coulomb_ri_from_factors(factors, P)
+
+
+@dataclass(frozen=True)
+class CoulombFactorDerivs:
+    """Nuclear derivatives of the RI-SOMF Coulomb factors for one atom.
+
+    Attributes
+    ----------
+    da : ndarray, (3, 3, nao, nao, naux)
+        ``d a[k, mu, nu, P] / dR_atom`` in Eh / Bohr.  The first axis is
+        the Cartesian direction, the second the SOMF component.  Computed
+        by central differences of ``int3c2e_pvxp1``; libcint in this
+        stack has no derivative of that integral (see the module note).
+    db : ndarray, (3, nao, nao, naux)
+        ``d(mu nu | P) / dR_atom``, analytic.
+    djhalf : ndarray, (3, naux, naux)
+        ``d S^{-1/2} / dR_atom``, analytic, Daleckii-Krein form.
+    """
+    da: np.ndarray
+    db: np.ndarray
+    djhalf: np.ndarray
+
+
+def _displaced_mol(mol, atom_idx, axis, delta):
+    """Copy of ``mol`` with one Cartesian component of one atom shifted."""
+    m = mol.copy()
+    coords = np.asarray(m.atom_coords(unit='Bohr'), dtype=float).copy()
+    coords[int(atom_idx), int(axis)] += float(delta)
+    m.set_geom_(coords, unit='Bohr')
+    return m
+
+
+def _pvxp1_three_center(mol, auxmol):
+    nao, naux = mol.nao_nr(), auxmol.nao_nr()
+    a = df.incore.aux_e2(mol, auxmol, intor='int3c2e_pvxp1', aosym='s1')
+    return np.asarray(a, dtype=float).reshape(3, nao, nao, naux)
+
+
+def coulomb_ri_factor_derivs(mol, auxmol, atom_idx, factors,
+                             a_deriv='fd', a_step=1e-4,
+                             rcond=DEFAULT_RCOND):
+    """Nuclear derivative of every RI-SOMF Coulomb factor for one atom.
+
+    ``db`` and ``djhalf`` are analytic and reuse ``core.ri``: the
+    three-center derivative integrals and the metric derivative feed the
+    same ``S^{-1/2}`` Fréchet derivative that the four-center RI layer
+    uses.  ``da`` is the three-center SOMF bra factor; libcint has no
+    ``int3c2e_pvxp1_ip1`` / ``_ip2`` (nor ``int2e_p1vxp1_ip1``), so its
+    analytic derivative would need third-derivative integrals.  The
+    default ``a_deriv='fd'`` takes a central difference of the analytic
+    three-center integral, displacing the AO atom in ``mol`` and the
+    matching auxiliary atom in ``auxmol`` together.  ``a_deriv='analytic'``
+    raises instead of silently pretending.
+
+    Parameters
+    ----------
+    mol, auxmol : pyscf.gto.Mole
+        The auxiliary molecule must have the same atom ordering as
+        ``mol`` (as returned by ``core.ri.make_auxmol``).
+    atom_idx : int
+    factors : CoulombFactors
+        Factors at the undisplaced geometry.
+    a_deriv : {'fd'}
+    a_step : float
+        Central-difference step in Bohr.
+    """
+    db = ri_three_center_deriv(mol, auxmol, atom_idx)
+    ds = ri_metric_deriv(auxmol, atom_idx)
+    djhalf = inv_sqrt_metric_jvp(factors.s, ds, rcond=rcond,
+                                 eig=factors.eig)
+    if a_deriv == 'analytic':
+        raise NotImplementedError(
+            'libcint exposes no derivative of int3c2e_pvxp1 (nor of '
+            'int2e_p1vxp1); an analytic da/dR needs third-derivative '
+            'integrals. Use a_deriv="fd" or supply the tangent directly '
+            'to diffmrc.core.somf_ri_jax.ri_coulomb_jvp')
+    if a_deriv != 'fd':
+        raise ValueError(f'unknown a_deriv route: {a_deriv!r}')
+    nao, naux = factors.nao, factors.naux
+    da = np.empty((3, 3, nao, nao, naux))
+    for axis in range(3):
+        plus = _displaced_mol(mol, atom_idx, axis, a_step)
+        minus = _displaced_mol(mol, atom_idx, axis, -a_step)
+        aux_plus = _displaced_mol(auxmol, atom_idx, axis, a_step)
+        aux_minus = _displaced_mol(auxmol, atom_idx, axis, -a_step)
+        da[axis] = (_pvxp1_three_center(plus, aux_plus)
+                    - _pvxp1_three_center(minus, aux_minus)) / (2.0 * a_step)
+    return CoulombFactorDerivs(da=da, db=db, djhalf=djhalf)
 
 
 def coulomb_one_center(mol, P, memory_limit=None, contract='auto'):
@@ -422,6 +528,38 @@ def one_center_two_electron(mol, P, memory_limit=None, contract='auto'):
                  + np.einsum('rs,ksqpr->kpq', P_A, g, optimize=True))
         out[:, idx[:, None], idx] += j - 1.5 * k
     return out
+
+
+def exchange_one_center_kernels(mol, memory_limit=None, contract='auto'):
+    """Explicit per-atom SOMF exchange kernels.
+
+    Returns ``(indices, kernels)``: ``indices[ia]`` is the AO index array
+    of atom ``ia`` and ``kernels[ia]`` its ``(3, n_A, n_A, n_A, n_A)``
+    ``int2e_p1vxp1`` block.  These are the constants the differentiable
+    one-center exchange consumes.  The direct route cannot expose a
+    kernel, so a ``memory_limit`` smaller than ``24 n_A**4`` per atom is
+    an error rather than a silent fallback.
+
+    A one-center quartet is translation invariant, so these kernels do
+    not depend on the nuclear coordinates.
+    """
+    limit = DEFAULT_MEMORY_LIMIT if memory_limit is None else memory_limit
+    indices, kernels = [], []
+    for ia, idx in enumerate(orbital_blocks(mol)):
+        if len(idx) == 0:
+            indices.append(idx)
+            kernels.append(np.zeros((3, 0, 0, 0, 0)))
+            continue
+        need = 3 * 8.0 * len(idx) ** 4
+        if contract == 'direct' or (contract == 'auto' and need > limit):
+            raise MemoryError(
+                f'atom {ia}: explicit exchange kernel needs '
+                f'{need / 2**30:.3f} GiB (24 * {len(idx)}^4 bytes); the '
+                f'direct route does not expose a differentiable kernel')
+        g, _ = _atom_kernel(mol, ia, idx, limit, 'explicit')
+        indices.append(idx)
+        kernels.append(g)
+    return tuple(indices), tuple(kernels)
 
 
 # ---------------------------------------------------------------------------

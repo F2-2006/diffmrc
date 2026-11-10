@@ -118,7 +118,7 @@ import numpy as _np
 
 __all__ = ['eigh_safe', 'make_eigh_mask', 'eigh_mask', 'eigh_cluster_ift',
            'eigh_soft2', 'set_trace_sink', 'cluster_tolerance',
-           'ClusterDecision', 'lowest_pair_auto']
+           'separation_certificate', 'ClusterDecision', 'lowest_pair_auto']
 
 # Diagnostic hook (added 2026-10-10 after the t397 lesson: the
 # cluster-member scan had to monkey-patch this frozen module from
@@ -182,50 +182,88 @@ def _primal_tangent(out, dw, du):
 # ---------------------------------------------------------------------------
 # Cluster-tolerance decision rule.
 #
-# The measured band (CO/6-31G and N2/cc-pVDZ at their stationary points,
-# t280/t286/t287; recorded in SESSION_LOG_APPEND_20260923b.md section 21):
-# symmetry pairs that are bit-exact at theta = 0 split by floating-point
-# noise at theta* to 1.9e-8 .. 1.155e-5, while the smallest physical gap of
-# the same spectra is 1.9e-2. The admissible tolerance is therefore a band,
-# not a number, and it has to be derived from the spectrum in hand.
+# Two scales, measured on CO, N2, H2O and OH (6-31G; active 1-RDM and Fock
+# core/virtual blocks; 2026-11-10):
 #
-# The rule below makes the two-scale assumption explicit: gaps at or below
-# ``noise_scale`` are numerical, gaps above it are physical. The tolerance
-# is the geometric mean of the two scales, so it sits at the centre of the
-# log band and stays clear of both edges; the ratio test rejects spectra in
-# which the two scales are not separated, which is exactly the case the
-# README describes as having no admissible tolerance (fallback: the
-# decomposition-free Lanczos kernel). With the default relative noise
-# scale (3e-5 of max|w|), the recorded CO spectra give tol = 1.26e-3
-# (1-RDM block) and 7.55e-4 (Fock virtual block on a unit scale); supplying
-# the measured noise 1.155e-5 gives 4.69e-4 for the Fock block. All are
-# inside the measured window 1e-5 .. 1e-2 and inside the range where t286
-# measured the chain-level AD-vs-FD residual to be 2.29e-4 at three
-# different tolerances.
+#   numerical   Split of a pair that is exactly degenerate in exact
+#               arithmetic, under a random basis rotation inside the block:
+#               1e-15 .. 5e-14 in float64 (thread count 1 and 4 alike) and
+#               1e-7 .. 4e-7 in float32. At a *converged* stationary point
+#               this is the whole noise band: the rotation is a similarity
+#               transform and the spectrum is invariant.
+#
+#   residual    At a stationary point converged only to an orbital gradient
+#               g, a rotation away from the optimum changes the active
+#               space at O(g) and splits the same pairs by 0.1 .. 2 x |dE|
+#               (measured through the production CI kernel: eps = 1e-4
+#               gives 1e-6 .. 6e-5, eps = 1e-3 gives 4e-5 .. 6e-4; the
+#               energy change is linear in eps, so the split tracks the
+#               gradient). The 1e-8 .. 1.2e-5 band recorded at the CO
+#               theta* is this residual, not floating point.
+#
+#   physical    Smallest non-degenerate gap of the same blocks: CO 1.5e-2
+#               (dm1) / 7.5e-3 (Fock virtual), N2 5.2e-2 / 6.1e-2 (Fock
+#               core 3.3e-3), H2O 3.8e-4 (dm1, CAS(8,8)), OH 1.0e-2. A
+#               physical gap moves by at most 5e-14 under the gauge
+#               replicates.
+#
+# The separation is therefore not guaranteed a priori: it is a property of
+# the spectrum *and* of the orbital convergence. The rule takes the band
+# from the caller when it is measured (``noise_band``), and otherwise falls
+# back to a relative prior; a gap above the band but within
+# ``_CLUSTER_MIN_RATIO`` of it is not certified as physical and routes to
+# the decomposition-free kernel. A physical gap *inside* the band cannot be
+# seen from one spectrum; :func:`separation_certificate` classifies it by
+# stability across independent constructions (a numerical split moves, a
+# physical gap does not).
 #
 # The rule is a decision helper, not a differentiable function: it converts
 # the spectrum to NumPy and returns a Python-level mode string.
 # ---------------------------------------------------------------------------
 
-# Relative numerical-noise scale. The measured upper edge of the split band
-# is 1.155e-5 on spectra whose largest magnitude is order 1-10. The default
-# has to keep the floor above that edge even for a unit-scale spectrum, so
-# it is set at 3e-5: on the recorded CO spectra this gives floor 5.9e-5
-# (1-RDM block, scale 1.98) and >= 3e-5 (Fock block), both above the
-# measured 1.155e-5 and both three orders below the physical gaps.
+# Relative prior for the noise scale, used only when no measured band is
+# supplied. It corresponds to an orbital gradient residual of ~1e-4 on a
+# spectrum whose largest magnitude is order 1 (measured split ~ 0.1-2 x the
+# gradient), which is the loose end of the production runs.
 _CLUSTER_REL_NOISE = 3e-5
-# Required separation between the noise scale and the smallest physical
-# gap. The recorded spectra have a ratio of 1.6e3 (dm1: 4.6e-8 vs 2.7e-2)
-# to 5.7e3 (Fock virtual: 3.4e-6 vs 1.9e-2).
-_CLUSTER_MIN_RATIO = 100.0
+# Required separation between the band's upper edge and the smallest
+# physical gap. Measured stability margin: numerical gaps have
+# value/spread <= 3 across gauge replicates, physical gaps >= 1e3, so any
+# threshold in 10 .. 1e3 separates the classes; 30 leaves a factor of 10
+# for the sampling error of a finite replicate set.
+_CLUSTER_MIN_RATIO = 30.0
+# Default width of a band given as a single measured scale: hi / lo.
+# Measured: float64 gauge splits span 1e-15 .. 5e-14 (50x), float32
+# 1e-7 .. 4e-7 (4x), production splits at fixed eps span ~20x.
+_CLUSTER_BAND_WIDTH = 30.0
+# A gap is stable (physical) when its value exceeds its across-replicate
+# spread by this factor. Numerical gaps move by O(100%) of their value;
+# physical gaps move by <= 1e-13 relative.
+_CLUSTER_STABILITY = 10.0
+# Relative check on the decomposition-free kernel's value before its pair
+# is accepted (see lowest_pair_auto): the kernel cannot resolve two
+# eigenvalues closer than ~||A||/m^2, and on such a spectrum it converges
+# to the wrong member of the pair. Measured worst case on the four systems'
+# blocks after the refill fix: 3.2e-7 relative.
+_FALLBACK_CHECK = 1e-6
 
 ClusterDecision = namedtuple(
     'ClusterDecision', ['mode', 'tol', 'noise_floor', 'physical_min',
-                        'ratio', 'n_noise_gaps', 'n_physical_gaps'])
+                        'ratio', 'n_noise_gaps', 'n_physical_gaps',
+                        'certified', 'band_lo', 'fallback'])
+
+_MODES = ('none', 'cluster', 'cluster_all', 'separation_unverified')
+
+
+def _decision(mode, tol, noise_floor, physical_min, ratio, n_noise, n_phys,
+              certified, band_lo):
+    return ClusterDecision(mode, tol, noise_floor, physical_min, ratio,
+                           n_noise, n_phys, certified, band_lo, '')
 
 
 def cluster_tolerance(w, noise_scale=None, rel_noise=_CLUSTER_REL_NOISE,
-                      min_ratio=_CLUSTER_MIN_RATIO):
+                      min_ratio=_CLUSTER_MIN_RATIO, noise_band=None,
+                      certified=None):
     """Choose the degenerate-cluster tolerance from a spectrum.
 
     Parameters
@@ -233,12 +271,18 @@ def cluster_tolerance(w, noise_scale=None, rel_noise=_CLUSTER_REL_NOISE,
     w : array_like
         Eigenvalues (any order).
     noise_scale : float or None
-        Absolute numerical-noise scale. When omitted it is estimated as
-        ``rel_noise * max(1, max|w|)``. Supply a measured value when one is
-        available (e.g. the split of a symmetry pair under a known
-        perturbation).
+        Measured upper edge of the numerical-noise band, absolute. When
+        omitted the relative prior ``rel_noise * max(1, max|w|)`` is used
+        and the decision is marked uncertified.
     rel_noise, min_ratio : float
         Defaults documented above.
+    noise_band : (lo, hi) or None
+        Measured band, lower and upper edge. Takes precedence over
+        ``noise_scale``. Obtain it from :func:`separation_certificate` when
+        replicate constructions are available.
+    certified : bool or None
+        Override the certification flag. ``None`` marks a supplied band or
+        scale as certified and the relative prior as uncertified.
 
     Returns
     -------
@@ -246,84 +290,222 @@ def cluster_tolerance(w, noise_scale=None, rel_noise=_CLUSTER_REL_NOISE,
         ``mode`` is one of
 
         ``'none'``
-            No gap lies at or below the noise floor: the spectrum has no
-            numerical cluster, ``tol = 0`` (the freeze is disabled).
+            No gap lies at or below the band, and the smallest gap is at
+            least ``min_ratio`` times the band: nothing to freeze,
+            ``tol = 0``.
         ``'cluster'``
-            A noise cluster exists and is separated from the physical
-            spectrum by at least ``min_ratio``: ``tol`` is the geometric
-            mean of the noise floor and the smallest physical gap.
+            A numerical cluster exists and the smallest gap above the band
+            is at least ``min_ratio`` times the band: ``tol`` is the
+            geometric mean of the band's upper edge and that gap.
         ``'cluster_all'``
-            Every gap lies at or below the noise floor: the whole spectrum
-            is one numerical cluster and ``tol`` is the noise floor.
-        ``'lanczos'``
-            The smallest physical gap is less than ``min_ratio`` times the
-            noise floor: no tolerance separates the two scales. The caller
+            Every gap lies at or below a *certified* band: the whole
+            spectrum is one numerical cluster and ``tol`` is the band's
+            upper edge.
+        ``'separation_unverified'``
+            A gap lies above the band but closer than ``min_ratio`` times
+            it, or the whole spectrum is inside an *uncertified* band, or
+            every gap is within the band while the band is uncertified.
+            No tolerance can be certified from this spectrum; the caller
             must use a decomposition-free kernel on the pair it needs
-            (:func:`lowest_pair_auto` does this).
+            (:func:`lowest_pair_auto` routes to ``core.lanczos``, verifies
+            its value, and degrades to the softened dense rule if the
+            kernel cannot resolve the pair).
 
-    The two-scale assumption cannot be tested from one spectrum: a
-    *physical* gap that falls below the noise floor is indistinguishable
-    from numerical splitting. That is the residual open case of the
-    README, and it is why the fallback exists rather than a lower
-    tolerance.
+    Notes
+    -----
+    A physical gap *inside* the band is indistinguishable from numerical
+    splitting in one spectrum, and this function will cluster it. That is
+    the residual assumption of the single-spectrum route. It is removed
+    only by :func:`separation_certificate`, which sees the same physical
+    gap reproduced across independent constructions and classifies it by
+    stability rather than by magnitude.
     """
     w = _np.sort(_np.asarray(w, dtype=float).reshape(-1))
     n = w.size
     if n < 2:
-        return ClusterDecision('none', 0.0, 0.0, float('inf'), float('inf'),
-                               0, 0)
+        return _decision('none', 0.0, 0.0, float('inf'), float('inf'),
+                         0, 0, True, 0.0)
     gaps = _np.diff(w)
     scale = max(1.0, float(_np.max(_np.abs(w))))
-    floor = (float(noise_scale) if noise_scale is not None
-             else float(rel_noise) * scale)
-    below = gaps <= floor
+    if noise_band is not None:
+        lo, hi = (float(noise_band[0]), float(noise_band[1]))
+        if not (0.0 <= lo <= hi):
+            raise ValueError('noise_band must satisfy 0 <= lo <= hi')
+        cert = True if certified is None else bool(certified)
+    elif noise_scale is not None:
+        hi = float(noise_scale)
+        if hi < 0.0:
+            raise ValueError('noise_scale must be non-negative')
+        lo = hi / _CLUSTER_BAND_WIDTH
+        cert = True if certified is None else bool(certified)
+    else:
+        hi = float(rel_noise) * scale
+        lo = hi / _CLUSTER_BAND_WIDTH
+        cert = False if certified is None else bool(certified)
+    below = gaps <= hi
     above = ~below
     n_noise = int(below.sum())
     n_phys = int(above.sum())
     if n_phys == 0:
-        return ClusterDecision('cluster_all', floor, floor, float('inf'),
-                               float('inf'), n_noise, 0)
+        if cert:
+            return _decision('cluster_all', hi, hi, float('inf'),
+                             float('inf'), n_noise, 0, True, lo)
+        # An uncertified prior cannot turn a whole spectrum into one
+        # numerical cluster: any of these gaps may be physical.
+        return _decision('separation_unverified', None, hi, float('inf'),
+                         float('inf'), n_noise, 0, False, lo)
     physical_min = float(_np.min(gaps[above]))
-    ratio = physical_min / floor if floor > 0.0 else float('inf')
-    if n_noise == 0:
-        # The smallest gap is already physical: nothing to freeze.
-        return ClusterDecision('none', 0.0, floor, physical_min, ratio,
-                               0, n_phys)
+    ratio = physical_min / hi if hi > 0.0 else float('inf')
     if ratio < float(min_ratio):
-        return ClusterDecision('lanczos', None, floor, physical_min, ratio,
-                               n_noise, n_phys)
-    tol = float(_np.sqrt(floor * physical_min))
-    return ClusterDecision('cluster', tol, floor, physical_min, ratio,
-                           n_noise, n_phys)
+        # Includes the no-cluster case: a smallest gap that close to the
+        # band is not certified as physical (the old rule returned 'none'
+        # here and differentiated it with a bare 1/gap).
+        return _decision('separation_unverified', None, hi, physical_min,
+                         ratio, n_noise, n_phys, cert, lo)
+    if n_noise == 0:
+        return _decision('none', 0.0, hi, physical_min, ratio, 0, n_phys,
+                         cert, lo)
+    tol = float(_np.sqrt(hi * physical_min))
+    return _decision('cluster', tol, hi, physical_min, ratio, n_noise,
+                     n_phys, cert, lo)
 
 
-def lowest_pair_auto(a, **kwargs):
+def separation_certificate(spectra, min_ratio=_CLUSTER_MIN_RATIO,
+                           stability=_CLUSTER_STABILITY):
+    """Classify gaps by stability across independent constructions.
+
+    Parameters
+    ----------
+    spectra : (k, n) array_like
+        ``k >= 2`` spectra of the *same* physical matrix, each produced by
+        an independent numerical construction: a different gauge rotation
+        inside the block, a different BLAS thread count, or a different
+        precision. The constructions must vary the noise source; rerunning
+        the same code with the same inputs produces zero spread and is
+        rejected. Sorted internally.
+    min_ratio, stability : float
+        Defaults documented above.
+
+    Returns
+    -------
+    ClusterDecision
+        Same fields as :func:`cluster_tolerance`, with ``mode`` from
+        ``'none'``, ``'cluster'``, ``'cluster_all'`` or
+        ``'separation_unverified'``. Every returned decision is certified:
+        the band comes from the observed spread. A gap is *numerical* when
+        its median value is at most ``stability`` times its across-replicate
+        spread, and *physical* otherwise. The decision is
+        ``'separation_unverified'`` when
+
+        - every gap is numerical but the replicate set shows no variation
+          at all (no evidence), or
+        - a physical gap is not separated from the numerical band by
+          ``min_ratio``, or
+        - a physical gap lies inside the numerical band (its value is at
+          or below the largest numerical gap).
+
+    The last case is the one a single spectrum cannot see: a physical gap
+    inside the band is clustered by :func:`cluster_tolerance`, while here
+    it is stable across constructions and therefore detected.
+    """
+    arr = _np.sort(_np.asarray(spectra, dtype=float), axis=1)
+    if arr.ndim != 2 or arr.shape[0] < 2:
+        raise ValueError('need at least two spectra of equal length')
+    k, n = arr.shape
+    if n < 2:
+        return _decision('none', 0.0, 0.0, float('inf'), float('inf'),
+                         0, 0, True, 0.0)
+    gaps = _np.diff(arr, axis=1)
+    value = _np.median(gaps, axis=0)
+    spread = gaps.max(axis=0) - gaps.min(axis=0)
+    if float(spread.max()) <= 0.0:
+        # No variation: the replicate set cannot certify anything.
+        return _decision('separation_unverified', None, float('nan'),
+                         float('inf'), float('inf'), 0, 0, False, 0.0)
+    stable = (value > 0.0) & (value > float(stability) * spread)
+    n_phys = int(stable.sum())
+    n_noise = int((~stable).sum())
+    if n_noise == 0:
+        return _decision('none', 0.0, 0.0, float(_np.min(value)), float('inf'),
+                         0, n_phys, True, 0.0)
+    band_hi = float(_np.max(_np.abs(gaps[:, ~stable])))
+    band_lo = float(_np.min(_np.abs(gaps[:, ~stable])))
+    if band_hi <= 0.0:
+        # Bit-exact degeneracies reproduced in every construction: the
+        # cluster is real but its width is below the representable scale.
+        band_hi = float(_np.finfo(float).eps
+                        * max(1.0, float(_np.max(_np.abs(arr)))))
+        band_lo = min(band_lo, band_hi)
+    if n_phys == 0:
+        return _decision('cluster_all', band_hi, band_hi, float('inf'),
+                         float('inf'), n_noise, 0, True, band_lo)
+    physical_min = float(_np.min(value[stable]))
+    ratio = physical_min / band_hi
+    if physical_min <= band_hi or ratio < float(min_ratio):
+        # A physical gap inside the band, or one too close to it: the two
+        # scales cannot be separated by a tolerance.
+        return _decision('separation_unverified', None, band_hi,
+                         physical_min, ratio, n_noise, n_phys, True, band_lo)
+    tol = float(_np.sqrt(band_hi * physical_min))
+    return _decision('cluster', tol, band_hi, physical_min, ratio, n_noise,
+                     n_phys, True, band_lo)
+
+
+def lowest_pair_auto(a, replicate_spectra=None, **kwargs):
     """Lowest eigenpair with the tolerance decision applied.
 
     ``'cluster'`` and ``'cluster_all'`` route through
-    :func:`eigh_cluster_ift` at the chosen tolerance, ``'none'`` through
-    :func:`eigh_safe`, and ``'lanczos'`` through the decomposition-free
-    kernel of ``core.lanczos``. This is an eager helper: the mode is a
-    Python-level branch on the values, so it cannot be traced inside
-    ``jit``. Differentiable callers that need a fixed rule should choose
-    the kernel and tolerance themselves.
+    :func:`eigh_cluster_ift` at the chosen tolerance and ``'none'`` through
+    :func:`eigh_safe`. ``'separation_unverified'`` routes through the
+    decomposition-free kernel of ``core.lanczos`` and *verifies its value*
+    against the dense lowest eigenvalue: the kernel cannot resolve two
+    eigenvalues closer than about ``||A|| / m^2`` and converges to the
+    wrong member of such a pair, so a value off by more than
+    ``_FALLBACK_CHECK`` relative degrades to :func:`eigh_safe` and the
+    decision records ``fallback = 'dense_safe'``. The alternative -- a
+    wrong eigenpair returned silently -- is the failure this verification
+    was added for (measured on a 5x5 matrix with gaps 3e-6 .. 1e-2: the
+    kernel returned the first excited state, energy off by the full gap).
 
-    The decision needs the spectrum, which this helper obtains with a dense
-    ``jnp.linalg.eigvalsh``. It therefore targets the small dense blocks
-    the rule was derived on (1-RDM and Fock blocks, dense CI blocks), not a
-    matrix-free operator large enough that a decomposition is what one is
-    trying to avoid; in that case pass a measured ``noise_scale`` and use
-    the kernel directly.
+    Parameters
+    ----------
+    a : (n, n) array
+        Symmetric matrix.
+    replicate_spectra : (k, n) array_like or None
+        When given, the decision comes from :func:`separation_certificate`
+        on these spectra instead of from the single spectrum of ``a``.
+        They must be independent constructions of the same block (see
+        there).
+    **kwargs
+        Forwarded to :func:`cluster_tolerance` (without replicates) or to
+        :func:`separation_certificate` (with replicates; only
+        ``min_ratio`` and ``stability`` are meaningful).
 
-    Returns ``(lam, u, decision)``; the eigenvalue is a 0-d array for the
-    decomposition routes and a scalar array for the Lanczos route.
+    This is an eager helper: the mode is a Python-level branch on the
+    values, so it cannot be traced inside ``jit``. Differentiable callers
+    that need a fixed rule should choose the kernel and tolerance
+    themselves.
+
+    Returns ``(lam, u, decision)``; the decision's ``fallback`` field
+    records which route produced the pair: ``''`` for the decomposition
+    routes, ``'lanczos'`` for a verified decomposition-free pair,
+    ``'dense_safe'`` for a dense pair after a failed verification.
     """
     w_all = _np.asarray(jnp.linalg.eigvalsh(a))
-    dec = cluster_tolerance(w_all, **kwargs)
-    if dec.mode == 'lanczos':
+    if replicate_spectra is not None:
+        kw = {k: kwargs[k] for k in ('min_ratio', 'stability')
+              if k in kwargs}
+        dec = separation_certificate(replicate_spectra, **kw)
+    else:
+        dec = cluster_tolerance(w_all, **kwargs)
+    if dec.mode == 'separation_unverified':
         from .lanczos import lowest_eigpair_lanczos
         lam, u = lowest_eigpair_lanczos(a)
-        return lam, u, dec
+        scale = max(1.0, float(_np.max(_np.abs(w_all))))
+        if abs(float(lam) - float(w_all[0])) <= _FALLBACK_CHECK * scale:
+            return lam, u, dec._replace(fallback='lanczos')
+        w, U = eigh_safe(a)
+        return w[0], U[:, 0], dec._replace(fallback='dense_safe')
     if dec.mode == 'none':
         w, U = eigh_safe(a)
         return w[0], U[:, 0], dec

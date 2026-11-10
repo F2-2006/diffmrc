@@ -44,17 +44,35 @@ Free-atom subtraction
 The output JSON records every operator's Frobenius norm, the selected
 pair's transition tensor, and the state-interaction level splitting.
 
-WARNING (2026-11-02): every state-interaction splitting here is assembled
-from pyscf ``trans_rdm1`` spin-summed transition densities; see the
-warning in ``validate_ecp_somf.py``.  The defect is operator- and
-geometry-dependent (measured on the GeF bent setup: 1.0235 for ECPso,
-1.0250 for the valence SOMF operator, 1.0912 for nuclear-only, 1.0848 for
-two-electron-only).  The variant ordering and the free-atom-subtraction
-construction are unaffected in structure, but the absolute splittings and
-the Ge+ 2P calibration offset quoted in the README (11.6%) must be
-re-derived with ``recalc_determinant_space.py`` before they are cited.
-No archived JSON of this script is distributed; the printed numbers are
-diagnostic only.
+WARNING (updated 2026-11-10): every state-interaction splitting here is
+assembled from pyscf ``trans_rdm1`` spin-summed transition densities and a
+two-root model space inside one M_S sector; see the warning in
+``validate_ecp_somf.py``.  The variant table has since been recomputed in
+the determinant space by ``recalc_variants_determinant.py``
+(``results_ecp_somf_variants_determinant.json``).  Outcome:
+
+* YbF and CeO are confirmed: the determinant-space values agree with the
+  numbers printed here to 0.01%, because a molecular 2Pi pair is complete
+  in the two-root model space.  The YbF free-atom-subtraction effect is
+  10.0% and the CeO one is 2.2%, both unchanged.
+* GeF is not confirmed: the determinant-space values are 2.4-9.7% lower,
+  operator by operator (ECPso 1082.15 against 1107.62, valence 1103.71
+  against 1131.26, nuclear 34.89 against 38.07).  At fixed two-root model
+  space the spin-summed assembly is 5.3% high for ECPso and 12.3% for the
+  nuclear term; the two-root projection itself is 2.8% below the four-state
+  term, so the net shift is smaller than the same-subspace defect.
+* The Ge+ 2P calibration is void.  The 2P term is sixfold; the two-root
+  space omits one of the three spatial components, and this assembly over
+  two-root subspaces is basis dependent: in the eigensolver's own basis it
+  returns either 0 or 1562.13 cm^-1, and a rotation inside the term turns
+  that into a continuum between 154 and 1089 cm^-1.  The determinant-space
+  term value is 2252.91 cm^-1 against the observed 1767 cm^-1, and the
+  neutral Ge 3P term of the same ECP and basis gives 1785.52 against
+  1409.96, both about +27%.
+
+Do not cite an absolute splitting from this script.  It remains the
+reference for the operator family and for the free-atom-subtraction
+construction, which are unchanged.
 """
 import os
 

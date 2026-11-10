@@ -4,6 +4,88 @@
 
 ### Added
 
+- `core.stationary`: `cluster_stationary_points` builds the distinct-point
+  spectrum the selection consumes -- energy plus an optional orbital test,
+  per-point hit counts, the strict-stationarity flag, the certificate coverage
+  and the number of distinct energy levels (orbital orientations of one
+  degenerate level are counted separately, measured on N2/6-31G as one energy
+  and six orientations). `basin_hopping_search` searches starting points with
+  caller-supplied proposals, acceptance gated on stationarity plus a curvature
+  report plus the energy rule (greedy or Metropolis), and three decidable
+  stopping rules (step budget, wall-clock budget, no new stationary energy).
+  On H2O/CH2/N2/CO at 6-31G CAS(2,2) the reference start reaches a saddle on
+  H2O and CO while random rotations reach the minimum 21.2 and 17.2 mEh lower.
+- `core.jit_cache`: `cached_jit` stores a compiled form on the callable it
+  wraps, so a multistart driver does not rebuild `jax.jit(grad)` and the
+  Hessian-vector product on every convergence. The first gradient call costs
+  1.24 s and the second 0.007 s on N2/6-31G CAS(2,2); caching the wrappers
+  halves the per-start cost after the first start. Numerical results are
+  unchanged (the spectrum energies reproduce the uncached probes to better
+  than 1e-10).
+- `driver.ri_scf`: the RI-K exchange matrix `K = sum_P W_P D W_P` from the
+  three-center factors, its fixed-coefficient nuclear gradient (closed shell
+  and spin-resolved), and the `rijk_energy`/`rijk_gradient` assembly. The
+  contraction equals pyscf's DF-K at the same auxiliary basis to 1e-12 and
+  the gradient agrees with central differences to 3.6e-8 (closed shell) and
+  1.4e-8 (spin-resolved). The deviation from exact exchange is the auxiliary
+  fit (4.8e-5 Eh on H2O/6-31G), not an implementation error. No `nao**4`
+  tensor is formed on either the energy or the gradient path.
+- `driver.ri_scf_driver`: the RIJK SCF route (`ri_k=True`, `rijk_scf`,
+  `rijk_scf_gradient`), with an analytic coordinate JVP for the exchange map
+  next to the existing RI-J one, and plain-pyscf `HostRIJK_RHF/ROHF/UHF`
+  classes that run the same loop without pyscfad. The SCF gradient agrees
+  with central differences of the converged energy to 7e-8 Eh/Bohr.
+- `core.ri.ri_three_center_deriv_arrays`: build the two three-center
+  derivative integrals once for a whole nuclear gradient instead of once per
+  atom; `ri_factors_deriv` accepts the pair through `arrays=`. The RI-J and
+  RI-K gradients use it, at the cost of holding one extra
+  `3 * nao**2 * naux` array.
+- `core.ri.ri_weight_matrix`: `W = B S^{-1/2}` through a flattened-index GEMM
+  on a C-contiguous factor tensor. `aux_e2` returns the three-center tensor
+  Fortran-ordered, and a three-dimensional `b @ jhalf` on that layout leaves
+  the BLAS path (5.3 s against 0.10 s at `nao = 96`, `naux = 452`). With the
+  contiguous factor storage and the 2-D GEMM, the RI-K Fock build at that size
+  drops from 3.6 s to 0.31 s and the contraction itself runs in 0.06 s
+  against 0.05 s for pyscf's cached DF-K.
+- `tests/driver/test_ri_k.py`: 16 tests covering the contraction identity
+  against the dense RI tensor and pyscf DF-K, the fit-error scale, blocking,
+  batched densities, the two gradient conventions against finite differences,
+  and the self-consistent RIJK loop on plain pyscf.
+- `core.eigh` / `core.lanczos`: the cluster tolerance is a certified
+  decision. `cluster_tolerance` accepts an explicit `noise_band`, derives a
+  3e-5 relative prior otherwise and marks it uncertified, and returns
+  `separation_unverified` (tol=None) when the smallest physical gap is below
+  30x the band or falls inside it. `separation_certificate` classifies a
+  split as numerical or physical by stability across independent
+  configurations (value/range > 10 for a physical gap; measured numerical
+  splits <= 3 and physical >= 1e3). On the four-system ten-block sample the
+  certificate accepts 10/10 in float64 and float32; the H2O dm1 block of
+  CAS(8,8) has a 3.84e-4 physical gap that overlaps the 1e-3 production band
+  and is reported unverified. The Lanczos fallback validates its value
+  against the dense lowest eigenvalue and degrades to `dense_safe`; two
+  defects found on that path are fixed (the ||A||/m^2 resolution limit and a
+  Krylov backfill vector lying in the span).
+- `core.perturbation_convergence`: a local four-check criterion for the
+  NEVPT2 correction with three-valued accept/reject/undetermined. The
+  orbital space is split by curvature into negative/soft/hard modes
+  (kappa=1e-3 from the measured soft noise 3.3e-5 and the H2O saddle
+  curvature 1.58e-2), with a 0.1 rad finite probe along the soft directions,
+  the first-order bound |H_hard^-1 s_hard| |g_hard| <= tau, and same-branch
+  repeats. On 25 non-stationary rows the false-accept rate is 0/14 and the
+  false-reject rate 1/11 (9.1%, CH2). OH CAS(3,2) is refused at all four
+  stationary points: the correction is not a single-valued function of the
+  CASSCF solution in that space.
+- `core.somf_ri_jax`: a differentiable RI-SOMF(1X) path. The RI Coulomb term
+  uses a custom JVP (`dw = b dP + db P`, `dz = ...`, `dJ = a dz + da z`);
+  the reverse is the transpose of that linear map and never forms nao^4.
+  Density-response gradients agree with finite differences to 3.8e-6 or
+  better on OH/OF (6-31G), and AD matches an independently assembled
+  contraction to 4.6e-15. The gradient differs from four-center SOMF(1X) by
+  2.5e-5 of its largest component (the RI fit); the difference from the full
+  four-center SOMF is 7.8e-2 and comes from the 1X one-center exchange
+  truncation, not from RI. Analytic `da/dR` and `dh1/dR` are unavailable
+  because libcint does not provide the third-derivative integrals; the
+  frozen-core derivative is finite-difference limited to 1e-7.
 - `core.lsmr`: the response solve as a first-class solver rather than a
   scipy call with a hand-set cap. `lsmr_solve` implements the Fong-Saunders
   recurrences (iterate-for-iterate identical to `scipy.sparse.linalg.lsmr`,
@@ -90,6 +172,19 @@
 - The deflation basis costs `n_par` products for the diagonal (already paid
   by `with_ht_diagonal`) plus the expansion, and is shared by every
   geometric column.
+- README's two-component X2C entry: the claimed `int2e_spinor` pair-symmetry
+  violation (0.62) was measured with a real-orbital-only criterion. With the
+  correct `(ij|kl) = (kl|ij)` test the residual is 6.7e-16, symmetrization
+  is the identity, and the physical value-layer path runs once the GHF basis
+  is Kramers-adapted (T = 5.1e-13 on H2O, 5.7e-13 on OH). The open part is
+  the Kramers-restricted response layer and the ECP spinor integral layer.
+- ECP SOMF: the legacy spin-summed percentages are superseded by a
+  determinant-space recalculation. The Ge+ 2P value 1562.14 cm-1 was an
+  artifact of taking two roots of a sixfold term; the determinant-space value
+  is 2252.91 cm-1. YbF and CeO are confirmed to 0.09 and 0.32 cm-1. The
+  spread across definitions is 0.08%-23.47% within one system, so no unique
+  definition exists; with a free-atom reference use `free_atom_subtracted`
+  and report the ECPso/valence interval.
 
 ### Measured
 

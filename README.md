@@ -76,7 +76,14 @@ manual/         Tutorial and Manual (LaTeX sources and built PDFs)
   effective-core-potential calculations, with gradient prototypes.
 - `driver.ri_scf` and `driver.ri_scf_driver`: a RIJONX SCF loop
   (RI-J Coulomb plus exact exchange) on top of pyscfad RHF/ROHF, including the
-  SCF-level overlap-derivative term.
+  SCF-level overlap-derivative term. The same driver carries the RIJK route
+  (`ri_k=True`): the exchange matrix is built from the three-center factors
+  as `K = sum_P W_P D W_P`, so neither the energy nor the gradient forms a
+  `nao**4` tensor. The RI-K contraction reproduces pyscf's DF-K at the same
+  auxiliary basis to 1e-12; its deviation from the exact four-center exchange
+  is the auxiliary-basis fit (4.8e-5 Eh on H2O/6-31G with
+  def2-universal-jkfit), not an implementation error. Plain-pyscf variants
+  (`HostRIJK_RHF/ROHF/UHF`) run the same loop without pyscfad.
 - `driver.scf_ad`: implicit-differentiation ROHF references for f-block
   molecules. pyscfad's default unrolled SCF AD freezes the DIIS
   coefficients and is not the derivative of the converged solution
@@ -98,8 +105,10 @@ set scales as `nao^2 * naux` per atom instead of `nctr * nao^4`; the
 measured peak memory of the RI integral-derivative chain is 2.11 GB at
 `nao = 96` and 16.05 GB at `nao = 175`, against 55.0 GB and 2033 GB for
 the dense single-array path. The RI approximation is an approximation:
-its physical error is documented in Manual Chapter 12, and the SCF layer
-of the present chain still uses dense integral derivatives.
+its physical error is documented in Manual Chapter 12. The SCF layer now
+has an RI-K exchange route whose gradient never leaves the three-center
+factor space; the RIJONX route itself still uses the dense
+exact-exchange derivative.
 
 The performance choices in the differentiable chain are documented in
 Manual Chapter 13: the four-step MO transform, the S_z-blocked CI
@@ -360,22 +369,62 @@ CAS(6,6) (0,0) element is -3.12 without it against +63.29 with it). (Branch
 `wave14/eigensolver`, commit `99d0cfb`.)
 
 *Degenerate pairs at a stationary point.* The cluster tolerance of the
-eigensolver must sit inside the measured gap between the floating-point noise
-that splits symmetry-degenerate pairs at a rotated stationary point (1e-8 to
-1.2e-5 in the systems measured here) and the physical gaps of the same spectrum
-(1.9e-2 and above). A tolerance below the noise scale exposes both the first
-and the second derivative to a bare inverse gap; one above the physical gaps
-clusters distinct states. The window measured here spans 1e-5 to 1e-2, and the
-rule has no admissible value when a physical gap falls inside the noise band.
-`core.eigh.cluster_tolerance` and `lowest_pair_auto` now derive the tolerance
-from the spectrum: a ratio test separates the noise floor from the smallest
-physical gap, the tolerance is their geometric mean, and a spectrum without the
-required separation returns the decomposition-free Lanczos kernel explicitly.
-On the recorded CO spectra the rule returns 1.26e-3 for the 1-RDM block and
-7.55e-4 for the Fock virtual block, and 4.69e-4 when the measured noise scale
-is supplied. The rule is a decision helper, not a differentiable function, and
-an a priori guarantee that the two scales separate remains open. (Branch
-`wave14/eigensolver`, commit `99d0cfb`.)
+eigensolver must sit between the numerical split of a pair that is exactly
+degenerate and the smallest physical gap of the same spectrum. The splits were
+re-measured on CO, N2, H2O and OH (6-31G; active 1-RDM and Fock core/virtual
+blocks, 2026-11-10) under independent gauge rotations, two BLAS thread counts
+and two precisions. A rotation *inside* a block is a similarity transform, so
+at a converged stationary point the entire noise band is floating point: 1e-15
+to 5e-14 in float64 (thread count 1 and 4 alike) and 1e-7 to 4e-7 in float32.
+The 1e-8 to 1.2e-5 band recorded earlier at the CO theta* is *not* floating
+point: it is the response to a residual orbital gradient, measured through the
+production CI kernel to scale as 0.1 to 2 times the energy change under the
+same rotation (eps = 1e-4 gives 1e-6 to 6e-5, eps = 1e-3 gives 4e-5 to 6e-4).
+The smallest physical gaps of the same blocks are 1.5e-2 (CO dm1), 7.5e-3 (CO
+Fock virtual), 3.3e-3 (N2 Fock core), 3.8e-4 (H2O dm1) and 1.0e-2 (OH dm1); a
+physical gap moves by at most 5e-14 under the gauge replicates.
+
+`core.eigh.cluster_tolerance` takes the band from the caller when it is
+measured (`noise_band=(lo, hi)`) and otherwise falls back to a relative prior
+(3e-5 of max|w|), marking the decision certified or not. It returns
+`separation_unverified` -- not a tolerance -- whenever the smallest gap above
+the band is less than 30 times the band, when the whole spectrum lies inside an
+uncertified band, or when a gap sits above the band but too close to it to be
+certified. The previous `'none'` branch, which differentiated such a gap with a
+bare 1/gap, is closed. `core.eigh.separation_certificate` classifies gaps by
+stability across independent constructions instead of by magnitude: a numerical
+split moves with the construction, a physical gap does not, so a physical gap
+*inside* the band -- invisible to any single spectrum -- is detected. The
+measured margin is wide (numerical gaps have value/spread <= 3, physical gaps
+>= 1e3). On the four systems the certificate accepts all ten blocks
+(tolerances 4e-9 to 1.1e-4 in float64/float32); the relative prior accepts 8 of
+10, rejecting the N2 Fock core block (3.3e-3 gap against a 4.7e-4 prior floor)
+and the H2O dm1 block (3.8e-4 against 5.9e-5). With production bands from the
+CI kernel, 4 of 4 degenerate blocks are accepted at eps = 1e-5 and 1e-4 and 3
+of 4 at eps = 1e-3. The H2O dm1 block is the measured two-scale overlap: its
+3.8e-4 gap is only 3.8 times a 1e-4 production band and inside a 1e-3 one,
+both of which return `separation_unverified`.
+
+`lowest_pair_auto` routes `separation_unverified` through the
+decomposition-free Lanczos kernel, but that kernel has a resolution limit of
+about ||A||/m^2: on a 5x5 matrix with gaps 3e-6 to 1e-2 it converged to the
+first excited state for 11 of 20 gauge draws, returning an energy off by the
+full gap. The helper therefore verifies the kernel's value against the dense
+lowest eigenvalue and degrades to the softened dense rule (`eigh_safe`) when the
+check fails, recording `fallback = 'lanczos'` or `'dense_safe'`. The Krylov
+refill was fixed in the process: a single deterministic refill vector could lie
+inside the span of the existing columns (orthogonalized norm 3.6e-17 on the CO
+dm1 block), leaving a zero column and an IFT correction of 2.55e6 against a
+lowest eigenvalue of 3.5e-3; four independent candidates are now tried and the
+largest-norm one kept. Still open: the separation carries no a priori
+guarantee, and the certificate is only as good as the replicate set -- a
+gauge-only set under-reports the band when the orbitals are not converged, so
+the driver must include the residual gradient (or supply a band derived from
+it); level crossings break the sorted-index alignment of replicate spectra; and
+a physical gap inside the band stays unresolvable whenever the replicate set
+cannot vary the noise independently of the physics. The rule is a decision
+helper, not a differentiable function. (Working tree on `master`, 2026-11-10;
+not committed.)
 
 *Stationary-point selection.* The CASSCF energy is non-convex in the orbital
 parameters; different starting points can reach different stationary points,
@@ -386,9 +435,43 @@ selection deterministic: it keeps the candidates that reached the gradient
 target, prefers certified minima, orders by energy, gradient norm, label and
 the canonical form of the parameters, and reports `minimum_degenerate`,
 `saddle_only` or `curvature_unverified` rather than calling a saddle a minimum.
-Generating the starting points and running the refinements remain the caller's
-job; a search strategy that guarantees the global minimum remains open. (Branch
-`wave14/eigensolver`, commit `99d0cfb`.)
+
+The candidate set now has a builder and a search.
+`core.stationary.cluster_stationary_points` groups refined candidates into
+distinct points by energy and an optional orbital test, counts the runs that
+reached each point, and reports the strict-stationarity flag and the
+certificate coverage. `core.stationary.basin_hopping_search` walks over
+starting points: a move proposes a start -- an orbital rotation, a geometry
+displacement or anything else the caller supplies -- the caller's refinement
+converges it, and the walker accepts it only when the point is stationary,
+carries a curvature report and passes the energy rule (greedy, or Metropolis
+at a caller-set temperature). Three stopping rules are decidable predicates:
+the step budget, the wall-clock budget, and a run of moves that produced no
+new stationary energy (the last fires only when every distinct point carries a
+curvature report, under `coverage_gate=True`). The novelty counter is an
+energy test on purpose: on N2/6-31G the eight converged starts gave one energy
+and six active-space orientations of the same solution, and an orbital test
+would have kept the walk alive on the degenerate manifold indefinitely. None
+of the rules, and no part of the search, proves that the lowest point found is
+the global minimum; the reported answer is the best certified point within the
+budget.
+
+Measured on four systems at 6-31G with the HOMO/LUMO CAS(2,2) and ten
+converged starts per spectrum (one reference, six random rotations, three
+perturbations): H2O has a three-negative-curvature saddle at -75.9848818 that
+the reference start reaches and a minimum at -76.0060407, 21.2 mEh lower, that
+seven of the nine random and perturbed starts reach; one large rotation
+reached a chart stationary point 1.146 Ha above the ground state, in which a
+virtual orbital occupies a core slot. The H2O minimum appears as two theta
+points with identical energy and orthogonal active spaces (overlap 0.010), and
+the H-exchange transformation maps one MO set onto the other to $5\times
+10^{-5}$, so the pair is one physical solution in a symmetry-broken chart, not
+two independent minima. CH2 has three minima at -38.8922837, -38.8312037 and
+-38.8229595, spanning 69.3 mEh. CO has a one-negative-curvature saddle at
+-112.6762235 that the reference start reaches and a minimum at -112.6933752,
+17.2 mEh lower. N2 has one energy level at -108.9036505 with six active-space
+orientations. The reference start therefore selects a saddle on H2O and CO,
+which is the failure the multistart protocol exists to catch.
 
 *Perturbation-layer convergence.* NEVPT2 depends on the orbitals more
 sensitively than the CASSCF energy does, so energy-based convergence criteria
@@ -398,15 +481,62 @@ CASSCF energy moves by 1.3e-9 Eh while the correction moves by 1.1e-5 Eh
 (ratio about 8300); the correction stabilizes to 1.9e-10 once the orbital
 gradient reaches 5e-7, the practical floor of the L-BFGS-B optimizer. Same
 system, independent starting points: the zero start lands on a theta-space
-saddle (Hessian minimum eigenvalue -1.6e-2) and a 21.2 mEh higher stationary
-point, whose correction differs by 18.7 mEh. The current practice is therefore
-a branch certificate: three or more independent starts that agree in energy to
+saddle (Hessian minimum eigenvalue -1.58e-2) and a 21.16 mEh higher stationary
+point, whose correction differs by 18.74 mEh. The earlier practice was a
+branch certificate: three or more independent starts that agree in energy to
 1e-8 with a positive-definite theta Hessian, followed on the selected branch
 by an orbital-gradient threshold together with a bound on the change of the
-correction between two independently converged orbital sets. The first-order
-bound `|H^-1 s| |g|` is recorded as a diagnostic only: on the saddle it has the
-wrong sign. A criterion that removes the branch dependence remains open.
-(Branch `wave14/caspt2-nevpt2`, commit `ea26401`.)
+correction between two independently converged orbital sets.
+
+`core.perturbation_convergence` replaces the fixed gradient threshold with a
+local criterion. At a point it forms the value-faithful Hessian `H` (central
+differences of the analytic gradient), the gradient `g` and the correction
+gradient `s`, splits the spectrum at `1e-3` into hard and flat modes, and
+certifies the correction only when four checks pass: no eigenvalue below the
+curvature floor (a saddle is rejected), no flat direction carries `e2` (finite
+probe at 0.1 rad), the first-order bound `|H_hard^-1 s_hard| |g_hard|` is
+within the requested tolerance, and two independently converged sets on the
+same branch agree within it. The gradient threshold is derived per point as
+`e2_tolerance / |H_hard^-1 s_hard|` (6.4e-6 on H2O/6-31G, 1.2e-5 on CH2) rather
+than fixed; the only physical constant is the requested accuracy, 1e-6 Eh. The
+curvature floor is the geometric mean of the measured Hessian noise (3.3e-5)
+and the smallest physical negative curvature (1.58e-2).
+
+The finite probe is what removes the failure mode a gradient threshold cannot
+see. On H2O two L-BFGS points at `|g| = 2.0e-6` and `2.4e-6` lie 7.7e-7 Eh above
+the refined minimum with a 4e-4 wavefunction overlap and
+corrections 5.0e-6 Eh away; their first-order bounds (3.1e-7) are inside the
+tolerance, so a gradient test accepts them, while the probe along the flat mode
+changes `e2` by 1.4e-6 and 1.2e-6 and rejects them. On OH/6-31G CAS(3,2) the
+CASSCF energy is exactly flat along four orbital directions (eigenvalues within
+3e-5 of zero) and the correction varies by 12 mEh across four starts with the
+same energy to 1e-12; all four are rejected, including the ROHF point, whose
+first-order coupling is 1e-12 but whose finite probe is 2.0e-3 Eh. On OH/6-31G
+CAS(5,4) the global minimum (`E = -75.3879770032 Eh`, the theta* of the
+relaxed-gradient work) carries three flat directions; its first-order coupling
+is 2.2e-6 and its finite probe is 1.0e-5, so it is certifiable at a target of
+1e-5 but not at 1e-6, and a second stationary point 0.82 mEh higher is a
+certified saddle (`lambda_min = -2.57e-3`) with a correction 0.95 mEh
+different. On CH2 the ladder from a random start reproduces the convergence
+transition with one conservative false reject: at `|g| = 2.1e-5` the measured
+drift is 1.9e-7 (inside the tolerance) while the worst-case bound is 1.7e-6,
+so the criterion demands a tighter gradient than that path needs.
+
+Branch dependence is reduced, not removed. The local criterion never refers to
+another stationary point; branch selection uses only the variational CASSCF
+energy, never the correction. Two certified minima can still carry corrections
+that differ by more than the tolerance:
+`core.perturbation_convergence.branch_spread` reports that spread as a number
+and flags a degenerate energy pair, so the residual branch dependence is
+stated rather than hidden. Measured spreads: H2O 0 (one certified minimum; a
+second theta point 6.2e-7 Eh higher with 4e-4 wavefunction overlap carries a
+4.0e-6 correction difference and is rejected as an uncertified minimum), CH2
+4.5e-12 across two certified orbital solutions (overlap 0.0125, degenerate in
+energy), OH CAS(3,2) and CAS(5,4) no certified point at 1e-6 (the CAS(5,4)
+minimum is flat-direction limited to 1e-5). The criterion is therefore
+"minimally branch-dependent": local convergence is branch-free, while the
+target branch remains a declared choice under the variational energy ordering.
+(Branch `wave14/caspt2-nevpt2`, commit `ea26401`; criterion 2026-11-10.)
 
 *Second-derivative cost.* The vectorized implicit route requires the orbital
 Hessian in memory, and its cost is set by the tangent broadcast rather than by
@@ -573,53 +703,141 @@ investigation 2026-11-09.)
 *ECP SOMF.* The valence-level ECP SOMF operator is a prototype, and no unique
 ECP SOMF definition exists: the split between the ECP spin-orbit operator and
 the explicit valence mean field is a fitting freedom that the ECP data alone do
-not fix. `core.somf_ecp` now exposes the decomposition family (ECPso-only, full
+not fix. `core.somf_ecp` exposes the decomposition family (ECPso-only, full
 valence, one-center, on-site-subtracted, point-charge and a double-counting
 upper view) in one convention, and `experiments/somf_ecp/compare_variants.py`
 implements a free-atom subtraction that removes the mean field the ECP already
-contains. On the YbF model window the free-atom-subtracted and full-valence
-values differ by about 10%, and the Ge+ 2P calibration leaves an absolute
-offset of about 12%; both percentages come from the legacy spin-summed
-transition-density assembly and are order-of-magnitude brackets only -- the
-row is pending a determinant-space recalculation, and the density-combination
-offset alone is 2.4-9.1% on GeF (see the script warnings). A unique definition and a
-double-counting correction remain open; it is not a production absolute-SOC
-method, so report the variant bracket and use the free-atom subtraction only
-with its atomic-reference caveat. (Branch `wave14/relativistic`, commits
-`dc2b836` and `193e546`.)
+contains. The variant table has been recalculated in the determinant space of
+`core.spinor_ci` (`experiments/somf_ecp/recalc_variants_determinant.py`,
+`results_ecp_somf_variants_determinant.json`), because the earlier numbers came
+from spin-summed transition densities and a two-root model space. The
+recalculation confirms the YbF and CeO rows, moves the GeF row by 2.4-9.7%,
+and voids the Ge+ calibration.
+
+The YbF model window is confirmed: full valence 861.47 cm^-1, free-atom
+subtracted 947.90, one-center 957.04, on-site subtracted 951.96, ECPso-only
+775.10 and the double-counting upper view 1464.22; the determinant-space values
+agree with the archived ones to 0.01%, so the 10.0% difference between the
+free-atom subtraction and the full valence is real. On CeO the same comparison
+gives 2253.25 against 2302.73 (2.2%). GeF moves: ECPso 1082.15, valence
+1103.71, free-atom subtracted 1105.01, nuclear 34.89 and double 1106.16, which
+are 2.4-9.7% below the archived numbers. At a fixed two-root model space the
+spin-summed assembly is 5.3% high for ECPso and 12.3% for the nuclear term;
+the two-root projection itself is 2.8% below the four-state term, so the net
+GeF shift is smaller than the same-subspace defect.
+
+The Ge+ 2P calibration is void. The archived 1562.14 cm^-1 came from two roots
+of a sixfold term, and the archived assembly over two-root subspaces is not a
+property of the term: in the eigensolver's own basis it returns either 0 or
+1562.13 cm^-1, and a rotation inside the degenerate term turns that into a
+continuum between 154 and 1089 cm^-1. The determinant-space term value is
+2252.91 cm^-1 against the observed 1767 cm^-1 (+27.5%), and the
+neutral Ge 3P term of the same ECP and basis gives 1785.52 cm^-1 against
+1409.96 (+26.6%) with the exact Lande 1:2 interval ratio. The offset is
+a property of the operator and the basis (Ge lanl2dz orbitals with a Stuttgart
+ECP), not of the state-interaction assembly, and the Ge+ anchor must not be
+quoted as a 12% calibration.
+
+A unique definition and a double-counting correction remain open. The spread
+across the physical variants (ECPso, valence, one-center, on-site subtracted,
+free-atom subtracted) is 0.08% on Ge+, 3.1% on GeF, 2.2% on CeO and 23.5% on
+YbF, so no single variant can be promoted. Report free-atom subtracted as the
+central value when an atomic reference exists, with the ECPso and valence
+endpoints as the bracket, and use the on-site subtraction as its approximation
+otherwise (0.03% on GeF, 0.4% on YbF); the point-charge model and the
+double-counting view are diagnostics, not definitions. (Branch
+`wave14/relativistic`, commits `dc2b836` and `193e546`; recalculation
+2026-11-10.)
 
 *SOMF derivatives and RI.* `core.somf_jax` provides a differentiable
 explicit-kernel path for the two-electron SOMF operator, including the SI
 assembly and a degeneracy-safe eigenvalue derivative; it is validated against
 finite differences on OH and OF. `core.somf_ri` provides a value-layer
-RI-SOMF(1X) prototype in which RI applies to the Coulomb term only and the
+RI-SOMF(1X) operator in which RI applies to the Coulomb term only and the
 exchange is one-center exact; on OH/OF/6-31G the RI error is
 0.0007/0.0010 cm^-1 against the four-center route, and RI-SOMF(1X) is within
-0.5 cm^-1 of the four-center SOMF. The RI factors have no derivative layer, so
-a differentiable RI-SOMF gradient remains open. (Branches `wave13/somf-diff` at
-`989e173` and `wave13/ri-somf` at `1a66c0f`.)
+0.5 cm^-1 of the four-center SOMF. `core.somf_ri_jax` makes that operator and
+the SI splitting differentiable in the reference density: an exact
+`custom_jvp` for the RI Coulomb contraction covers forward and reverse mode,
+`ri_coulomb_vjp` exposes the transposed map, and neither forms a `nao**4`
+tensor. The density response matches an independent factor-level contraction
+to 4e-15 on OH and OF; central differences agree to 5e-9 (density scale) and
+3e-8 (symmetric density direction) at a 1e-3 step. Against the four-center
+SOMF(1X) response the RI error is 8.6e-4/8.3e-4, or 2.5e-5 of the largest
+gradient component; the difference against the full four-center SOMF
+(7.8%/7.6%) is dominated by the one-center exchange truncation, not by RI.
+For a nuclear direction, `coulomb_ri_factor_derivs` reuses the `core.ri`
+three-center and metric derivatives and the `S^{-1/2}` Fréchet derivative for
+`db` and `djhalf`; libcint exposes no derivative of `int3c2e_pvxp1` (nor of
+`int2e_p1vxp1`), so `da` is a central difference and an analytic `da/dR`
+remains open. With that factor JVP the clamped-nucleus derivative of the
+splitting (P, C, es and D fixed) matches a five-point finite difference to
+2.5e-7 (OH) and 4.7e-8 (OF). (Uncommitted working tree, 2026-11-10; the
+branches `wave13/somf-diff` at `989e173` and `wave13/ri-somf` at `1a66c0f`
+carry the earlier layers.)
 
 *Two-component X2C.* The X2C-CASSCF chain is scalar (spin-free).
 `core.spinor_ci` adds a minimal complex determinant CI with frozen-core folding,
-a JAX value path and a Kramers-safe eigenvalue derivative; it reproduces pyscf
-FCI in the non-relativistic spin-orbital limit and the Kramers theorem on a
-synthetic time-reversal-invariant Hamiltonian. The physical X2C path remains
-open: the pyscf `int2e_spinor` array does not obey the chemist pair symmetry
-(measured violation 0.62 on H2O/6-31G), and the CI Hamiltonian built from it
-with the determinant-energy ordering does not commute with many-body time
-reversal on OH/6-31G. Kramers-restricted response, complex orbital rotations
-and ECP support remain unimplemented. (Branch `wave14/relativistic`, commits
-`dc2b836` and `193e546`.)
+a JAX value path and a Kramers-safe eigenvalue derivative; `core.kramers` adds
+the Kramers-adapted spinor basis and the physical value-layer entry point
+`x2c_spinor_ci`. The AO `int2e_spinor` array obeys the two identities of a
+complex chemist integral, `(ij|kl) = (kl|ij)` and `(ij|kl) = conj((ji|lk))`,
+to 7e-16 on H2O/6-31G and OH/6-31G; the earlier 0.62/0.233 residuals are
+values of the real-orbital relations `(ij|kl) = conj((ji|kl))` and the
+unconjugated eightfold exchange, which are not symmetries of a complex array
+(the 0.233 is reproduced on OH/6-31G; the 0.62 is the D pilot's MO-basis
+false-relation value). Symmetrizing
+with the true pair relation changes the array by 4e-16 and the frozen-core CI
+energy by 1e-13, so it is a no-op; imposing the false real-orbital relation
+shifts the H2O/6-31G CI energy by -2.7 Eh and must not be used.
 
-*RI SCF.* The RIJONX driver keeps exact exchange dense: the RI-J factors
-remove the Coulomb four-center work, not the exchange four-center work.
-Explicit analytic gradients now cover RHF, ROHF and UHF references (total
-density for RI-J and the core Hamiltonian, spin densities for exact exchange,
-spin-resolved energy-weighted density for the orbital response), checked
-against implicit differentiation and central differences on OH, OF and an ECP
-IO doublet. RI-JK and RIJCOSX remain out of scope, and the exact-exchange
-gradient is validation scale because it still forms the dense derivative
-tensors. (Branch `wave14/ri-hessian`, commit `5024db7`.)
+With a Kramers-adapted basis and complete core/active pairs, the physical
+frozen-core CI is time-reversal closed: on H2O/6-31G and OH/6-31G (two core
+pairs, four active pairs) `max |T H^* T^dag - H|` is 5.1e-13 and 5.7e-13,
+`T T^* = (-1)^N` holds to 7e-15, and the OH within-pair gap is 1.8e-13. The
+energy-ordered `argmax` pairing without adaptation is a negative control: on
+OH/6-31G it gives `T H^* T^dag - H` = 16.1 and a spurious 0.058 Eh Kramers
+gap. The GHF reference is not spin-constrained: the default core-Hamiltonian
+Aufbau guess can converge to a quartet-like OH solution (S^2 = 3.75,
+E = -75.312 Eh) instead of the pilot doublet-like solution (E = -75.246 Eh);
+the Kramers checks hold for either, but the spin state of the CI is inherited
+from the reference.
+
+The response layer remains open: there is no Kramers-restricted orbital
+rotation, no orbital Z-vector or state-specific response, and no ECP support.
+pyscf's `SpinorX2CHelper` rejects ECP molecules and no spinor ECP integral
+exists on this stack, so ECP + two-component X2C needs new integral kernels.
+No independent two-component FCI reference exists; the FCI comparison is the
+non-relativistic spin-orbital limit only. (Branch `wave14/relativistic`,
+commits `dc2b836` and `193e546`; Kramers basis in `2e834ec`; frozen-core
+exchange fix in `c8180ff`.)
+
+*RI SCF.* Two exchange routes share one driver. RIJONX keeps exact exchange
+dense: the RI-J factors remove the Coulomb four-center work, not the exchange
+four-center work; its explicit analytic gradients cover RHF, ROHF and UHF
+references (total density for RI-J and the core Hamiltonian, spin densities
+for exact exchange, spin-resolved energy-weighted density for the orbital
+response), checked against implicit differentiation and central differences on
+OH, OF and an ECP IO doublet, and remain validation scale because the
+derivative tensors are dense. RIJK (`ri_k=True`) replaces the exchange by the
+RI-K contraction `K = sum_P W_P D W_P` from the same three-center factors.
+The fixed-coefficient RI-K gradient needs only the `(3, nao, nao, naux)` factor
+derivatives and agrees with central differences to 3.6e-8 (closed shell) and
+1.4e-8 (spin-resolved); the SCF gradient adds the overlap term and agrees with
+central differences of the converged energy to 5.7e-7 Eh/Bohr on H2O and
+3.4e-8 on stretched OH. The RI-K contraction equals pyscf's DF-K at the same
+auxiliary basis to 1e-12; the remaining deviation from exact exchange is the
+fit of the auxiliary basis (4.8e-5 Eh on H2O/6-31G, 3.1e-5 on OH/6-31G with
+def2-universal-jkfit). On the gradient the working set drops from two dense
+`3 * nao**4` derivative tensors to `(3, nao, nao, naux)` factor derivatives:
+measured peak 4.22 GB for the dense gradient at `nao = 72` against 0.59 GB
+for RI-K, and 1.19 GB for RI-K at `nao = 96` where the dense route
+extrapolates past 13 GB. At
+`nao = 96` (`naux = 452`) the RI-K Fock build takes 0.31 s against 4.4 s for
+the dense exchange; the contraction itself is 0.06 s, next to pyscf's own
+DF-K at 0.05 s. RIJCOSX remains out of scope; see the cost assessment in the
+module docstring and the development report. (Branch `wave14/ri-hessian`,
+commit `5024db7`; RI-K added 2026-11-10.)
 
 ## Reproducing the paper
 
@@ -641,7 +859,7 @@ Scripts in `experiments/` correspond to the results section by section:
 | `somf_ecp/validate_ecp_somf.py` | valence-level SOMF operator for ECP calculations (GeF, YbF) |
 | `somf_ecp/validate_somf_grad.py` | SOMF gradient prototypes |
 | `df_x2c_casscf_validation.py` | scalar DF-X2C CASSCF energy and gradient validation |
-| `measure_ri_scf_driver.py` | RIJONX SCF driver comparison |
+| `measure_ri_scf_driver.py` | RIJONX and RIJK SCF driver comparison |
 
 Each script sets the thread environment variables internally and writes
 JSON to a `results/` directory. The scripts import `diffmrc` directly; make

@@ -378,3 +378,79 @@ def test_uhf_mixed_spin_density_is_mapped_spin_by_spin():
     j_ref = ri_scf.ri_j_fock(mol.to_pyscf(), dm[0] + dm[1])
     assert np.asarray(vj).shape == dm.shape
     assert np.abs(np.asarray(vj)[0] + np.asarray(vj)[1] - j_ref).max() < 1e-10
+
+
+# ---------------------------------------------------------------------------
+# RI-K exchange route (RIJK)
+# ---------------------------------------------------------------------------
+def test_rijk_scf_energy_matches_layer():
+    """The converged RIJK energy equals ``rijk_energy`` at its density."""
+    mol = _mol(H2O)
+    mf = drv.rijonx_scf(mol, ri_k=True)
+    assert mf.ri_k
+    nocc = mol.nelectron // 2
+    c = np.asarray(mf.mo_coeff)[:, :nocc]
+    e_fix = ri_scf.rijk_energy(mol.to_pyscf(), c)
+    assert abs(e_fix - mf.e_tot) < 1e-9
+
+
+def test_rijk_scf_energy_shift_is_fit():
+    """RIJK against RHF moves by the J+K fit; measured +1.05e-5 Ha on H2O."""
+    mol = _mol(H2O)
+    ref = _reference(mol)
+    mf = drv.rijonx_scf(mol, ri_k=True)
+    d = mf.e_tot - ref.e_tot
+    assert abs(d) < 2e-4, f'energy shift {d:.3e} Ha exceeds the fit scale'
+
+
+def test_rijk_does_not_form_dense_eri():
+    """The RI-K exchange branch leaves pyscfad's dense ERI cache empty."""
+    mol = _mol(H2O)
+    mf = drv.rijonx_scf(mol, ri_k=True)
+    dm = np.asarray(mf.make_rdm1())
+    mf._eri = None
+    mf.get_jk(mol, dm)
+    assert mf._eri is None
+
+
+def test_rijk_explicit_gradient_matches_implicit():
+    """The RI-K custom JVP reproduces the explicit SCF gradient.
+
+    The stretched geometry keeps the gradient away from the symmetry
+    zeros, so a missing exchange tangent would show as an O(1e-2)
+    deviation rather than a small one.
+    """
+    mol = _mol('O 0 0 0; H 0 0 2.30', spin=1)
+    mf = drv.rijonx_scf(mol, ri_k=True)
+    g_exp = drv.rijk_scf_gradient(mf)
+    g_imp = np.asarray(mf.energy_grad().coords, dtype=float)
+    assert np.abs(g_exp - g_imp).max() < 1e-6, (
+        f'explicit vs implicit {np.abs(g_exp - g_imp).max():.3e} Eh/Bohr')
+
+
+def test_rijk_closed_shell_gradient_matches_finite_difference():
+    """RIJK gradient against central differences of the converged energy."""
+    from pyscfad import gto
+    mol = _mol(H2O)
+    mf = drv.rijonx_scf(mol, ri_k=True)
+    g = drv.rijk_scf_gradient(mf)
+    step = 1.0e-3
+    coords = np.asarray(mol.atom_coords())
+    fd = np.zeros_like(g)
+    for atom in range(mol.natm):
+        for axis in range(3):
+            values = []
+            for sign in (1.0, -1.0):
+                shifted = coords.copy()
+                shifted[atom, axis] += sign * step
+                m = gto.Mole()
+                m.atom = [(mol.atom_pure_symbol(i), shifted[i])
+                          for i in range(mol.natm)]
+                m.basis = '6-31g'
+                m.unit = 'Bohr'
+                m.verbose = 0
+                m.build()
+                values.append(drv.rijonx_scf(m, ri_k=True).e_tot)
+            fd[atom, axis] = (values[0] - values[1]) / (2.0 * step)
+    assert np.abs(g - fd).max() < 1e-5, (
+        f'RIJK gradient vs FD {np.abs(g - fd).max():.3e} Eh/Bohr')

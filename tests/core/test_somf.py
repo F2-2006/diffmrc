@@ -73,6 +73,9 @@ def test_zero_density_gives_zero(water):
 
 def test_explicit_matches_direct_route(water):
     """AO-level matrix elements: explicit einsum versus pyscf direct_mapdm."""
+    pytest.importorskip('pyscf.prop.gtensor.uhf',
+                        reason='the direct route needs pyscf.prop, which '
+                               'some pyscf builds do not ship')
     mol, p = water
     h_exp = dsomf.somf_two_electron(mol, p, contract='explicit')
     h_dir = dsomf.somf_two_electron(mol, p, contract='direct')
@@ -83,6 +86,8 @@ def test_explicit_matches_direct_route(water):
 
 def test_explicit_matches_pyscf_somf_operator(water):
     """Independent assembly from pyscf's own gtensor SOMF contraction."""
+    pytest.importorskip('pyscf.prop.gtensor.uhf',
+                        reason='pyscf.prop is not part of every pyscf build')
     from pyscf.prop.gtensor.uhf import get_jk
     mol, p = water
     vj, vk = get_jk(mol, (0.5 * p, 0.5 * p))
@@ -92,6 +97,9 @@ def test_explicit_matches_pyscf_somf_operator(water):
 
 
 def test_auto_route_selects_explicit_for_small_system(water):
+    pytest.importorskip('pyscf.prop.gtensor.uhf',
+                        reason='the zero-budget branch takes the direct route, '
+                               'which needs pyscf.prop')
     mol, p = water
     h_auto = dsomf.somf_two_electron(mol, p, contract='auto')
     h_exp = dsomf.somf_two_electron(mol, p, contract='explicit')

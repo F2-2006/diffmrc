@@ -62,6 +62,7 @@ from dataclasses import dataclass
 
 import numpy as np
 
+from ..core.jit_cache import cached_jit
 from ..core.optimizer import (optimize_theta_hand, optimize_theta_scipy,
                               optimize_theta_trust_region)
 from ..core.stationary import (StopReason, StationaryPoint,
@@ -216,15 +217,20 @@ def hessp_of(E_theta):
     import jax
     from jax import numpy as jnp
 
-    g = jax.grad(E_theta)
+    def build(fn):
+        g = jax.grad(fn)
 
-    # The returned callable takes the optional runtime arrays after
-    # (x, v): hvp(x, v, *arrays), matching the optimizer convention.
-    @jax.jit
-    def hvp(x, v, *arr):
-        return jax.jvp(lambda t: g(t, *arr), (x,), (v,))[1]
+        # The returned callable takes the optional runtime arrays after
+        # (x, v): hvp(x, v, *arrays), matching the optimizer convention.
+        @jax.jit
+        def hvp(x, v, *arr):
+            return jax.jvp(lambda t: g(t, *arr), (x,), (v,))[1]
 
-    return hvp
+        return hvp
+
+    # A polish fires on every start the two stages could not settle, so the
+    # compiled form is cached on E_theta (core.jit_cache records why).
+    return cached_jit(E_theta, 'hvp', build)
 
 
 def _finite_difference_newton(E_theta, theta0, target, max_iter=20,
@@ -282,9 +288,8 @@ def _finite_difference_newton(E_theta, theta0, target, max_iter=20,
     if n > int(max_parameters):
         return None
 
-    E_jit = jax.jit(E_theta)
-    grad_plain = jax.grad(E_theta)
-    grad_jit = jax.jit(grad_plain)
+    E_jit = cached_jit(E_theta, 'energy', jax.jit)
+    grad_jit = cached_jit(E_theta, 'grad', lambda fn: jax.jit(jax.grad(fn)))
 
     def energy_at(t):
         return float(E_jit(jnp.asarray(t), *arrays))
@@ -374,8 +379,8 @@ def _trust_region_polish(E_theta, theta0, target, max_iter=200, arrays=()):
     import jax
     from jax import numpy as jnp
 
-    E_jit = jax.jit(E_theta)
-    g_jit = jax.jit(jax.grad(E_theta))
+    E_jit = cached_jit(E_theta, 'energy', jax.jit)
+    g_jit = cached_jit(E_theta, 'grad', lambda fn: jax.jit(jax.grad(fn)))
     hvp_jit = hessp_of(E_theta)
     x0 = np.asarray(theta0, dtype=float)
 
